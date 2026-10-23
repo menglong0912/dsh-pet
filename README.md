@@ -13,6 +13,137 @@
   <img alt="assets" src="https://img.shields.io/badge/assets-dynamic%20animations-ff69b4">
 </p>
 
+> **这是 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) 的 fork。** 默认分支 `custom` 把桌宠做成了**不依赖 DSH 的 macOS 独立应用**，并加了看屏幕吐槽、番茄钟、久坐 / 喝水提醒、Claude Code 联动等功能；`main` 分支与上游保持一致，方便同步上游。
+> 下面先介绍本 fork 新增的内容，「快速开始」之后是上游原文。
+
+## 🍎 独立 macOS 应用（本 fork 新增）
+
+双击就能跑的 `dsh-pet.app`：不用装 DSH，只在菜单栏有图标（不占 Dock），菜单栏里可以勾「开机自启」。目前只在 macOS（Apple Silicon）上实测过。
+
+### 新增功能
+
+| 功能             | 说明                                                                                                                                                                                                                                                                                         |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 看屏幕吐槽       | 右键「看看我在干嘛」随时看一眼，也可以定时自动看。截图**只发给本机模型**（接口必须是 `127.0.0.1` / `localhost` 的 OpenAI 兼容地址），不会发到云端。先按屏幕内容说一句，再按这句话从表情包池里挑一张配图，挑不出就随机。首次使用要在「系统设置 → 隐私与安全性 → 屏幕录制」里给 dsh-pet 授权。 |
+| 和碎碎念不打架   | 开着自动碎碎念时，看屏幕到点的那一拍会顶替那一句碎碎念；桌宠刚说完话，碎碎念会让一让，两种气泡不互相覆盖。                                                                                                                                                                                   |
+| 知道你在干嘛     | 碎碎念和提醒会结合「正在用哪个应用、连续用了多久、离开了多久」；离开一阵子回来会打招呼。                                                                                                                                                                                                     |
+| 番茄钟           | 右键「开始番茄钟」，头顶显示剩余时间；专注期间不自动看屏幕，也不提醒久坐、喝水。                                                                                                                                                                                                             |
+| 久坐 / 喝水提醒  | 按连续使用时间提醒起来活动，按在电脑前的时间提醒喝水；离开电脑 5 分钟以上算起身。                                                                                                                                                                                                            |
+| Claude Code 联动 | Claude 等你确认权限时提醒你；一轮活干了 30 秒以上、干完时叫你去看。开工时不打扰。                                                                                                                                                                                                            |
+| 设置页           | 右键「打开网站」：AI 接口（OpenAI 兼容 / Anthropic）、自动碎碎念，以及「陪伴与提醒」（看屏幕间隔、番茄钟时长、久坐 / 喝水 / 回来打招呼），保存即生效。                                                                                                                                       |
+| 命令行           | `dsh-pet say / whisper / look / activity / hook`，可以接进脚本或别的工具。                                                                                                                                                                                                                   |
+
+### 构建与安装
+
+需要 Node ≥ 22.12 和 pnpm。
+
+```sh
+git clone https://github.com/yangfan000818-droid/dsh-pet.git
+cd dsh-pet/dsh-pet            # 包在子目录里
+pnpm install
+npm run ensure:electron       # 下载 Electron 43 到 ~/.dsh/electron（只需一次）
+npm run build
+npm run dist                  # 产物：dist-app/mac-arm64/dsh-pet.app
+ditto dist-app/mac-arm64/dsh-pet.app /Applications/dsh-pet.app
+open /Applications/dsh-pet.app
+```
+
+- 应用是 ad-hoc 签名（没有开发者证书）。自己构建的可以直接打开；别人构建好发给你的，先运行 `xattr -dr com.apple.quarantine /Applications/dsh-pet.app` 再打开。
+- 签名只认 bundle id，重新构建后「屏幕录制」授权不用重新给。
+- 开发调试可以不打包直接跑：`npm run build && npm run start:app`（从终端启动时，屏幕录制权限算在终端头上）。
+- 数据都在 `~/Library/Application Support/dsh-pet/dsh-pet/`（宠物配置、记忆、AI 设置、`app-config.json`），日志在 `~/Library/Logs/dsh-pet/app.log`。
+
+### 接上模型
+
+右键宠物 →「打开网站」进入本机设置页，填接口地址、模型名和密钥后「测试连接」。
+
+- **碎碎念、对话**：OpenAI 兼容或 Anthropic 接口都可以，云端、本机都行。
+- **看屏幕**：必须是本机的、支持图片输入的模型。例如用 llama.cpp 跑一个视觉模型：
+
+  ```sh
+  llama-server -m <模型>.gguf --mmproj <mmproj>.gguf --jinja --host 127.0.0.1 --port 18080
+  ```
+
+  接口地址填 `http://127.0.0.1:18080/v1`。Qwen 这类会「思考」的模型记得勾上「关闭模型思考」，否则思考会占满输出、回复为空。
+
+### 命令行与 Claude Code
+
+```sh
+mkdir -p ~/.local/bin
+ln -s /Applications/dsh-pet.app/Contents/Resources/pet-cli.mjs ~/.local/bin/dsh-pet   # 需要 node 在 PATH 里
+dsh-pet say 你好      # 让桌宠说一句
+dsh-pet whisper       # 按人设碎碎念一句
+dsh-pet look          # 看一眼屏幕吐槽
+```
+
+在 `~/.claude/settings.json` 的 `hooks` 里加上下面四个事件（已有 hooks 就合并进去），桌宠就能跟着 Claude Code 提醒你。hook 只读事件名、会话 id 和项目目录，不读你发的内容；桌宠没开时静默跳过，不会卡住 Claude Code。
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/dsh-pet hook",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/dsh-pet hook",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/dsh-pet hook",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/dsh-pet hook",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 同步上游
+
+```sh
+git remote add upstream https://github.com/PC2005-cloud/dsh-pet.git
+git fetch upstream
+git checkout main && git merge --ff-only upstream/main
+git checkout custom && git merge main
+```
+
+---
+
 一只住在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里的桌面宠物：待机呼吸、随机动作（打瞌睡、玩魔方、吃火锅……）、左右转向、屏幕漫游、点击 Q 弹、拖拽甩抛反弹、右键菜单点播——一百余个透明动画随时无缝衔接；还能跟随 DSH 会话事件切换工作状态动画、按档位播放余额动画 + 头顶气泡、碎碎念与对话聊天、窗口失焦时弹系统通知。可多开同屏，能脱离浏览器住上**桌面**（透明置顶小窗），也能自己添加**全新宠物种类**（pet pack）。
 
 这不是一个普通插件，而是**完整的三件套项目**：
