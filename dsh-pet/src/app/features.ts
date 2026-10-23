@@ -9,8 +9,8 @@
  *   - 把一天里的事记进宠物日记（diary.ts），第二天回到电脑前时补写前一天的日记；
  *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口）：设置里开了才发信标、开接待端口；
  *     出门时自家宠物变半透明，客人来了在自家宠物旁边开个小窗；串门的台词只按人设生成，不带「主人此刻」；
- *   - 右键菜单根上注册「看看我在干嘛 / 开始·停止番茄钟 / 宠物日记」与串门的应答项，
- *     「更多 → 串门」里列附近的邻居，各自长轮询点击。
+ *   - 右键菜单根上注册「看看我在干嘛 / 开始·停止番茄钟 / 宠物日记」与串门的项（「串门」子菜单列附近的邻居，
+ *     有人敲门时的应答项、送客 / 回家项），并长轮询点击。
  *
  * 驱动桌宠一律走插件自己的 HTTP 路由（/broadcast、/work-status、/menu/*），与第三方调用者同一契约，
  * 不碰插件内部状态——以后合并上游时这里不受插件内部重构影响。
@@ -51,8 +51,10 @@ export const MENU_OWNER = 'dsh-pet-app';
 const MENU_LOOK = '看看我在干嘛';
 const MENU_POMODORO_START = '开始番茄钟';
 const MENU_DIARY = '宠物日记';
-/** 「更多」里列邻居的那组菜单项的 owner（也是分组名） */
-const MENU_VISIT_OWNER = '串门';
+/** 「串门」子菜单：label 带这个前缀加「/」的项，helper 收成根菜单上的一个子菜单（shared/menu 的 buildAppMenuNodes） */
+const MENU_VISIT_GROUP = '串门';
+/** 插件每个 owner 最多 20 项：根上固定 3 项 + 串门应答最多 2 项，邻居最多列这么多 */
+const MENU_NEIGHBORS_MAX = 15;
 /** 做客时最多聊几句、两句之间隔多久 */
 const TRIP_ROUNDS = 4;
 const TALK_GAP_MS = 60_000;
@@ -192,8 +194,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   /** 来自家做客的客人的窗口与进门时间 */
   let guestWindow: GuestWindow | null = null;
   let guestSince = 0;
-  /** 「更多 → 串门」里的项：label → 邻居 id */
-  let neighborMenu = new Map<string, string>();
   /** 自家宠物在哪（客人站它旁边） */
   const homePet = watchHomePet(electron);
 
@@ -513,7 +513,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     await syncVisit();
     await refreshStatus(now);
     await refreshMenu(now);
-    await refreshNeighborMenu();
   }
 
   /**
@@ -777,7 +776,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       log(`串门：${visitor.owner}（${visitor.address}）家的 ${visitor.pet} 来敲门`);
       void say(`${visitor.owner} 家的 ${visitor.pet} 来敲门啦，右键点「让 ${visitor.pet} 进来」请它进门～`);
       void refreshMenu(Date.now());
-      void refreshNeighborMenu();
     },
     knockEnded(visitor, reason) {
       log(`串门：${visitor.owner} 家的 ${visitor.pet} ${reason === 'gone' ? '不等了' : '敲门没等到答复'}`);
@@ -840,11 +838,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     void refreshMenu(Date.now());
   }
 
-  /** 串门相关的右键项（随状态变）：label → 点了做什么 */
+  /**
+   * 串门相关的右键项（随状态变）：label → 点了做什么。
+   * 有人敲门、家里有客、自己在外时放对应的应答项；都没有、又允许出门时放「串门」子菜单列附近的邻居
+   * （敲门等答复期间不列，免得一边敲门一边又出门）。
+   */
   function visitActions(): Map<string, () => unknown> {
     const actions = new Map<string, () => unknown>();
     const knocking = visitHost?.knocking();
     const guest = visitHost?.guest();
+    const { enabled, visiting } = deps.appConfig().visit;
     if (knocking) {
       actions.set(`让 ${knocking.pet} 进来`, () => letIn(true));
       actions.set(`不让 ${knocking.pet} 进来`, () => letIn(false));
@@ -852,6 +855,19 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       actions.set(`请 ${guest.pet} 回家`, sendGuestHome);
     } else if (trip) {
       actions.set(`从 ${trip.host.owner} 家回来`, () => comeHome('called'));
+    } else if (enabled && visiting && knockingOn === null) {
+      const neighbors = (neighborhood?.list() ?? []).slice(0, MENU_NEIGHBORS_MAX);
+      for (const neighbor of neighbors) {
+        let label = `${MENU_VISIT_GROUP}/去 ${neighbor.owner} 家`;
+        for (let n = 2; actions.has(label); n += 1) label = `${MENU_VISIT_GROUP}/去 ${neighbor.owner} 家（${n}）`;
+        actions.set(label, () => goVisit(neighbor.id));
+      }
+      // 没有邻居也留个入口：不然开了串门，右键里一点痕迹都没有
+      if (neighbors.length === 0) {
+        actions.set(`${MENU_VISIT_GROUP}/附近还没有邻居`, () =>
+          say('附近还没发现开着串门的桌宠～同一网络里的同事也打开串门就能看到啦'),
+        );
+      }
     }
     return actions;
   }
@@ -865,7 +881,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
     if (trip || knockingOn || visitHost?.guest() || visitHost?.knocking() || !deps.appConfig().visit.visiting) return;
     knockingOn = neighbor;
-    void refreshNeighborMenu();
+    void refreshMenu(Date.now());
     void say(`我去 ${neighbor.owner} 家敲门啦～`);
     let answer: KnockAnswer | null;
     try {
@@ -1027,58 +1043,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return [MENU_LOOK, pomodoroLabel, MENU_DIARY, ...visitActions().keys()];
   }
 
-  /** @returns 注册上了 */
-  async function refreshMenu(now: number, force = false): Promise<boolean> {
+  async function refreshMenu(now: number, force = false): Promise<void> {
     const labels = wantedLabels(now);
-    if (!force && labels.join('\n') === menuLabels.join('\n')) return true;
+    if (!force && labels.join('\n') === menuLabels.join('\n')) return;
     try {
       const result = await petRequest('POST', '/menu/item', { owner: MENU_OWNER, labels });
       if (result.ok === true) menuLabels = labels;
       else log(`注册菜单失败：${JSON.stringify(result)}`);
-      return result.ok === true;
     } catch (error) {
       log(`注册菜单失败：${errorText(error)}`);
-      return false;
     }
-  }
-
-  /**
-   * 「更多 → 串门」：附近的邻居（只有一位时插件直接平铺成「更多 → 去 X 家」）。
-   * 自己在外、正在敲门、家里有客或有人敲门时不列，免得一边做客一边又出门。
-   * @returns 这组项现在注册着（没有邻居时整组删掉）
-   */
-  async function refreshNeighborMenu(force = false): Promise<boolean> {
-    const free =
-      deps.appConfig().visit.visiting &&
-      trip === null &&
-      knockingOn === null &&
-      !visitHost?.guest() &&
-      !visitHost?.knocking();
-    const next = new Map<string, string>();
-    for (const neighbor of free ? (neighborhood?.list() ?? []) : []) {
-      if (next.size >= 20) break; // 插件每组最多 20 项
-      let label = `去 ${neighbor.owner} 家`;
-      for (let n = 2; next.has(label); n += 1) label = `去 ${neighbor.owner} 家（${n}）`;
-      next.set(label, neighbor.id);
-    }
-    const labels = [...next.keys()];
-    // 本来就没注册、现在也没有可列的：什么都不发（删除也会唤醒渲染端的 /state 长轮询，别每拍删一次）
-    if (labels.length === 0 && neighborMenu.size === 0) return false;
-    if (!force && labels.join('\n') === [...neighborMenu.keys()].join('\n')) {
-      neighborMenu = next; // 文案没变也换上新的 id：邻居重启过应用 id 会变
-      return labels.length > 0;
-    }
-    try {
-      const result =
-        labels.length > 0
-          ? await petRequest('POST', '/menu/item', { owner: MENU_VISIT_OWNER, labels })
-          : await petRequest('DELETE', `/menu/item?owner=${encodeURIComponent(MENU_VISIT_OWNER)}`);
-      if (result.ok === true) neighborMenu = next;
-      else log(`注册串门菜单失败：${JSON.stringify(result)}`);
-    } catch (error) {
-      log(`注册串门菜单失败：${errorText(error)}`);
-    }
-    return neighborMenu.size > 0;
   }
 
   async function onMenuClick(label: string): Promise<void> {
@@ -1093,30 +1067,21 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     } else if (label === MENU_DIARY) {
       await openDiary(now);
     } else {
-      await visitActions().get(label)?.();
+      const action = visitActions().get(label);
+      if (action) await action();
+      // 菜单弹出后邻居走了
+      else if (label.startsWith(`${MENU_VISIT_GROUP}/去 `)) await say('它好像已经不在附近了～');
     }
     await refreshStatus(now);
     await refreshMenu(now);
   }
 
-  async function onNeighborClick(label: string): Promise<void> {
-    const id = neighborMenu.get(label);
-    if (id) await goVisit(id);
-  }
-
-  /**
-   * 长轮询某个 owner 的菜单点击（插件单次最多挂 10 秒）
-   * @param register owner 没注册（宿主重启过 / 被清掉 / 本来就没项）时重新注册，返回注册上了没有
-   */
-  async function pollMenu(
-    owner: string,
-    onClick: (label: string) => Promise<void>,
-    register: () => Promise<boolean>,
-  ): Promise<void> {
+  /** 长轮询菜单点击（插件单次最多挂 10 秒） */
+  async function pollMenu(): Promise<void> {
     while (!disposed) {
       try {
         const url = new URL(deps.petBase + '/menu/events');
-        url.searchParams.set('owner', owner);
+        url.searchParams.set('owner', MENU_OWNER);
         url.searchParams.set('wait', '10000');
         const result = (await (await fetch(url, { signal: AbortSignal.timeout(15_000) })).json()) as {
           ok?: boolean;
@@ -1124,11 +1089,13 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
           events?: Record<string, string | null>;
         };
         if (result.ok !== true) {
-          if (result.reason !== 'unknown-owner' || !(await register())) await delay(5_000);
+          // 宿主重启过 / 被清掉：重新注册
+          if (result.reason === 'unknown-owner') await refreshMenu(Date.now(), true);
+          else await delay(5_000);
           continue;
         }
         for (const [label, pet] of Object.entries(result.events ?? {})) {
-          if (pet !== null) await onClick(label);
+          if (pet !== null) await onMenuClick(label);
         }
       } catch (error) {
         log(`菜单轮询失败：${errorText(error)}`);
@@ -1137,8 +1104,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
   }
 
-  void refreshMenu(Date.now(), true).then(() => pollMenu(MENU_OWNER, onMenuClick, () => refreshMenu(Date.now(), true)));
-  void pollMenu(MENU_VISIT_OWNER, onNeighborClick, () => refreshNeighborMenu(true));
+  void refreshMenu(Date.now(), true).then(() => pollMenu());
   void tick()
     .catch((error: unknown) => log(`采样失败：${errorText(error)}`))
     .finally(schedule);

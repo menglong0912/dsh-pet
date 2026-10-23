@@ -46,7 +46,7 @@ const schema = z
         enabled: z.boolean(),
         /** 允许别人来做客：发信标、开接待端口（每次进门仍要主人点头） */
         hosting: z.boolean(),
-        /** 允许自家宠物出门：右键「更多 → 串门」列出附近的邻居 */
+        /** 允许自家宠物出门：右键「串门」子菜单列出附近的邻居 */
         visiting: z.boolean(),
         /** 串门时用模型聊天；关掉只说固定的招呼和道别 */
         chat: z.boolean(),

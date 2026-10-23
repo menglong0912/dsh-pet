@@ -54,7 +54,7 @@ export const settingsPage = `<!doctype html>
 <label class="check"><input id="visitHosting" type="checkbox" aria-describedby="hosting-note">允许别人来我家做客</label>
 <p id="hosting-note" class="hint">关掉后别人在局域网里看不到你；开着时每次进门也要你在右键菜单里点「让它进来」。</p>
 <label class="check"><input id="visitVisiting" type="checkbox" aria-describedby="visiting-note">允许我的宠物出门做客</label>
-<p id="visiting-note" class="hint">右键「更多 → 串门」里列出附近的邻居，点了去敲门。</p>
+<p id="visiting-note" class="hint">右键「串门」里列出附近的邻居，点了去敲门；附近还没有别的桌宠时显示「附近还没有邻居」。</p>
 <label class="check"><input id="visitChat" type="checkbox" aria-describedby="chat-note">串门时用模型聊天</label>
 <p id="chat-note" class="hint">两只宠物各用自己的人设和模型聊几句；关掉后只说固定的招呼和道别，不调用模型。</p>
 <div class="pair"><div><label for="visitNickname">邻居看到的昵称</label><input id="visitNickname" type="text" maxlength="12" placeholder="留空用电脑登录名" spellcheck="false"></div>

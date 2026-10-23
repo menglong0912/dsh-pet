@@ -1700,10 +1700,10 @@ class PetSprite {
     // 某个 owner 只有 1 项时跳过 owner 那层直接平铺（规则见 shared/menu 的 buildMoreBranch）。
     // 放在整棵动作树之后——「更多」是"别的东西"，不插在工具项和动作之间。
     // 例外：独立应用自己的功能项（APP_MENU_OWNER）不是第三方，直接排在「对话」后面，
-    // 免得「更多 → 分组 → 项」点三层
-    const appLeaves = this.menuItems
-      .filter((item) => APP_MENU_OWNER && item.owner === APP_MENU_OWNER)
-      .map((item) => ({ label: item.label, action: 'third-party', owner: item.owner }));
+    // 免得「更多 → 分组 → 项」点三层；label 带「/」的收成根上的子菜单（如「串门 → 去 小王 家」）
+    const appLeaves = S.buildAppMenuNodes(
+      this.menuItems.filter((item) => APP_MENU_OWNER && item.owner === APP_MENU_OWNER),
+    );
     tools.splice(tools.findIndex((leaf) => leaf.action === 'chat') + 1, 0, ...appLeaves);
     const more = S.buildMoreBranch(this.menuItems.filter((item) => !APP_MENU_OWNER || item.owner !== APP_MENU_OWNER));
     const tree = tools.concat(S.buildMenuTree(this.animations), more ? [more] : []);
@@ -1739,8 +1739,10 @@ class PetSprite {
     if (leaf.action === 'third-party') {
       // 第三方菜单项：只把 (owner, label) 交给宿主，具体做什么由注册方自己去查 /menu/events。
       // 带上本窗口的宠物 id——同一条菜单项在不同宠物上被点，注册方要能分辨是哪只。
+      // 应用分组里的项显示短名，回传注册时的完整 label（reportLabel，见 shared/menu 的 buildAppMenuNodes）
       if (leaf.owner) {
-        S.postAction(BASE + '/menu/click', { owner: leaf.owner, label: leaf.label, pet: this.pet.id }).catch(() => {
+        const label = leaf.reportLabel || leaf.label;
+        S.postAction(BASE + '/menu/click', { owner: leaf.owner, label, pet: this.pet.id }).catch(() => {
           /* 上报失败不影响本地：注册方下次轮询自然拿不到这次触发 */
         });
       }

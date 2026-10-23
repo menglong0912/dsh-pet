@@ -43,6 +43,9 @@ export interface MenuLeaf {
   /** third-party：注册它的 owner（身份键，**只用于回传，不显示**）。同一个 owner 的项收在同一个
    *  分组下；只有一项时跳过这层、直接平铺（见 buildMoreBranch）。 */
   owner?: string;
+  /** third-party：回传给注册方的 label（缺省 = label）。独立应用分组项显示的是去掉前缀的短名，
+   *  回传仍用注册时的完整 label（见 buildAppMenuNodes）。 */
+  reportLabel?: string;
   /** 项目右侧的灰色小字（如快捷键「Ctrl+左键」）：纯视觉提示，不参与显示文本匹配，也不影响
    *  动作分发。缺省不占位（不显示任何东西）。 */
   hint?: string;
@@ -142,6 +145,35 @@ export function buildMoreBranch(items: readonly MenuMoreItem[]): MenuBranch | nu
     }
   }
   return children.length > 0 ? { label: MORE_MENU_LABEL, children } : null;
+}
+
+/**
+ * 独立应用自己的菜单项（APP_MENU_OWNER，不是第三方，直接放根菜单）：label 带「/」的按前缀收成一个子菜单，
+ * 如「串门/去 小王 家」「串门/去 小李 家」→ 根上一个「串门」分支、里面两项；点了仍按完整 label 回传。
+ * 只认第一个「/」；前缀为空的当普通项。分支出现在它第一项的位置，组内保持注册顺序。
+ */
+export function buildAppMenuNodes(items: readonly MenuMoreItem[]): MenuNode[] {
+  const nodes: MenuNode[] = [];
+  for (const item of items) {
+    const slash = item.label.indexOf('/');
+    if (slash <= 0) {
+      nodes.push({ label: item.label, action: 'third-party', owner: item.owner });
+      continue;
+    }
+    const group = item.label.slice(0, slash);
+    let branch = nodes.find((node): node is MenuBranch => 'children' in node && node.label === group);
+    if (!branch) {
+      branch = { label: group, children: [] };
+      nodes.push(branch);
+    }
+    branch.children.push({
+      label: item.label.slice(slash + 1),
+      action: 'third-party',
+      owner: item.owner,
+      reportLabel: item.label,
+    });
+  }
+  return nodes;
 }
 
 /** 事件名 → 分类标签（无映射时用事件名本身） */
