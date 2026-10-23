@@ -1673,7 +1673,13 @@ class PetSprite {
     // 第三方菜单项统一收在「更多」下（与浏览器端同一份拼装函数）：0 项不出现；
     // 某个 owner 只有 1 项时跳过 owner 那层直接平铺（规则见 shared/menu 的 buildMoreBranch）。
     // 放在整棵动作树之后——「更多」是"别的东西"，不插在工具项和动作之间。
-    const more = S.buildMoreBranch(this.menuItems);
+    // 例外：独立应用自己的功能项（APP_MENU_OWNER）不是第三方，直接排在「对话」后面，
+    // 免得「更多 → 分组 → 项」点三层
+    const appLeaves = this.menuItems
+      .filter((item) => APP_MENU_OWNER && item.owner === APP_MENU_OWNER)
+      .map((item) => ({ label: item.label, action: 'third-party', owner: item.owner }));
+    tools.splice(tools.findIndex((leaf) => leaf.action === 'chat') + 1, 0, ...appLeaves);
+    const more = S.buildMoreBranch(this.menuItems.filter((item) => !APP_MENU_OWNER || item.owner !== APP_MENU_OWNER));
     const tree = tools.concat(S.buildMenuTree(this.animations), more ? [more] : []);
     if (!tree.length) return;
     this.menuOpen = true;

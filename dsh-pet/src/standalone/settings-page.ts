@@ -26,6 +26,22 @@ export const settingsPage = `<!doctype html>
 <div><label for="maxTokens">单次输出上限（tokens）</label><input id="maxTokens" type="number" min="128" max="4096" step="1" value="1024" required></div></div>
 <p class="hint">间隔至少 60 秒，默认 300 秒。输出上限越小，单次回复越简短。</p>
 </fieldset>
+<fieldset id="app-settings" hidden><legend>陪伴与提醒</legend>
+<label class="check"><input id="screenEnabled" type="checkbox" aria-describedby="screen-note">定时看屏幕吐槽</label>
+<p id="screen-note" class="hint">只在上面的接口是本机地址（127.0.0.1 / localhost）时生效，截图只发给本机模型；专注番茄钟期间、离开电脑或一分钟没碰键鼠时不看。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
+<label for="screenIntervalMin">看屏幕间隔（分钟）</label><input id="screenIntervalMin" type="number" min="3" max="1440" step="1" value="15">
+<div class="pair"><div><label for="focusMin">番茄钟专注（分钟）</label><input id="focusMin" type="number" min="1" max="180" step="1" value="25"></div>
+<div><label for="breakMin">番茄钟休息（分钟）</label><input id="breakMin" type="number" min="1" max="60" step="1" value="5"></div></div>
+<p class="hint">番茄钟从右键「开始番茄钟」开始；改时长从下一段专注或休息起生效。</p>
+<label class="check"><input id="sittingEnabled" type="checkbox" aria-describedby="sitting-note">久坐提醒</label>
+<div class="pair"><div><label for="sittingAfterMin">连续坐多久提醒（分钟）</label><input id="sittingAfterMin" type="number" min="5" max="600" step="1" value="50"></div>
+<div><label for="sittingRepeatMin">还没起身，每隔（分钟）</label><input id="sittingRepeatMin" type="number" min="5" max="600" step="1" value="20"></div></div>
+<p id="sitting-note" class="hint">离开电脑 5 分钟以上算起身，重新计时；专注番茄钟期间不打扰。</p>
+<label class="check"><input id="waterEnabled" type="checkbox" aria-describedby="water-note">喝水提醒</label>
+<label for="waterEveryMin">喝水间隔（分钟）</label><input id="waterEveryMin" type="number" min="10" max="600" step="1" value="60">
+<p id="water-note" class="hint">只累计在电脑前的时间，提醒一次后重新计时。</p>
+<label for="greetAfterAwayMin">离开多久、回来时打招呼（分钟）</label><input id="greetAfterAwayMin" type="number" min="1" max="1440" step="1" value="10">
+</fieldset>
 <footer><p id="privacy">所有配置与密钥仅保存在当前机器。<br>关闭 AI 后，桌宠仍可正常显示、移动与互动。</p><button id="save" type="submit" disabled>保存到本机</button></footer>
 <p id="status" role="status" aria-live="polite">正在读取本机设置…</p>
 </form><noscript>需要启用 JavaScript 才能保存设置。请从桌宠菜单打开本页。</noscript></main></body></html>`;
@@ -64,6 +80,32 @@ export const settingsScript = `
     }
     return response.json();
   }
+  // 「陪伴与提醒」只有独立应用有（/standalone-ai/app-settings）；CLI 里是 404，这一节保持隐藏
+  const appSection = get('app-settings');
+  let appAvailable = false;
+  async function appRequest(method, body) {
+    const response = await fetch('/standalone-ai/app-settings', {
+      method, credentials: 'omit', cache: 'no-store', redirect: 'error',
+      headers: { 'X-DSH-Pet-Token': token, ...(body ? {'Content-Type': 'application/json'} : {}) },
+      ...(body ? {body: JSON.stringify(body)} : {})
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(body ? '陪伴与提醒设置未保存，请检查数值范围。' : '陪伴与提醒设置读取失败。');
+    return response.json();
+  }
+  function populateApp(data) {
+    get('screenEnabled').checked = data.screen.enabled === true;
+    get('screenIntervalMin').value = String(data.screen.intervalMin);
+    get('focusMin').value = String(data.pomodoro.focusMin);
+    get('breakMin').value = String(data.pomodoro.breakMin);
+    get('sittingEnabled').checked = data.sitting.enabled === true;
+    get('sittingAfterMin').value = String(data.sitting.afterMin);
+    get('sittingRepeatMin').value = String(data.sitting.repeatMin);
+    get('waterEnabled').checked = data.water.enabled === true;
+    get('waterEveryMin').value = String(data.water.everyMin);
+    get('greetAfterAwayMin').value = String(data.greetAfterAwayMin);
+  }
+  const num = id => Number(get(id).value);
   function populate(data) {
     for (const id of ['protocol','baseUrl','model','whisperIntervalSec','maxTokens']) {
       if (data[id] !== undefined) get(id).value = String(data[id]);
@@ -142,12 +184,23 @@ export const settingsScript = `
     try {
       populate(await request('POST', input));
       get('apiKey').disabled = false;
+      if (appAvailable) {
+        populateApp(await appRequest('POST', {
+          greetAfterAwayMin: num('greetAfterAwayMin'),
+          screen: { enabled: get('screenEnabled').checked, intervalMin: num('screenIntervalMin') },
+          pomodoro: { focusMin: num('focusMin'), breakMin: num('breakMin') },
+          sitting: { enabled: get('sittingEnabled').checked, afterMin: num('sittingAfterMin'), repeatMin: num('sittingRepeatMin') },
+          water: { enabled: get('waterEnabled').checked, everyMin: num('waterEveryMin') }
+        }));
+      }
       message('已保存到本机。');
     } catch (error) { message(error.message, true); }
     finally { save.disabled = false; }
   });
   if (!token) { message('请从桌宠菜单或本机启动器打开设置，以获得本次运行的访问凭据。', true); return; }
   request('GET').then(data => { populate(data); save.disabled = false; message('设置只在本机保存。'); })
+    .catch(error => message(error.message, true));
+  appRequest('GET').then(data => { if (data) { populateApp(data); appSection.hidden = false; appAvailable = true; } })
     .catch(error => message(error.message, true));
 })();
 `;

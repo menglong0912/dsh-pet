@@ -549,6 +549,8 @@ function createPetWindows() {
           bridge: BRIDGE ? '1' : '0',
           // 工具项「打开网站」的文案按宿主形态自动变（见 sprite.js）：desktop=唤起桌面应用 / site=打开站点
           openTarget: OPEN_TARGET,
+          // 独立应用自己注册菜单项用的 owner（见 sprite.js：这组项放根菜单，不收进「更多」）
+          appMenuOwner: process.env.DSH_PET_APP_MENU_OWNER || '',
           scale: String(scale),
           petIndex: String(pet.index),
           workAreaW: String(area.width),

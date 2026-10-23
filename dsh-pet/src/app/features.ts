@@ -34,8 +34,8 @@ const run = promisify(execFile);
 
 /** 采样间隔 */
 const TICK_MS = 5_000;
-/** 右键菜单的 owner（插件按它归组、按它投递点击） */
-const MENU_OWNER = 'dsh-pet-app';
+/** 右键菜单的 owner（插件按它归组、按它投递点击；helper 按它把这组项放根菜单，见 main.ts） */
+export const MENU_OWNER = 'dsh-pet-app';
 const MENU_LOOK = '看看我在干嘛';
 const MENU_POMODORO_START = '开始番茄钟';
 /** 自动看屏幕要求键鼠最近活动过（秒）：人在看视频 / 发呆时不打扰 */

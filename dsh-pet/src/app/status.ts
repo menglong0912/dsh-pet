@@ -2,7 +2,7 @@
  * 工作状态合成（纯逻辑）：桌宠只有一个外部工作状态槽（`POST /dsh-pet-7340/work-status`，最后写入者生效），
  * Claude Code 与番茄钟都想用它，所以统一在这里排优先级，`features.ts` 只在结果变了时写一次。
  *
- * 优先级：Claude 等确认 > Claude 干活中 > 番茄钟倒计时 > Claude 刚完成 > 空闲。
+ * 优先级：Claude 等确认 > 番茄钟倒计时 > Claude 刚完成 > 空闲（Claude 干活中不显示）。
  * 文案上限 40 字（宿主 TASK_TEXT_MAX），这里的文案都远小于它。
  */
 import type { ClaudeView } from './claude-hooks';
@@ -17,11 +17,9 @@ export function composeWorkStatus(
   claude: ClaudeView,
   pomodoro: { phase: PomodoroPhase; remainingMin: number } | null,
 ): WorkStatus | null {
-  if (claude && claude.state !== 'success') {
+  if (claude?.state === 'waiting') {
     const who = claude.count > 1 ? `Claude ×${claude.count}` : 'Claude';
-    return claude.state === 'waiting'
-      ? { state: 'waiting', task: `${who} · ${claude.project} 等你确认` }
-      : { state: 'working', task: `${who} · ${claude.project}` };
+    return { state: 'waiting', task: `${who} · ${claude.project} 等你确认` };
   }
   if (pomodoro) {
     return pomodoro.phase === 'focus'

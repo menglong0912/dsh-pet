@@ -43,9 +43,9 @@ import { settingsHandler, testHandler } from '../standalone/server';
 import { settingsPage, settingsScript, settingsStyle } from '../standalone/settings-page';
 import type { StandaloneAiService } from '../standalone/ai-provider';
 import { createAppConfig } from './app-config';
-import { createAppRoutes } from './app-routes';
+import { appSettingsHandler, createAppRoutes } from './app-routes';
 import { removeDiscovery, writeDiscovery } from './discovery';
-import { startAppFeatures } from './features';
+import { MENU_OWNER, startAppFeatures } from './features';
 import type { AppFeatures, FeatureElectron } from './features';
 import { teeOutputToFile } from './log-file';
 
@@ -115,7 +115,15 @@ async function boot(): Promise<void> {
 
   // 扩展功能（src/app/features.ts）要等 app ready 才能用 powerMonitor / desktopCapturer，之前 /app/* 回 503
   let features: AppFeatures | null = null;
-  const server = await startRouter(routes, { security, ai, appRoutes: createAppRoutes(() => features, log) });
+  // 应用功能开关：功能编排按 mtime 读它，设置页「陪伴与提醒」一节写它
+  const appConfigPath = join(dshHomeDir(), 'dsh-pet', 'app-config.json');
+  const appConfig = createAppConfig(appConfigPath, log);
+  const server = await startRouter(routes, {
+    security,
+    ai,
+    appRoutes: createAppRoutes(() => features, log),
+    appSettings: appSettingsHandler(appConfigPath, appConfig),
+  });
   port = server.port;
   const origin = `http://127.0.0.1:${port}`;
   log(`本机服务 ${origin}`);
@@ -124,6 +132,8 @@ async function boot(): Promise<void> {
   process.env.DSH_PET_IN_PROCESS = '1';
   process.env.DSH_PET_APP_MODE = '1';
   process.env.DSH_PET_OPEN_TARGET = 'site';
+  // 应用自己的菜单项（看屏幕 / 番茄钟）放根菜单，不按第三方收进「更多」
+  process.env.DSH_PET_APP_MENU_OWNER = MENU_OWNER;
   // 不注入宿主 PID：helper 的「宿主没了就退出」只对双进程有意义，同进程里设了会自己杀自己
   delete process.env.DSH_PET_HOST_PID;
   process.env.DSH_PET_CONFIG_URL = `${origin}/dsh-pet-7340/config`;
@@ -170,7 +180,7 @@ async function boot(): Promise<void> {
       electron: createRequire(import.meta.url)('electron') as FeatureElectron,
       ai,
       configPaths: configPathsFor(packageRoot, home),
-      appConfig: createAppConfig(join(home, 'dsh-pet', 'app-config.json'), log),
+      appConfig,
       petBase: `${origin}/dsh-pet-7340`,
       log,
     });
@@ -227,6 +237,8 @@ interface RouterDeps {
   ai: StandaloneAiService;
   /** 应用自己的 /app/* 接口；不是这组路径时返回 false */
   appRoutes: (req: IncomingMessage, res: ServerResponse, pathname: string) => boolean;
+  /** 设置页「陪伴与提醒」一节（/standalone-ai/app-settings，与配置页同一套令牌校验） */
+  appSettings: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 }
 
 /**
@@ -269,9 +281,18 @@ function startRouter(
       sendText(res, 200, 'text/css', settingsStyle);
       return;
     }
-    if (url.pathname === '/standalone-ai/settings' || url.pathname === '/standalone-ai/test') {
+    if (
+      url.pathname === '/standalone-ai/settings' ||
+      url.pathname === '/standalone-ai/test' ||
+      url.pathname === '/standalone-ai/app-settings'
+    ) {
       if (!deps.security.authorize(req, res)) return;
-      const handler = url.pathname === '/standalone-ai/test' ? tester : settings;
+      const handler =
+        url.pathname === '/standalone-ai/test'
+          ? tester
+          : url.pathname === '/standalone-ai/app-settings'
+            ? deps.appSettings
+            : settings;
       void handler(req, res).catch((error: unknown) => {
         log(`配置页接口失败 ${url.pathname}: ${error instanceof Error ? error.message : String(error)}`);
         if (!res.headersSent) rejectRequest(res, 500, '配置页暂时无法处理请求');

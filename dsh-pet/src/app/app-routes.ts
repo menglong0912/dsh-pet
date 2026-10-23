@@ -10,6 +10,8 @@
  * 端口每次启动随机，写在 `$DSH_HOME/dsh-pet/app.json`（见 discovery.ts）。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { saveAppConfig } from './app-config';
+import type { AppConfig } from './app-config';
 import type { AppFeatures } from './features';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -74,6 +76,32 @@ async function handle(
     default:
       return send(res, 404, { error: 'not found' });
   }
+}
+
+/**
+ * 设置页「陪伴与提醒」一节的读写（`/standalone-ai/app-settings`，即整份 app-config.json）。挂在配置页那组下，走令牌与同源校验
+ * （调用方先过 security.authorize），不走上面 /app/* 的「拒绝网页来源」——设置页本身就是网页。
+ * 只有独立应用注册这条路由；CLI 里它是 404，设置页据此不显示这一节。
+ */
+export function appSettingsHandler(
+  path: string,
+  appConfig: () => AppConfig,
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  return async (req, res) => {
+    if (req.method === 'GET') return send(res, 200, appConfig());
+    if (req.method !== 'POST') return send(res, 405, { error: '仅支持 GET 或 POST' });
+    if (req.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+      return send(res, 415, { error: '请使用 JSON 保存设置' });
+    }
+    const body = await readJson(req);
+    let next: AppConfig;
+    try {
+      next = saveAppConfig(path, body);
+    } catch {
+      return send(res, 400, { error: '陪伴与提醒的设置不在允许范围内' });
+    }
+    send(res, 200, next);
+  };
 }
 
 /** 读 JSON 对象体；空体按 {}；超限 / 非对象 → undefined */

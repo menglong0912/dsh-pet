@@ -7,7 +7,8 @@
  * 文件不存在时写一份默认值，方便直接改；改完即时生效（按 mtime 重读，不用重启）。
  * 文件写坏时**明确报错**并沿用上一份好的配置，不静默改回默认。
  */
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { z } from 'zod';
 
 const schema = z
@@ -31,6 +32,18 @@ const schema = z
 
 export type AppConfig = z.infer<typeof schema>;
 
+/**
+ * 设置页保存（整份配置）：校验后写回文件，返回新配置；输入非法时抛错（调用方回 400）。
+ * 先写临时文件再改名：读的一侧按 mtime 重读，不会读到写了一半的文件。
+ */
+export function saveAppConfig(path: string, input: unknown): AppConfig {
+  const next = schema.parse(input);
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
+  renameSync(tmp, path);
+  return next;
+}
+
 export const DEFAULT_APP_CONFIG: AppConfig = {
   greetAfterAwayMin: 10,
   screen: { enabled: true, intervalMin: 15 },
@@ -45,7 +58,11 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
  * @returns 取当前配置的函数（每次调用按 mtime 判断是否需要重读）
  */
 export function createAppConfig(path: string, warn: (message: string) => void): () => AppConfig {
-  if (!existsSync(path)) writeFileSync(path, JSON.stringify(DEFAULT_APP_CONFIG, null, 2) + '\n', 'utf8');
+  if (!existsSync(path)) {
+    // 首次启动时数据目录可能还没建（本函数在插件 apply 之前调用）
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(DEFAULT_APP_CONFIG, null, 2) + '\n', 'utf8');
+  }
   let current = DEFAULT_APP_CONFIG;
   let loadedMtime = -1;
   return () => {

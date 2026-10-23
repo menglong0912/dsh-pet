@@ -102,6 +102,8 @@ test('settings browser script strips fragment, keeps key write-only and explicit
     document: { getElementById: element },
     fetch: async (url: string, options: { method: string; body?: string; headers: Record<string, string> }) => {
       requests.push({ url, options });
+      // CLI 没有「看屏幕与番茄钟」一节：app-settings 是 404，页面既不显示也不保存它
+      if (url === '/standalone-ai/app-settings') return { ok: false, status: 404, json: async () => ({}) };
       return {
         ok: true,
         json: async () => ({
@@ -124,19 +126,95 @@ test('settings browser script strips fragment, keeps key write-only and explicit
   element('apiKey').value = 'write-only-fake-key';
   await element('settings').listeners.submit({ preventDefault() {} });
   assert.equal(element('apiKey').value, '');
-  assert.equal(JSON.parse(requests[1].options.body ?? '{}').apiKey, 'write-only-fake-key');
+  const saves = () => requests.filter(({ url }) => url === '/standalone-ai/settings');
+  assert.equal(JSON.parse(saves()[1].options.body ?? '{}').apiKey, 'write-only-fake-key');
   element('clearApiKey').checked = true;
   element('clearApiKey').listeners.change();
   assert.equal(element('enabled').checked, false);
   assert.equal(element('apiKey').disabled, true);
   await element('settings').listeners.submit({ preventDefault() {} });
-  assert.equal(JSON.parse(requests[2].options.body ?? '{}').clearApiKey, true);
-  assert.equal(JSON.parse(requests[2].options.body ?? '{}').enabled, false);
+  assert.equal(JSON.parse(saves()[2].options.body ?? '{}').clearApiKey, true);
+  assert.equal(JSON.parse(saves()[2].options.body ?? '{}').enabled, false);
   assert.equal(element('apiKey').disabled, false);
+  // 只碰本机设置接口（AI 设置 + 应用那一节），且都带令牌；CLI 下应用那一节只探测一次、不保存
   assert.ok(
     requests.every(
       ({ url, options }) =>
-        url === '/standalone-ai/settings' && options.headers['X-DSH-Pet-Token'] === 'process-capability',
+        ['/standalone-ai/settings', '/standalone-ai/app-settings'].includes(url) &&
+        options.headers['X-DSH-Pet-Token'] === 'process-capability',
     ),
   );
+  assert.deepEqual(
+    requests.filter(({ url }) => url === '/standalone-ai/app-settings').map(({ options }) => options.method),
+    ['GET'],
+  );
+});
+
+test('settings browser script shows and saves the app section when the app serves it', async () => {
+  const { runInNewContext } = await import('node:vm');
+  type Element = {
+    value: string;
+    checked: boolean;
+    disabled: boolean;
+    hidden: boolean;
+    textContent: string;
+    dataset: Record<string, string>;
+    listeners: Record<string, (event?: unknown) => Promise<void> | void>;
+    addEventListener: (name: string, fn: (event?: unknown) => Promise<void> | void) => void;
+    reportValidity: () => boolean;
+  };
+  const elements = new Map<string, Element>();
+  const element = (id: string): Element => {
+    if (!elements.has(id))
+      elements.set(id, {
+        value: '',
+        checked: false,
+        disabled: false,
+        hidden: id === 'app-settings',
+        textContent: '',
+        dataset: {},
+        listeners: {},
+        addEventListener(name, fn) {
+          this.listeners[name] = fn;
+        },
+        reportValidity: () => true,
+      });
+    return elements.get(id)!;
+  };
+  const requests: Array<{ url: string; options: { method: string; body?: string } }> = [];
+  const app = {
+    greetAfterAwayMin: 10,
+    screen: { enabled: true, intervalMin: 15 },
+    pomodoro: { focusMin: 25, breakMin: 5 },
+    sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
+    water: { enabled: true, everyMin: 60 },
+  };
+  runInNewContext(settingsScript, {
+    URLSearchParams,
+    location: { hash: '#token=process-capability', pathname: '/standalone-ai/' },
+    history: { replaceState: () => undefined },
+    document: { getElementById: element },
+    fetch: async (url: string, options: { method: string; body?: string }) => {
+      requests.push({ url, options });
+      return { ok: true, json: async () => (url === '/standalone-ai/app-settings' ? app : { hasKey: false }) };
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(element('app-settings').hidden, false);
+  assert.equal(element('screenEnabled').checked, true);
+  assert.equal(element('screenIntervalMin').value, '15');
+  assert.equal(element('focusMin').value, '25');
+  assert.equal(element('sittingAfterMin').value, '50');
+  assert.equal(element('greetAfterAwayMin').value, '10');
+  element('screenIntervalMin').value = '30';
+  element('focusMin').value = '50';
+  element('waterEnabled').checked = false;
+  await element('settings').listeners.submit({ preventDefault() {} });
+  const post = requests.find(({ url, options }) => url === '/standalone-ai/app-settings' && options.method === 'POST');
+  assert.deepEqual(JSON.parse(post?.options.body ?? '{}'), {
+    ...app,
+    screen: { enabled: true, intervalMin: 30 },
+    pomodoro: { focusMin: 50, breakMin: 5 },
+    water: { enabled: false, everyMin: 60 },
+  });
 });
