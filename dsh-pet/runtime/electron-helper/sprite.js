@@ -12,7 +12,7 @@
 const OPEN_SHORTCUT_HINT = /Mac/i.test(navigator.platform || navigator.userAgent) ? 'Cmd+左键' : 'Ctrl+左键';
 /** 本次点击是否按住了「呼出 DSH」的修饰键（Ctrl / Cmd） */
 const isOpenShortcut = (e) => !!(e && (e.ctrlKey || e.metaKey));
-/** macOS：窗口上沿要避开菜单栏（见 fitWindowTop） */
+/** macOS：窗口上沿要避开菜单栏、左右不跨进邻屏（见 fitWindowTop / fitWindowSides） */
 const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent);
 
 // ---------- 单只宠物（行为与浏览器 PetCard 一致；纯逻辑来自 src/shared） ----------
@@ -52,8 +52,9 @@ class PetSprite {
     const m = this.size * WINDOW_MARGIN_RATIO;
     const fontConf = pet.font || config.font || S.DEFAULT_FONT;
     this.margin = { t: Math.max(m, S.bubbleTopMarginPx(fontConf, this.size)), r: m, b: m, l: m };
-    // 上边距的完整值；实际的 margin.t 在 macOS 上会随位置收缩（fitWindowTop）
+    // 上 / 左右边距的完整值；实际的 margin.t / l / r 在 macOS 上会随位置收缩（fitWindowTop / fitWindowSides）
     this.fullMarginT = this.margin.t;
+    this.fullMarginSide = m;
     window.__dshPetDebug.winMargin = this.margin;
     // 宠物包围盒左上角在【工作区】坐标系里的位置（本窗口的位置 = 宠物的位置）
     this.pos = { x: 0, y: 0 };
@@ -392,9 +393,32 @@ class PetSprite {
     this.el.style.top = t + 'px';
   }
 
+  /**
+   * macOS：窗口左右不跨进相邻显示器。两块屏缩放不同（Retina 2× + 外接 1×）时，窗口大半还在原屏、
+   * 却已伸进邻屏约两成宽度以上，macOS 就把它归到邻屏，这时 setContentBounds 不生效、窗口还会弹回
+   * 更早的位置——宠物走到外接屏靠主屏那半边就「闪回左边」（实测；纯 AppKit 窗口同样的 frame 都能设上）。
+   * 所以窗口左右各自收到宠物中心所在那块屏的边缘为止，永不跨屏。身体骑缝时越过屏缝的那部分被裁掉——
+   * macOS 默认「每块显示器各自的空间」下，一个窗口本来就只画在一块屏上，那部分原本也不显示。
+   * 中心落在屏与屏之间的空洞里（不规则排布）时不收：不在任何屏上，也就谈不上跨屏。
+   */
+  fitWindowSides() {
+    if (!IS_MAC) return;
+    const cx = this.pos.x + this.halfW;
+    const cy = this.pos.y + this.halfH;
+    const panel = PANELS.find((p) => cx >= p.x && cx < p.x + p.width && cy >= p.y && cy < p.y + p.height);
+    const full = this.fullMarginSide;
+    const l = panel ? Math.min(full, this.pos.x - panel.x) : full;
+    const r = panel ? Math.min(full, panel.x + panel.width - (this.pos.x + this.size)) : full;
+    if (l === this.margin.l && r === this.margin.r) return;
+    this.margin.l = l;
+    this.margin.r = r;
+    this.el.style.left = l + 'px';
+  }
+
   sendBounds(px, py) {
     this.pos = { x: Math.round(px), y: Math.round(py) };
     this.fitWindowTop();
+    this.fitWindowSides();
     window.__dshPetDebug.dragPos = { x: this.pos.x, y: this.pos.y };
     if (window.petBridge) {
       // 完整状态一次捎带：size/bottomPad 让静止宠物从首帧起就登记进碰撞站场
@@ -416,6 +440,8 @@ class PetSprite {
         // 不能再按「窗口宽/4」反推（见 pointer-target.js 的 spriteHitRect）。
         toScreen(this.margin.l),
         toScreen(this.margin.t),
+        // 右余量：macOS 上贴屏边时左右各自收缩，不再相等（fitWindowSides）
+        toScreen(this.margin.r),
       );
     }
     // 位置变了（宠物漫游/拖拽/飞行，窗口跟着动）：提示若正显示必须重摆一次——它跟的是光标，

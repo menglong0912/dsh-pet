@@ -23,8 +23,9 @@ const FEET_Y = 330;
 
 /**
  * 窗口矩形 → 宠物身体命中区的屏幕矩形（DIP）。
- * 窗口 = 宠物包围盒 + 四周余量（渲染端 sprite.js 的 this.margin）：横向 `margin.l`、纵向 `margin.t`，
- * stageW = width − 2×margin.l。
+ * 窗口 = 宠物包围盒 + 四周余量（渲染端 sprite.js 的 this.margin）：横向 `margin.l` / `margin.r`、纵向 `margin.t`，
+ * stageW = width − margin.l − margin.r（macOS 上窗口贴屏边时左右余量各自收缩，不再相等，见 sprite.js 的
+ * fitWindowSides；没报 r 的旧渲染端按左右相等算）。
  *
  * **余量不再四边相等**：上边距按气泡最大高度加高（见 shared/fonts.ts 的 bubbleTopMarginPx），
  * 所以不能再按「窗口宽 / 4」反推——那会把命中区整体下移/上移一个 (margin.t − margin.l)。
@@ -32,13 +33,14 @@ const FEET_Y = 330;
  * 回退旧口径 width / 4，行为与改造前一致。
  *
  * @param {{x:number,y:number,width:number,height:number}} bounds 窗口矩形（DIP）
- * @param {{l:number,t:number}} [margins] 渲染端上报的窗口余量（DIP）
+ * @param {{l:number,t:number,r?:number}} [margins] 渲染端上报的窗口余量（DIP）
  */
 function spriteHitRect(bounds, margins) {
   const legacy = Math.round(bounds.width / 4);
   const ml = Number.isFinite(margins?.l) ? margins.l : legacy;
+  const mr = Number.isFinite(margins?.r) ? margins.r : ml;
   const mt = Number.isFinite(margins?.t) ? margins.t : legacy;
-  const stageW = bounds.width - ml * 2;
+  const stageW = bounds.width - ml - mr;
   const stageH = (stageW * CANVAS_H) / STAGE_W;
   const bottomPad = (stageH * (CANVAS_H - FEET_Y)) / CANVAS_H;
   return {
@@ -62,7 +64,7 @@ const OFF_BODY_RELEASE_MS = 400;
  *
  * @param {{x:number,y:number,width:number,height:number}} bounds 窗口矩形（DIP）
  * @param {{x:number,y:number}} point 真实光标位置（DIP）
- * @param {{l:number,t:number}} [margins] 渲染端上报的窗口余量（DIP），见 spriteHitRect
+ * @param {{l:number,t:number,r?:number}} [margins] 渲染端上报的窗口余量（DIP），见 spriteHitRect
  * @returns {'outside'|'body'|'margin'} 分区
  */
 function pointerZone(bounds, point, margins) {
@@ -105,7 +107,7 @@ function pointerZone(bounds, point, margins) {
  * @param {number} [offBodyMs=0] 光标在窗口余量区（非 busy）的连续停留时长，超时即恢复穿透
  * @param {{dragging:boolean, rects:Array<{x:number,y:number,width:number,height:number}>}} [input]
  *   新渲染端上报的窗口局部交互矩形。菜单/聊天框只占自己的区域；拖拽仍拥有完整输入租约。
- * @param {{l:number,t:number}} [margins] 渲染端上报的窗口余量（DIP），见 spriteHitRect
+ * @param {{l:number,t:number,r?:number}} [margins] 渲染端上报的窗口余量（DIP），见 spriteHitRect
  * @returns {boolean} 新的穿透状态
  */
 function decideWindowIgnore(bounds, point, ignoring, busy, offBodyMs = 0, input, margins) {

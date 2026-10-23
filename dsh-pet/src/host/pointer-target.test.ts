@@ -192,6 +192,21 @@ describe('spriteHitRect —— 与渲染端命中判定同源（否则两条通�
     assert.ok(r.left > 150 && r.left < 300);
     assert.ok(r.right > 300 && r.right < 450);
   });
+
+  test('左右余量不等（macOS 贴屏边时各自收缩，见 sprite.js 的 fitWindowSides）：按 l / r 分别扣，身体不偏', () => {
+    const near = (actual: number, expected: number) => Math.abs(actual - expected) < 0.01;
+    const body = (left: number) => ({ left: left + (200 / STAGE_W) * 462, right: left + (440 / STAGE_W) * 462 });
+    // 右侧贴屏边收到 40、左侧照常 231：画布左缘 = 窗口左 + 231
+    const right = spriteHitRect({ x: 1000, y: 500, width: 462 + 231 + 40, height: 743 }, { l: 231, t: 231, r: 40 });
+    assert.ok(near(right.left, body(1231).left) && near(right.right, body(1231).right));
+    // 左侧切进视频透明边（余量为负）：画布左缘在窗口左边之外
+    const left = spriteHitRect({ x: 1000, y: 500, width: 462 - 50 + 231, height: 743 }, { l: -50, t: 231, r: 231 });
+    assert.ok(near(left.left, body(950).left) && near(left.right, body(950).right));
+  });
+
+  test('没报 r 的旧渲染端：按左右相等算（与改造前一致）', () => {
+    assert.deepEqual(spriteHitRect(bounds, { l: 231, t: 231 }), spriteHitRect(bounds, { l: 231, t: 231, r: 231 }));
+  });
 });
 
 describe('菜单/聊天框只占控件矩形，不吞掉其它应用点击', () => {

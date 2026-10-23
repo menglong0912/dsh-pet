@@ -853,7 +853,10 @@ app.whenReady().then(() => {
     // 窗口余量（左右/上）：命中区判定的依据，余量四边不再相等（上边距按气泡最大高度加高）
     const ml = Number(bounds?.marginL);
     const mt = Number(bounds?.marginT);
-    if (Number.isFinite(ml) && Number.isFinite(mt)) winMargins.set(win.id, { l: ml, t: mt });
+    const mr = Number(bounds?.marginR);
+    if (Number.isFinite(ml) && Number.isFinite(mt)) {
+      winMargins.set(win.id, Number.isFinite(mr) ? { l: ml, t: mt, r: mr } : { l: ml, t: mt });
+    }
     // 碰撞站场：位置必须用**包围盒左上角**（renderer 显式上报 boxX/boxY）——
     // 窗口坐标 = 包围盒 − margin（半只宠物宽），直接拿窗口坐标会让跨窗检测整体错位
     const petId = [...windows.keys()].find((id) => windows.get(id) === win);
