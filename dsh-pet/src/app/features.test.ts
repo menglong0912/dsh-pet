@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,8 @@ import type { StandaloneAiService } from '../standalone/ai-provider.ts';
 import { configPathsFor } from '../standalone/options.ts';
 import { DEFAULT_APP_CONFIG } from './app-config.ts';
 import type { AppConfig } from './app-config.ts';
+import { diaryDate } from './diary.ts';
+import type { DiaryDay } from './diary.ts';
 import { startAppFeatures } from './features.ts';
 import type { AppFeatures, FeatureElectron } from './features.ts';
 
@@ -26,7 +28,7 @@ const electron: FeatureElectron = {
   },
   screen: { getCursorScreenPoint: () => ({ x: 0, y: 0 }), getDisplayNearestPoint: () => ({ id: 1 }) },
   systemPreferences: { getMediaAccessStatus: () => 'granted' },
-  shell: { openExternal: () => Promise.resolve() },
+  shell: { openExternal: () => Promise.resolve(), openPath: () => Promise.resolve('') },
 };
 
 /** 看屏幕发给模型的指令、挑表情包时发给模型的话（按调用顺序） */
@@ -51,10 +53,11 @@ const ai = {
 /**
  * 起一套功能编排跑 fn：插件路由由假服务应答（/broadcast 回 broadcast 并记下说的话与整个请求体，
  * /memes 回 memes 池，其余一律成功），应用配置取 config 的当前值（测试里可以改）。
+ * fn 的 home 是这套编排的临时数据目录（宠物日记在 home/diary）。
  */
 async function withFeatures(
   options: { broadcast?: Record<string, unknown>; config?: AppConfig; memes?: Array<{ name: string; desc: string }> },
-  fn: (features: AppFeatures, said: string[], bodies: Array<Record<string, unknown>>) => Promise<void>,
+  fn: (features: AppFeatures, said: string[], bodies: Array<Record<string, unknown>>, home: string) => Promise<void>,
 ): Promise<void> {
   const said: string[] = [];
   const bodies: Array<Record<string, unknown>> = [];
@@ -85,11 +88,12 @@ async function withFeatures(
     ai,
     configPaths: configPathsFor(packageRoot, home),
     appConfig: () => config,
+    diaryDir: join(home, 'diary'),
     petBase: `http://127.0.0.1:${(server.address() as AddressInfo).port}/dsh-pet-7340`,
     log: () => undefined,
   });
   try {
-    await fn(features, said, bodies);
+    await fn(features, said, bodies, home);
   } finally {
     features.dispose();
     // 等挂着的菜单长轮询回来、看到 disposed 再关服务，免得它进入失败重试的 5 秒等待
@@ -113,6 +117,26 @@ test('看屏幕：说出来了才算成功', async () => {
   await withFeatures({}, async (features) => {
     assert.deepEqual(await features.lookAtScreen(true), { ok: true, text: '主人在写代码呀' });
   });
+});
+
+test('看屏幕：说出来的话记进今天的宠物日记，没说出来的不记', async () => {
+  const screenEvents = (home: string) => {
+    const path = join(home, 'diary', `${diaryDate(Date.now())}.json`);
+    if (!existsSync(path)) return [];
+    const day = JSON.parse(readFileSync(path, 'utf8')) as DiaryDay;
+    return day.events.filter((event) => event.kind === 'screen').map((event) => event.text);
+  };
+  await withFeatures({}, async (features, _said, _bodies, home) => {
+    await features.lookAtScreen(true);
+    assert.deepEqual(screenEvents(home), ['看了一眼主人的屏幕，说：「主人在写代码呀」']);
+  });
+  await withFeatures(
+    { broadcast: { ok: false, reason: 'pet-not-displayed' } },
+    async (features, _said, _bodies, home) => {
+      await features.lookAtScreen(true);
+      assert.deepEqual(screenEvents(home), []);
+    },
+  );
 });
 
 test('看屏幕：宠物被隐藏、插件拒绝说话时如实报失败', async () => {

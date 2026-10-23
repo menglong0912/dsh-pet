@@ -6,7 +6,8 @@
  *   - 根据采样推进番茄钟、久坐 / 喝水 / 下班提醒、回来打招呼、定时看屏幕；
  *   - 与插件的自动碎碎念共用一个节拍（takeWhisperTurn）：看屏幕占它的拍，应用说话时它让一让；
  *   - 把 Claude Code 与番茄钟合成为一个外部工作状态（桌宠只有一个外部槽）；
- *   - 右键「更多」里注册「看看我在干嘛 / 开始·停止番茄钟」并长轮询点击。
+ *   - 把一天里的事记进宠物日记（diary.ts），第二天回到电脑前时补写前一天的日记；
+ *   - 右键「更多」里注册「看看我在干嘛 / 开始·停止番茄钟 / 宠物日记」并长轮询点击。
  *
  * 驱动桌宠一律走插件自己的 HTTP 路由（/broadcast、/work-status、/menu/*），与第三方调用者同一契约，
  * 不碰插件内部状态——以后合并上游时这里不受插件内部重构影响。
@@ -25,6 +26,7 @@ import { ActivityTracker, describeActivity, durationText } from './activity';
 import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
 import { ClaudeSessions } from './claude-hooks';
+import { dateLabel, Diary, diaryDate } from './diary';
 import type { ClaudeHookPayload } from './claude-hooks';
 import { HealthReminders, OffWorkReminder, Pomodoro } from './reminders';
 import type { HealthEvent, PomodoroEvent } from './reminders';
@@ -39,6 +41,7 @@ const TICK_MS = 5_000;
 export const MENU_OWNER = 'dsh-pet-app';
 const MENU_LOOK = '看看我在干嘛';
 const MENU_POMODORO_START = '开始番茄钟';
+const MENU_DIARY = '宠物日记';
 /** 自动看屏幕要求键鼠最近活动过（秒）：人在看视频 / 发呆时不打扰 */
 const SCREEN_ACTIVE_IDLE_SEC = 60;
 /** 应用刚说过话这么久内，自动碎碎念让一让（气泡默认显示 10 秒） */
@@ -71,7 +74,7 @@ export interface FeatureElectron {
     getDisplayNearestPoint(point: { x: number; y: number }): { id: number };
   };
   systemPreferences: { getMediaAccessStatus(mediaType: 'screen'): string };
-  shell: { openExternal(url: string): Promise<void> };
+  shell: { openExternal(url: string): Promise<void>; openPath(path: string): Promise<string> };
 }
 
 export interface AppFeatures {
@@ -98,6 +101,8 @@ export interface FeatureDeps {
   ai: StandaloneAiService;
   configPaths: ConfigPaths;
   appConfig: () => AppConfig;
+  /** 宠物日记目录（$DSH_HOME/dsh-pet/diary） */
+  diaryDir: string;
   /** 插件路由前缀的完整地址，如 http://127.0.0.1:53624/dsh-pet-7340 */
   petBase: string;
   log: (message: string) => void;
@@ -110,6 +115,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   const pomodoro = new Pomodoro(() => deps.appConfig().pomodoro);
   const health = new HealthReminders(() => deps.appConfig());
   const offWork = new OffWorkReminder(() => deps.appConfig().offWork);
+  const diary = new Diary(deps.diaryDir, Date.now(), log);
+  /** 这一天（日记口径）已经查过要不要补写日记：一天只查一次，补写失败也不每拍重试 */
+  let diaryCheckedFor: string | null = null;
   let disposed = false;
   let lastStatus: WorkStatus | null = null;
   let lastScreenAt = Date.now();
@@ -167,11 +175,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   // ---------- 生成 ----------
 
-  /** 人设 + 名字 + 时间（插件同一套拼装）+ 主人此刻 */
-  function systemPrompt(): string {
+  /** 人设 + 名字 + 时间（插件同一套拼装） */
+  function personaPrompt(): string {
     const cfg = readAllConfig(deps.configPaths);
     const found = findPetInstance(cfg, petId());
-    const base = found
+    return found
       ? composeSystemPrompt({
           prompt: petPersona(found.conf, found.pet),
           name: String(found.pet.name ?? ''),
@@ -179,6 +187,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
           now: new Date(),
         })
       : '';
+  }
+
+  /** 人设 + 主人此刻 */
+  function systemPrompt(): string {
+    const base = personaPrompt();
     const context = activityContext();
     return context ? `${base}\n${context}` : base;
   }
@@ -189,16 +202,20 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return text.trim();
   }
 
-  /** 生成一句；模型没配 / 忙 / 失败时返回 null（忙就等一会儿再试一次：插件的碎碎念可能正占着） */
-  async function generate(instruction: string): Promise<string | null> {
+  /**
+   * 生成一句；模型没配 / 忙 / 失败时返回 null（忙就等一会儿再试一次：插件的碎碎念可能正占着）
+   * @param rule 接在指令后的写法要求（默认「只说一句话」）
+   * @param system 系统提示词（默认人设 + 主人此刻）
+   */
+  async function generate(instruction: string, rule = LINE_RULE, system?: string): Promise<string | null> {
     if (!ai.isReady()) return null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const options = {
           provider: ai.currentSelection().provider,
           model: ai.currentSelection().model,
-          system: systemPrompt(),
-          messages: [{ role: 'user', content: [{ type: 'text', text: `${instruction}${LINE_RULE}` }] }],
+          system: system ?? systemPrompt(),
+          messages: [{ role: 'user', content: [{ type: 'text', text: `${instruction}${rule}` }] }],
         };
         return (await collect(ai.stream(options))) || null;
       } catch (error) {
@@ -337,6 +354,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       const meme = await memeFor(text);
       // 宠物被隐藏时插件不让说（pet-not-displayed）：如实报失败，别让调用方以为说出来了
       if (!(await say(text, meme?.name))) return { ok: false, text, reason: 'say-failed' };
+      diary.note(Date.now(), 'screen', `看了一眼主人的屏幕，说：「${text}」`);
       return { ok: true, text, ...(meme ? { image: meme.name } : {}) };
     } catch (error) {
       log(`看屏幕失败：${errorText(error)}`);
@@ -376,16 +394,33 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       frontApp: await frontApp(),
     });
     const snap = tracker.snapshot();
+    diary.tick(now, snap);
     for (const event of events) {
       if (event.type === 'return' && event.awayMs >= config.greetAfterAwayMin * 60_000) {
+        diary.note(now, 'return', `主人离开电脑 ${durationText(event.awayMs)}后回来了`);
         void speak(`主人离开电脑 ${durationText(event.awayMs)}，刚刚回来。欢迎主人回来。`, '欢迎回来～');
       }
     }
     const pomodoroEvent = pomodoro.tick(now, snap?.present ?? false);
+    if (pomodoroEvent === 'break-start') {
+      diary.note(now, 'pomodoro', `主人专注完一个 ${config.pomodoro.focusMin} 分钟的番茄钟`);
+    }
     if (pomodoroEvent) void announcePomodoro(pomodoroEvent);
-    for (const event of health.tick(now, snap, pomodoro.phase() === 'focus')) void announceHealth(event);
+    for (const event of health.tick(now, snap, pomodoro.phase() === 'focus')) {
+      diary.note(now, event, event === 'sit' ? '提醒主人起来活动一下' : '提醒主人喝水');
+      void announceHealth(event);
+    }
     const offWorkLeft = offWork.tick(now, snap?.present ?? false, pomodoro.phase() === 'focus');
-    if (offWorkLeft !== null) void announceOffWork(offWorkLeft);
+    if (offWorkLeft !== null) {
+      diary.note(now, 'off-work', offWorkLeft > 0 ? '提醒主人快下班了' : '过了下班时间主人还在电脑前，提醒主人下班');
+      void announceOffWork(offWorkLeft);
+    }
+    // 新的一天主人回到电脑前（专注时不打扰）：补写前一天的日记
+    if (snap?.present && pomodoro.phase() !== 'focus' && diaryCheckedFor !== diaryDate(now)) {
+      diaryCheckedFor = diaryDate(now);
+      const date = diary.pending(now);
+      if (date) void catchUpDiary(date).catch((error: unknown) => log(`宠物日记：补写失败：${errorText(error)}`));
+    }
 
     // 自动碎碎念在跑时，看屏幕占它让出的那一拍（takeWhisperTurn），不另起一路；没在跑才自己按间隔看
     if (!whisperRunning(now) && screenDue(now)) void lookAtScreen(false);
@@ -477,6 +512,58 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       : speak(`已经过了主人的下班时间 ${time}，主人还在电脑前。提醒主人收拾一下准备下班。`, '到点啦，该下班啦～');
   }
 
+  // ---------- 宠物日记 ----------
+
+  /**
+   * 写某一天的日记并存下（排进说话队列：与说话串行用模型，生成期间碎碎念让一让）
+   * @returns written = 写好了；too-short = 这一天在电脑前太短不写；failed = 模型没配 / 失败
+   */
+  function writeDiary(date: string): Promise<'written' | 'too-short' | 'failed'> {
+    const next = speaking.then(async () => {
+      const instruction = diary.instruction(date);
+      if (!instruction) return 'too-short' as const;
+      generating = true;
+      let text: string | null;
+      try {
+        // 日记写的是一整天：不带「主人此刻」
+        text = await generate(instruction, '', personaPrompt());
+      } finally {
+        generating = false;
+      }
+      if (!text) return 'failed' as const;
+      diary.write(date, text, Date.now());
+      log(`宠物日记：写好了 ${date}`);
+      return 'written' as const;
+    });
+    speaking = next.catch(() => undefined);
+    return next;
+  }
+
+  async function catchUpDiary(date: string): Promise<void> {
+    if ((await writeDiary(date)) !== 'written') {
+      log(`宠物日记：补写 ${date} 没写成`);
+      return;
+    }
+    const label = dateLabel(date);
+    await speak(
+      `你把${label}的日记写好了。告诉主人一声，让主人右键「宠物日记」翻翻看。`,
+      `${label}的日记写好啦，右键「宠物日记」翻翻看～`,
+    );
+  }
+
+  /** 右键「宠物日记」：先写一篇今天到目前为止的，再打开日记本 */
+  async function openDiary(now: number): Promise<void> {
+    void say('等我写写今天的日记～');
+    const result = await writeDiary(diaryDate(now));
+    if (result === 'failed') await say('今天的日记没写成，等会儿再试试～');
+    if (!diary.hasIndex()) {
+      if (result === 'too-short') await say('今天还没陪主人多久，没什么可写的～');
+      return;
+    }
+    const error = await electron.shell.openPath(diary.indexPath());
+    if (error) log(`打开日记失败：${error}`);
+  }
+
   async function refreshStatus(now: number): Promise<void> {
     const phase = pomodoro.phase();
     const next = composeWorkStatus(
@@ -500,7 +587,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const pomodoroLabel = phase
       ? `停止番茄钟 · ${phase === 'focus' ? '专注' : '休息'}剩 ${pomodoro.remainingMin(now)} 分`
       : MENU_POMODORO_START;
-    return [MENU_LOOK, pomodoroLabel];
+    return [MENU_LOOK, pomodoroLabel, MENU_DIARY];
   }
 
   async function refreshMenu(now: number, force = false): Promise<void> {
@@ -524,6 +611,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     } else if (label.startsWith('停止番茄钟')) {
       pomodoro.stop();
       void say('番茄钟停下啦～');
+    } else if (label === MENU_DIARY) {
+      await openDiary(now);
     }
     await refreshStatus(now);
     await refreshMenu(now);
@@ -569,6 +658,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       const speech = claude.handle(payload, Date.now());
       await refreshStatus(Date.now());
       if (speech?.kind === 'done') {
+        diary.note(Date.now(), 'claude', `主人交给 Claude 的活（项目 ${speech.project}）干完了`);
         void speak(
           `主人交给 Claude 的活（项目 ${speech.project}）刚刚干完了。叫主人去看看结果。`,
           `${speech.project} 那边干完活啦，去看看吧～`,
@@ -584,6 +674,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     dispose() {
       disposed = true;
       if (tickTimer !== null) clearTimeout(tickTimer);
+      diary.flush(Date.now());
     },
   };
 }

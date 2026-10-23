@@ -183,6 +183,7 @@ async function boot(): Promise<void> {
       ai,
       configPaths: configPathsFor(packageRoot, home),
       appConfig,
+      diaryDir: join(home, 'dsh-pet', 'diary'),
       petBase: `${origin}/dsh-pet-7340`,
       log,
     });
