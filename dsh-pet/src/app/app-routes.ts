@@ -5,6 +5,7 @@
  *   POST /app/whisper       让桌宠按人设碎碎念一句（转调插件的 /whisper）
  *   POST /app/look          看一眼屏幕并吐槽（等同右键「看看我在干嘛」）
  *   POST /app/claude-hook   Claude Code hook 的 stdin JSON 原样转进来
+ *   GET  /app/guest         串门客人窗口的页面（visit-windows.ts 开的窗口加载它）
  *
  * 与插件路由同一条安全线：拒绝网页来源（带 Origin 且不是 null 的请求），本机程序直接调用。
  * 端口每次启动随机，写在 `$DSH_HOME/dsh-pet/app.json`（见 discovery.ts）。
@@ -13,6 +14,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { saveAppConfig } from './app-config';
 import type { AppConfig } from './app-config';
 import type { AppFeatures } from './features';
+import { guestPage } from './visit-windows';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SAY_CHARS = 200;
@@ -56,6 +58,16 @@ async function handle(
   if (pathname === '/app/activity') {
     if (method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
     return send(res, 200, { snapshot: features.activity(), context: features.activityContext() });
+  }
+  if (pathname === '/app/guest') {
+    if (method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-length': Buffer.byteLength(guestPage),
+      'cache-control': 'no-store',
+    });
+    res.end(guestPage);
+    return;
   }
   if (method !== 'POST') return send(res, 405, { error: '仅支持 POST' });
   const body = await readJson(req);

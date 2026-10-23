@@ -62,7 +62,7 @@ test('multiple sessions: waiting is counted, working stays hidden, stale session
   assert.equal(c.view(50 + WORKING_STALE_MS + 1), null);
 });
 
-test('composeWorkStatus priority: claude waiting > pomodoro > claude done', () => {
+test('composeWorkStatus priority: claude waiting > away visiting > pomodoro > claude done', () => {
   const pomodoro = { phase: 'focus' as const, remainingMin: 12 };
   assert.deepEqual(composeWorkStatus({ state: 'waiting', count: 1, project: 'p' }, pomodoro), {
     state: 'waiting',
@@ -85,6 +85,13 @@ test('composeWorkStatus priority: claude waiting > pomodoro > claude done', () =
     task: 'Claude · p 完成啦',
   });
   assert.equal(composeWorkStatus(null, null), null);
+  // 出门做客：排在 Claude 等确认之后、番茄钟之前
+  const away = { owner: '小王', remainingMin: 8 };
+  assert.deepEqual(composeWorkStatus({ state: 'waiting', count: 1, project: 'p' }, pomodoro, away)?.state, 'waiting');
+  assert.deepEqual(composeWorkStatus({ state: 'success', count: 1, project: 'p' }, pomodoro, away), {
+    state: 'working',
+    task: '在 小王 家做客 · 剩 8 分',
+  });
   assert.equal(sameStatus(null, null), true);
   assert.equal(sameStatus({ state: 'working', task: 'a' }, { state: 'working', task: 'a' }), true);
   assert.equal(sameStatus({ state: 'working', task: 'a' }, null), false);

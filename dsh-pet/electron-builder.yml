@@ -60,6 +60,7 @@ win:
 #                  「只认 bundle id」的指定要求，授权一次即可跨版本保留。
 #   hardenedRuntime false：它只为公证服务；ad-hoc 签名下开着它会因库校验（Electron Framework 不同签名）启动失败。
 #   LSUIElement：纯菜单栏应用，启动时不在 Dock 闪一下（helper 的 app.dock.hide() 要等 ready 才生效）。
+#   NSLocalNetworkUsageDescription：局域网串门要发广播、连邻居，macOS 15 起要主人允许「本地网络」，弹框里显示这句。
 #   icon：logo.png 只有 256px，electron-builder 要求 ≥512，由 scripts/dist.mjs 放大后经 --config.mac.icon 传入。
 mac:
   target:
@@ -69,3 +70,4 @@ mac:
   hardenedRuntime: false
   extendInfo:
     LSUIElement: true
+    NSLocalNetworkUsageDescription: 局域网串门：发现同一网络里的其他桌宠，带你的宠物去别人家做客。

@@ -39,6 +39,23 @@ const schema = z
         leadMin: z.number().min(0).max(120).default(10),
       })
       .default({ enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 }),
+    /** 局域网串门；后加的字段，旧文件里没有时按默认值补上 */
+    visit: z
+      .object({
+        /** 总开关（默认关）：关着时不发信标、不开端口，局域网里什么都不做 */
+        enabled: z.boolean(),
+        /** 允许别人来做客：发信标、开接待端口（每次进门仍要主人点头） */
+        hosting: z.boolean(),
+        /** 允许自家宠物出门：右键「更多 → 串门」列出附近的邻居 */
+        visiting: z.boolean(),
+        /** 串门时用模型聊天；关掉只说固定的招呼和道别 */
+        chat: z.boolean(),
+        /** 邻居看到的主人昵称；空 = 用这台电脑的登录用户名 */
+        nickname: z.string().max(12),
+        /** 出门做客待多久（分钟） */
+        stayMin: z.number().min(1).max(60),
+      })
+      .default({ enabled: false, hosting: true, visiting: true, chat: true, nickname: '', stayMin: 10 }),
   })
   .strict();
 
@@ -63,6 +80,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
   water: { enabled: true, everyMin: 60 },
   offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
+  visit: { enabled: false, hosting: true, visiting: true, chat: true, nickname: '', stayMin: 10 },
 };
 
 /**

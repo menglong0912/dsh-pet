@@ -7,7 +7,10 @@
  *   - 与插件的自动碎碎念共用一个节拍（takeWhisperTurn）：看屏幕占它的拍，应用说话时它让一让；
  *   - 把 Claude Code 与番茄钟合成为一个外部工作状态（桌宠只有一个外部槽）；
  *   - 把一天里的事记进宠物日记（diary.ts），第二天回到电脑前时补写前一天的日记；
- *   - 右键「更多」里注册「看看我在干嘛 / 开始·停止番茄钟 / 宠物日记」并长轮询点击。
+ *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口）：设置里开了才发信标、开接待端口；
+ *     出门时自家宠物变半透明，客人来了在自家宠物旁边开个小窗；串门的台词只按人设生成，不带「主人此刻」；
+ *   - 右键菜单根上注册「看看我在干嘛 / 开始·停止番茄钟 / 宠物日记」与串门的应答项，
+ *     「更多 → 串门」里列附近的邻居，各自长轮询点击。
  *
  * 驱动桌宠一律走插件自己的 HTTP 路由（/broadcast、/work-status、/menu/*），与第三方调用者同一契约，
  * 不碰插件内部状态——以后合并上游时这里不受插件内部重构影响。
@@ -16,6 +19,8 @@
  * 看屏幕没有兜底句：看不了就明确说看不了（手动触发时）或安静跳过（自动触发时）。
  */
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 
 import { findPetInstance, flattenPetList, readAllConfig } from '../host/config';
@@ -32,6 +37,10 @@ import { HealthReminders, OffWorkReminder, Pomodoro } from './reminders';
 import type { HealthEvent, PomodoroEvent } from './reminders';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
+import { cleanText, knockOn, LINE_MAX, NAME_MAX, Neighborhood, PING_MS, tripRequest, VisitHost } from './visit';
+import type { HostHandlers, KnockAnswer, KnockFailure, Neighbor, TripReply, Visitor } from './visit';
+import { fadeHome, openGuestWindow, watchHomePet } from './visit-windows';
+import type { GuestWindow, Rect, WindowElectron } from './visit-windows';
 
 const run = promisify(execFile);
 
@@ -42,6 +51,11 @@ export const MENU_OWNER = 'dsh-pet-app';
 const MENU_LOOK = '看看我在干嘛';
 const MENU_POMODORO_START = '开始番茄钟';
 const MENU_DIARY = '宠物日记';
+/** 「更多」里列邻居的那组菜单项的 owner（也是分组名） */
+const MENU_VISIT_OWNER = '串门';
+/** 做客时最多聊几句、两句之间隔多久 */
+const TRIP_ROUNDS = 4;
+const TALK_GAP_MS = 60_000;
 /** 自动看屏幕要求键鼠最近活动过（秒）：人在看视频 / 发呆时不打扰 */
 const SCREEN_ACTIVE_IDLE_SEC = 60;
 /** 应用刚说过话这么久内，自动碎碎念让一让（气泡默认显示 10 秒） */
@@ -57,6 +71,33 @@ interface Meme {
   desc: string;
 }
 
+/** 自家宠物正在别人家做客 */
+interface Trip {
+  host: Neighbor;
+  token: string;
+  since: number;
+  /** 聊过的话（「你：…」「小鱼：…」），接着聊、回家讲见闻用 */
+  lines: string[];
+  /** 已经开口说过几句（送没送到都算） */
+  rounds: number;
+  /** 连着几次报平安没送到 */
+  failures: number;
+  pinging: boolean;
+  /** 下一句的定时器 */
+  talkTimer: ReturnType<typeof setTimeout> | null;
+  pingTimer: ReturnType<typeof setInterval>;
+}
+
+/** 回家的原因：到点 / 主人叫回（含家里有话要说、关了串门、退出）/ 被对方请回 / 失联 */
+type HomeReason = 'time-up' | 'called' | 'sent-home' | 'lost';
+/** 一句没聊上就回家时，回家的经过（照实说：不写清楚小模型会自己编，比如「门锁着」） */
+const HOME_WITHOUT_CHAT: Record<HomeReason, string> = {
+  'time-up': '待到点就回来了，没聊上话',
+  called: '刚进门家里就有事，先回来了',
+  'sent-home': '刚进门就被它家主人请回来了',
+  lost: '突然连不上它家，只好回来了',
+};
+
 /** 本模块用到的 Electron 能力（只声明用到的成员：静态 import 'electron' 会让 tsc 整仓找不到类型） */
 export interface FeatureElectron {
   powerMonitor: {
@@ -71,10 +112,12 @@ export interface FeatureElectron {
   };
   screen: {
     getCursorScreenPoint(): { x: number; y: number };
-    getDisplayNearestPoint(point: { x: number; y: number }): { id: number };
+    getDisplayNearestPoint(point: { x: number; y: number }): { id: number; workArea: Rect };
   };
   systemPreferences: { getMediaAccessStatus(mediaType: 'screen'): string };
   shell: { openExternal(url: string): Promise<void>; openPath(path: string): Promise<string> };
+  BrowserWindow: WindowElectron['BrowserWindow'];
+  ipcMain: WindowElectron['ipcMain'];
 }
 
 export interface AppFeatures {
@@ -132,6 +175,27 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let lastSpokeAt = 0;
   /** 插件上次来问碎碎念这一拍的时间：判断自动碎碎念在不在跑 */
   let lastWhisperTurnAt = 0;
+  /** 本次运行的串门信标 id（认出自己发的信标） */
+  const visitId = randomUUID();
+  /** 串门网络：信标（总开关开着、接待或出门开了任一项时有）与接待端口（允许别人来时有） */
+  let neighborhood: Neighborhood | null = null;
+  let visitHost: VisitHost | null = null;
+  let hostPort = 0;
+  /** 串门网络正在开 / 关（异步），这期间不重复开关 */
+  let visitSwitching = false;
+  /** 开串门网络失败过（端口被占等）：关掉再打开串门之前不再每拍重试、刷日志 */
+  let visitBroken = false;
+  /** 正在敲谁家的门（等对方主人答复） */
+  let knockingOn: Neighbor | null = null;
+  /** 自家宠物正在别人家做客 */
+  let trip: Trip | null = null;
+  /** 来自家做客的客人的窗口与进门时间 */
+  let guestWindow: GuestWindow | null = null;
+  let guestSince = 0;
+  /** 「更多 → 串门」里的项：label → 邻居 id */
+  let neighborMenu = new Map<string, string>();
+  /** 自家宠物在哪（客人站它旁边） */
+  const homePet = watchHomePet(electron);
 
   // ---------- 桌宠路由 ----------
 
@@ -162,6 +226,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /** @param image 配图：表情包池里的名称（插件按池校验） */
   async function say(text: string, image?: string): Promise<boolean> {
+    // 出门在外时家里有话要说（提醒、看屏幕、Claude……）：先回家再说
+    if (trip) await comeHome('called');
     try {
       const result = await petRequest('POST', '/broadcast', { text, anim: true, ...(image ? { image } : {}) });
       if (result.ok !== true) log(`说话失败：${JSON.stringify(result)}`);
@@ -228,6 +294,26 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       }
     }
     return null;
+  }
+
+  /**
+   * 按人设生成一句、不说出来，排进说话队列（与说话串行用模型）；生成不了用兜底句。
+   * 串门的台词会发到别人电脑上：只用人设，不带「主人此刻」。
+   */
+  function compose(instruction: string, fallback: string): Promise<string> {
+    const next = speaking.then(async () => {
+      generating = true;
+      try {
+        return (await generate(instruction, LINE_RULE, personaPrompt())) ?? fallback;
+      } catch (error) {
+        log(`生成失败：${errorText(error)}`);
+        return fallback;
+      } finally {
+        generating = false;
+      }
+    });
+    speaking = next.catch(() => undefined);
+    return next;
   }
 
   /** 按指令生成一句并说出来；生成不了就说兜底句 */
@@ -424,8 +510,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
     // 自动碎碎念在跑时，看屏幕占它让出的那一拍（takeWhisperTurn），不另起一路；没在跑才自己按间隔看
     if (!whisperRunning(now) && screenDue(now)) void lookAtScreen(false);
+    await syncVisit();
     await refreshStatus(now);
     await refreshMenu(now);
+    await refreshNeighborMenu();
   }
 
   /**
@@ -436,6 +524,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const config = deps.appConfig();
     return (
       config.screen.enabled &&
+      trip === null &&
       tracker.snapshot()?.present === true &&
       electron.powerMonitor.getSystemIdleTime() < activeIdleSec &&
       pomodoro.phase() !== 'focus' &&
@@ -460,6 +549,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     if (id !== petId()) return false;
     const now = Date.now();
     lastWhisperTurnAt = now;
+    // 出门在外：家里只剩个半透明的影子，不碎碎念
+    if (trip) return true;
     // 拍与拍之间可能隔好几分钟，「碰过键鼠」放宽到这一拍以来：看视频 / 发呆一整拍仍然不看，
     // 但不会因为恰好在这一拍的瞬间停手了一分钟就错过（只按 60 秒卡，长间隔下几乎轮不到看屏幕）
     if (screenDue(now, Math.max(SCREEN_ACTIVE_IDLE_SEC, whisperPeriodSec()))) {
@@ -566,9 +657,13 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   async function refreshStatus(now: number): Promise<void> {
     const phase = pomodoro.phase();
+    const stayMs = deps.appConfig().visit.stayMin * 60_000;
     const next = composeWorkStatus(
       claude.view(now),
       phase ? { phase, remainingMin: pomodoro.remainingMin(now) } : null,
+      trip
+        ? { owner: trip.host.owner, remainingMin: Math.max(1, Math.ceil((trip.since + stayMs - now) / 60_000)) }
+        : null,
     );
     if (sameStatus(next, lastStatus)) return;
     try {
@@ -580,6 +675,348 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
   }
 
+  // ---------- 串门 ----------
+
+  /** 邻居看到的主人昵称：设置里填的，没填用登录用户名 */
+  function nickname(): string {
+    let fallback = '';
+    try {
+      fallback = userInfo().username;
+    } catch {
+      // 取不到登录用户名（极少见）：下面按「主人」
+    }
+    return cleanText(deps.appConfig().visit.nickname || fallback, NAME_MAX) || '主人';
+  }
+
+  function petName(): string {
+    try {
+      const found = findPetInstance(readAllConfig(deps.configPaths), petId());
+      return cleanText(String(found?.pet.name ?? ''), NAME_MAX) || '桌宠';
+    } catch {
+      return '桌宠';
+    }
+  }
+
+  /**
+   * 按设置开 / 关串门的两块网络（每拍查一次：设置页改了下一拍生效）：
+   * 接待端口跟「允许别人来」走；信标（听邻居；接待时也报自己）在总开关开着、接待或出门开了任一项时开着。
+   * 不许出门了，在外的宠物直接回家。
+   */
+  async function syncVisit(): Promise<void> {
+    const { enabled, hosting, visiting } = deps.appConfig().visit;
+    if (!enabled) visitBroken = false;
+    if (visitSwitching || visitBroken) return;
+    const wantHost = enabled && hosting;
+    const wantNeighborhood = enabled && (hosting || visiting);
+    visitSwitching = true;
+    try {
+      if (trip && !(enabled && visiting)) await comeHome('called');
+      if (wantHost && !visitHost) await openHost();
+      if (!wantHost && visitHost) await closeHost();
+      if (wantNeighborhood && !neighborhood) await openNeighborhood();
+      if (!wantNeighborhood && neighborhood) {
+        neighborhood.stop();
+        neighborhood = null;
+        log('串门：信标关了');
+      }
+    } finally {
+      visitSwitching = false;
+    }
+  }
+
+  async function openHost(): Promise<void> {
+    const host = new VisitHost(hostHandlers, { log });
+    try {
+      hostPort = await host.listen();
+    } catch (error) {
+      visitBroken = true;
+      log(`串门：接待端口开不了：${errorText(error)}`);
+      return;
+    }
+    visitHost = host;
+    log(`串门：接待开了，端口 ${hostPort}`);
+  }
+
+  /** 关接待：家里的客人窗口直接关掉（客人下次报平安时知道自己该回家了） */
+  async function closeHost(): Promise<void> {
+    guestWindow?.close(0);
+    guestWindow = null;
+    const host = visitHost;
+    visitHost = null;
+    await host?.close();
+    log('串门：接待关了');
+  }
+
+  async function openNeighborhood(): Promise<void> {
+    const hood = new Neighborhood({
+      id: visitId,
+      // 不接待客人时只听不发：别人看不到自己，自己照样能出门
+      announce: () => (visitHost ? { owner: nickname(), pet: petName(), port: hostPort } : null),
+      log,
+    });
+    try {
+      await hood.start();
+    } catch (error) {
+      visitBroken = true;
+      log(`串门：信标端口开不了：${errorText(error)}`);
+      return;
+    }
+    neighborhood = hood;
+    log('串门：信标开了');
+  }
+
+  /** 串门的一句台词：开了「串门时用模型聊天」就按人设生成，没开用固定句 */
+  function visitLine(instruction: string, fallback: string): Promise<string> {
+    return deps.appConfig().visit.chat ? compose(instruction, fallback) : Promise.resolve(fallback);
+  }
+
+  /** 接待这一侧：VisitHost 收到敲门、说话、告辞时来问这里 */
+  const hostHandlers: HostHandlers = {
+    canHost: () => trip === null && knockingOn === null,
+    knocked(visitor) {
+      log(`串门：${visitor.owner}（${visitor.address}）家的 ${visitor.pet} 来敲门`);
+      void say(`${visitor.owner} 家的 ${visitor.pet} 来敲门啦，右键点「让 ${visitor.pet} 进来」请它进门～`);
+      void refreshMenu(Date.now());
+      void refreshNeighborMenu();
+    },
+    knockEnded(visitor, reason) {
+      log(`串门：${visitor.owner} 家的 ${visitor.pet} ${reason === 'gone' ? '不等了' : '敲门没等到答复'}`);
+      void refreshMenu(Date.now());
+    },
+    async line(visitor, text) {
+      guestWindow?.say(text);
+      const reply = await visitLine(
+        `${visitor.owner} 家的宠物「${visitor.pet}」来你家串门，它对你说：「${text}」。回它一句。`,
+        '欢迎来玩呀～',
+      );
+      await say(reply);
+      return reply;
+    },
+    left(visitor, reason, text) {
+      seeGuestOff(
+        visitor,
+        text,
+        reason === 'lost' ? `${visitor.pet} 突然不见了，可能回家了～` : `${visitor.pet} 回家啦，下次再来玩～`,
+      );
+    },
+  };
+
+  /** 主人答复敲门 */
+  function letIn(accept: boolean): void {
+    const visitor = visitHost?.answer(accept);
+    if (!visitor) return;
+    if (!accept) {
+      void say(`好，那就不让 ${visitor.pet} 进来啦～`);
+      return;
+    }
+    log(`串门：${visitor.owner} 家的 ${visitor.pet} 进门了`);
+    guestSince = Date.now();
+    guestWindow = openGuestWindow(
+      electron,
+      `${new URL(deps.petBase).origin}/app/guest`,
+      `${visitor.owner} 家的 ${visitor.pet}`,
+      homePet.box(),
+    );
+  }
+
+  function sendGuestHome(): void {
+    const visitor = visitHost?.sendHome();
+    if (visitor) seeGuestOff(visitor, '那我先回家啦～', `${visitor.pet} 回家啦～`);
+  }
+
+  /** 送客：客人窗口说完告别的话、挥挥手再关，自家宠物说一句，记进日记 */
+  function seeGuestOff(visitor: Visitor, farewell: string, line: string): void {
+    if (farewell) guestWindow?.say(farewell);
+    guestWindow?.wave();
+    guestWindow?.close(5_000);
+    guestWindow = null;
+    log(`串门：${visitor.owner} 家的 ${visitor.pet} 走了`);
+    diary.note(
+      Date.now(),
+      'visit',
+      `${visitor.owner} 家的宠物 ${visitor.pet} 来串门，待了 ${durationText(Date.now() - guestSince)}`,
+    );
+    void say(line);
+    void refreshMenu(Date.now());
+  }
+
+  /** 串门相关的右键项（随状态变）：label → 点了做什么 */
+  function visitActions(): Map<string, () => unknown> {
+    const actions = new Map<string, () => unknown>();
+    const knocking = visitHost?.knocking();
+    const guest = visitHost?.guest();
+    if (knocking) {
+      actions.set(`让 ${knocking.pet} 进来`, () => letIn(true));
+      actions.set(`不让 ${knocking.pet} 进来`, () => letIn(false));
+    } else if (guest) {
+      actions.set(`请 ${guest.pet} 回家`, sendGuestHome);
+    } else if (trip) {
+      actions.set(`从 ${trip.host.owner} 家回来`, () => comeHome('called'));
+    }
+    return actions;
+  }
+
+  /** 出门：先敲门，对方主人点头了才进门 */
+  async function goVisit(id: string): Promise<void> {
+    const neighbor = neighborhood?.get(id);
+    if (!neighbor) {
+      await say('它好像已经不在附近了～');
+      return;
+    }
+    if (trip || knockingOn || visitHost?.guest() || visitHost?.knocking() || !deps.appConfig().visit.visiting) return;
+    knockingOn = neighbor;
+    void refreshNeighborMenu();
+    void say(`我去 ${neighbor.owner} 家敲门啦～`);
+    let answer: KnockAnswer | null;
+    try {
+      answer = await knockOn(neighbor, { owner: nickname(), pet: petName() });
+    } catch (error) {
+      // fetch 只说「fetch failed」，真正的原因（没授权本地网络时是 EHOSTUNREACH）在 cause 里
+      const cause = (error as { cause?: unknown }).cause;
+      log(
+        `串门：敲 ${neighbor.owner}（${neighbor.address}）家的门失败：${errorText(error)}${cause ? `（${errorText(cause)}）` : ''}`,
+      );
+      answer = null;
+    } finally {
+      knockingOn = null;
+    }
+    if (!answer?.ok) {
+      await say(knockFailText(neighbor.owner, answer ? answer.reason : 'unreachable'));
+      return;
+    }
+    // 等答复期间关了串门 / 不许出门了 / 退出了：进门就告辞
+    const { enabled, visiting } = deps.appConfig().visit;
+    if (!enabled || !visiting || disposed) {
+      void tripRequest(neighbor, '/v1/leave', { token: answer.token, text: '' }).catch(() => undefined);
+      return;
+    }
+    startTrip(neighbor, answer.token);
+  }
+
+  function startTrip(host: Neighbor, token: string): void {
+    const current: Trip = {
+      host,
+      token,
+      since: Date.now(),
+      lines: [],
+      rounds: 0,
+      failures: 0,
+      pinging: false,
+      talkTimer: null,
+      pingTimer: setInterval(() => void pingTrip(current), PING_MS),
+    };
+    trip = current;
+    fadeHome(electron, true);
+    log(`串门：进了 ${host.owner} 家的门`);
+    current.talkTimer = setTimeout(() => void talk(current), 3_000);
+    void refreshStatus(Date.now());
+    void refreshMenu(Date.now());
+  }
+
+  /** 做客时说一句：头一句打招呼，之后接着聊，说满 TRIP_ROUNDS 句就安静待着 */
+  async function talk(current: Trip): Promise<void> {
+    if (trip !== current) return;
+    const { owner, pet } = current.host;
+    const first = current.lines.length === 0;
+    const instruction = first
+      ? `你去 ${owner} 家串门，刚进门，见到了它家的宠物「${pet}」。跟它打个招呼。`
+      : `你在 ${owner} 家串门，正和它家的宠物「${pet}」聊天。刚才你们说了：\n${current.lines.join('\n')}\n接着跟它聊一句。`;
+    const text = cleanText(await visitLine(instruction, first ? `${pet}，我来串门啦～` : '你家真舒服呀～'), LINE_MAX);
+    if (trip !== current) return;
+    current.rounds += 1;
+    let result: TripReply | null = null;
+    try {
+      result = await tripRequest(current.host, '/v1/chat', { token: current.token, text });
+    } catch (error) {
+      // 没送到：不算失联（报平安那条负责判断），下一句照常
+      log(`串门：说话没送到：${errorText(error)}`);
+    }
+    if (trip !== current) return;
+    if (result && !result.ok) {
+      await comeHome(result.reason === 'sent-home' ? 'sent-home' : 'lost');
+      return;
+    }
+    if (result) current.lines.push(`你：${text}`, `${pet}：${result.reply || '……'}`);
+    // 不用模型聊天时只打个招呼
+    const rounds = deps.appConfig().visit.chat ? TRIP_ROUNDS : 1;
+    if (current.rounds < rounds) current.talkTimer = setTimeout(() => void talk(current), TALK_GAP_MS);
+  }
+
+  /** 每 PING_MS 报一次平安，顺便看到点没有 */
+  async function pingTrip(current: Trip): Promise<void> {
+    if (trip !== current || current.pinging) return;
+    if (Date.now() - current.since >= deps.appConfig().visit.stayMin * 60_000) {
+      await comeHome('time-up');
+      return;
+    }
+    current.pinging = true;
+    try {
+      const result = await tripRequest(current.host, '/v1/ping', { token: current.token });
+      if (trip !== current) return;
+      if (!result.ok) {
+        await comeHome(result.reason === 'sent-home' ? 'sent-home' : 'lost');
+        return;
+      }
+      current.failures = 0;
+    } catch (error) {
+      current.failures += 1;
+      if (current.failures >= 3 && trip === current) {
+        log(`串门：和 ${current.host.owner} 家连不上了：${errorText(error)}`);
+        await comeHome('lost');
+      }
+    } finally {
+      current.pinging = false;
+    }
+  }
+
+  /**
+   * 回家：告辞（被请回、失联时不用）、恢复自家宠物、记日记、跟主人讲讲见闻。
+   * 叫回家时**不等说话队列**：它可能正是从说话队列里被叫回来的（speak → say → comeHome），等就死锁了；
+   * 只有到点回家（报平安的定时器里，不在队列里）才等模型生成告别的话。
+   */
+  async function comeHome(reason: HomeReason): Promise<void> {
+    const current = trip;
+    if (!current) return;
+    trip = null;
+    clearInterval(current.pingTimer);
+    if (current.talkTimer !== null) clearTimeout(current.talkTimer);
+    fadeHome(electron, false);
+    const { owner, pet } = current.host;
+    log(`串门：从 ${owner} 家回来了（${reason}）`);
+    if (reason === 'time-up' || reason === 'called') {
+      const farewell =
+        reason === 'time-up'
+          ? cleanText(
+              await visitLine(
+                `你在 ${owner} 家串门，该回家了。跟它家的宠物「${pet}」道个别。`,
+                `${pet}，我该回家啦，下次见～`,
+              ),
+              LINE_MAX,
+            )
+          : '家里叫我啦，先回去啦～';
+      void tripRequest(current.host, '/v1/leave', { token: current.token, text: farewell }).catch((error: unknown) =>
+        log(`串门：告辞没送到：${errorText(error)}`),
+      );
+    }
+    const chats = current.lines.length / 2;
+    const ending = reason === 'sent-home' ? '，被它家主人请回来了' : reason === 'lost' ? '，后来连不上就回来了' : '';
+    diary.note(Date.now(), 'visit', `去 ${owner} 家串门，和它家的宠物 ${pet} 聊了 ${chats} 句${ending}`);
+    void refreshStatus(Date.now());
+    void refreshMenu(Date.now());
+    const back = `我从 ${owner} 家回来啦～`;
+    // 不用模型聊天：回家也只说固定的一句
+    if (!deps.appConfig().visit.chat) {
+      void say(back);
+      return;
+    }
+    void speak(
+      chats > 0
+        ? `你刚去 ${owner} 家串门回来，和它家的宠物「${pet}」聊了这些：\n${current.lines.join('\n')}\n用一句话跟主人讲讲串门的见闻。`
+        : `你去 ${owner} 家串门，${HOME_WITHOUT_CHAT[reason]}。跟主人说一声。`,
+      back,
+    );
+  }
+
   // ---------- 右键菜单 ----------
 
   function wantedLabels(now: number): string[] {
@@ -587,19 +1024,61 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const pomodoroLabel = phase
       ? `停止番茄钟 · ${phase === 'focus' ? '专注' : '休息'}剩 ${pomodoro.remainingMin(now)} 分`
       : MENU_POMODORO_START;
-    return [MENU_LOOK, pomodoroLabel, MENU_DIARY];
+    return [MENU_LOOK, pomodoroLabel, MENU_DIARY, ...visitActions().keys()];
   }
 
-  async function refreshMenu(now: number, force = false): Promise<void> {
+  /** @returns 注册上了 */
+  async function refreshMenu(now: number, force = false): Promise<boolean> {
     const labels = wantedLabels(now);
-    if (!force && labels.join('\n') === menuLabels.join('\n')) return;
+    if (!force && labels.join('\n') === menuLabels.join('\n')) return true;
     try {
       const result = await petRequest('POST', '/menu/item', { owner: MENU_OWNER, labels });
       if (result.ok === true) menuLabels = labels;
       else log(`注册菜单失败：${JSON.stringify(result)}`);
+      return result.ok === true;
     } catch (error) {
       log(`注册菜单失败：${errorText(error)}`);
+      return false;
     }
+  }
+
+  /**
+   * 「更多 → 串门」：附近的邻居（只有一位时插件直接平铺成「更多 → 去 X 家」）。
+   * 自己在外、正在敲门、家里有客或有人敲门时不列，免得一边做客一边又出门。
+   * @returns 这组项现在注册着（没有邻居时整组删掉）
+   */
+  async function refreshNeighborMenu(force = false): Promise<boolean> {
+    const free =
+      deps.appConfig().visit.visiting &&
+      trip === null &&
+      knockingOn === null &&
+      !visitHost?.guest() &&
+      !visitHost?.knocking();
+    const next = new Map<string, string>();
+    for (const neighbor of free ? (neighborhood?.list() ?? []) : []) {
+      if (next.size >= 20) break; // 插件每组最多 20 项
+      let label = `去 ${neighbor.owner} 家`;
+      for (let n = 2; next.has(label); n += 1) label = `去 ${neighbor.owner} 家（${n}）`;
+      next.set(label, neighbor.id);
+    }
+    const labels = [...next.keys()];
+    // 本来就没注册、现在也没有可列的：什么都不发（删除也会唤醒渲染端的 /state 长轮询，别每拍删一次）
+    if (labels.length === 0 && neighborMenu.size === 0) return false;
+    if (!force && labels.join('\n') === [...neighborMenu.keys()].join('\n')) {
+      neighborMenu = next; // 文案没变也换上新的 id：邻居重启过应用 id 会变
+      return labels.length > 0;
+    }
+    try {
+      const result =
+        labels.length > 0
+          ? await petRequest('POST', '/menu/item', { owner: MENU_VISIT_OWNER, labels })
+          : await petRequest('DELETE', `/menu/item?owner=${encodeURIComponent(MENU_VISIT_OWNER)}`);
+      if (result.ok === true) neighborMenu = next;
+      else log(`注册串门菜单失败：${JSON.stringify(result)}`);
+    } catch (error) {
+      log(`注册串门菜单失败：${errorText(error)}`);
+    }
+    return neighborMenu.size > 0;
   }
 
   async function onMenuClick(label: string): Promise<void> {
@@ -613,17 +1092,31 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       void say('番茄钟停下啦～');
     } else if (label === MENU_DIARY) {
       await openDiary(now);
+    } else {
+      await visitActions().get(label)?.();
     }
     await refreshStatus(now);
     await refreshMenu(now);
   }
 
-  /** 长轮询菜单点击（插件单次最多挂 10 秒） */
-  async function pollMenu(): Promise<void> {
+  async function onNeighborClick(label: string): Promise<void> {
+    const id = neighborMenu.get(label);
+    if (id) await goVisit(id);
+  }
+
+  /**
+   * 长轮询某个 owner 的菜单点击（插件单次最多挂 10 秒）
+   * @param register owner 没注册（宿主重启过 / 被清掉 / 本来就没项）时重新注册，返回注册上了没有
+   */
+  async function pollMenu(
+    owner: string,
+    onClick: (label: string) => Promise<void>,
+    register: () => Promise<boolean>,
+  ): Promise<void> {
     while (!disposed) {
       try {
         const url = new URL(deps.petBase + '/menu/events');
-        url.searchParams.set('owner', MENU_OWNER);
+        url.searchParams.set('owner', owner);
         url.searchParams.set('wait', '10000');
         const result = (await (await fetch(url, { signal: AbortSignal.timeout(15_000) })).json()) as {
           ok?: boolean;
@@ -631,13 +1124,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
           events?: Record<string, string | null>;
         };
         if (result.ok !== true) {
-          // 宿主重启过 / 被清掉：重新注册
-          if (result.reason === 'unknown-owner') await refreshMenu(Date.now(), true);
-          else await delay(5_000);
+          if (result.reason !== 'unknown-owner' || !(await register())) await delay(5_000);
           continue;
         }
         for (const [label, pet] of Object.entries(result.events ?? {})) {
-          if (pet !== null) await onMenuClick(label);
+          if (pet !== null) await onClick(label);
         }
       } catch (error) {
         log(`菜单轮询失败：${errorText(error)}`);
@@ -646,7 +1137,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
   }
 
-  void refreshMenu(Date.now(), true).then(() => pollMenu());
+  void refreshMenu(Date.now(), true).then(() => pollMenu(MENU_OWNER, onMenuClick, () => refreshMenu(Date.now(), true)));
+  void pollMenu(MENU_VISIT_OWNER, onNeighborClick, () => refreshNeighborMenu(true));
   void tick()
     .catch((error: unknown) => log(`采样失败：${errorText(error)}`))
     .finally(schedule);
@@ -674,9 +1166,30 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     dispose() {
       disposed = true;
       if (tickTimer !== null) clearTimeout(tickTimer);
+      // 在别人家做客：告个辞（不等）；家里的客人窗口关掉
+      void comeHome('called');
+      guestWindow?.close(0);
+      neighborhood?.stop();
+      void visitHost?.close();
+      homePet.dispose();
       diary.flush(Date.now());
     },
   };
+}
+
+function knockFailText(owner: string, reason: KnockFailure | 'unreachable'): string {
+  switch (reason) {
+    case 'busy':
+      return `${owner} 家现在不方便，下次再去吧～`;
+    case 'too-soon':
+      return `刚敲过 ${owner} 家的门，等会儿再去～`;
+    case 'declined':
+      return `${owner} 家没让我进门，呜～`;
+    case 'no-answer':
+      return `${owner} 家半天没人应门～`;
+    case 'unreachable':
+      return `连不上 ${owner} 家，看看系统设置里有没有允许 dsh-pet 访问本地网络～`;
+  }
 }
 
 function delay(ms: number): Promise<void> {

@@ -40,7 +40,7 @@ const daySchema = z.object({
   events: z.array(
     z.object({
       at: z.number(),
-      kind: z.enum(['return', 'pomodoro', 'sit', 'water', 'off-work', 'claude', 'screen']),
+      kind: z.enum(['return', 'pomodoro', 'sit', 'water', 'off-work', 'claude', 'screen', 'visit']),
       text: z.string(),
     }),
   ),

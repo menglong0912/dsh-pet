@@ -170,7 +170,7 @@ test('settings browser script shows and saves the app section when the app serve
         value: '',
         checked: false,
         disabled: false,
-        hidden: id === 'app-settings',
+        hidden: id === 'app-settings' || id === 'visit-settings',
         textContent: '',
         dataset: {},
         listeners: {},
@@ -189,6 +189,7 @@ test('settings browser script shows and saves the app section when the app serve
     sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
     water: { enabled: true, everyMin: 60 },
     offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
+    visit: { enabled: false, hosting: true, visiting: true, chat: true, nickname: '', stayMin: 10 },
   };
   runInNewContext(settingsScript, {
     URLSearchParams,
@@ -210,11 +211,26 @@ test('settings browser script shows and saves the app section when the app serve
   assert.equal(element('offWorkTime').value, '18:00');
   assert.equal(element('offWorkLeadMin').value, '10');
   assert.equal(element('offWorkWeekdaysOnly').checked, true);
+  assert.equal(element('visit-settings').hidden, false);
+  assert.equal(element('visitEnabled').checked, false);
+  assert.equal(element('visitHosting').checked, true);
+  assert.equal(element('visitStayMin').value, '10');
+  // 总开关关着：细节开关置灰；打开总开关就能改
+  assert.equal(element('visitHosting').disabled, true);
+  assert.equal(element('visitStayMin').disabled, true);
   element('screenIntervalMin').value = '30';
   element('focusMin').value = '50';
   element('waterEnabled').checked = false;
   element('offWorkTime').value = '17:30';
   element('offWorkLeadMin').value = '15';
+  element('visitEnabled').checked = true;
+  element('visitEnabled').listeners.change();
+  assert.equal(element('visitHosting').disabled, false);
+  assert.equal(element('visitStayMin').disabled, false);
+  element('visitHosting').checked = false;
+  element('visitChat').checked = false;
+  element('visitNickname').value = ' 小王 ';
+  element('visitStayMin').value = '20';
   await element('settings').listeners.submit({ preventDefault() {} });
   const post = requests.find(({ url, options }) => url === '/standalone-ai/app-settings' && options.method === 'POST');
   assert.deepEqual(JSON.parse(post?.options.body ?? '{}'), {
@@ -223,5 +239,6 @@ test('settings browser script shows and saves the app section when the app serve
     pomodoro: { focusMin: 50, breakMin: 5 },
     water: { enabled: false, everyMin: 60 },
     offWork: { enabled: true, time: '17:30', weekdaysOnly: true, leadMin: 15 },
+    visit: { enabled: true, hosting: false, visiting: true, chat: false, nickname: '小王', stayMin: 20 },
   });
 });

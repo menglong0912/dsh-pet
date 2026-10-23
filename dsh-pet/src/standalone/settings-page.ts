@@ -47,6 +47,20 @@ export const settingsPage = `<!doctype html>
 <p id="offwork-note" class="hint">每天在下班前这么多分钟提醒一次，填 0 就是到点提醒；那会儿不在电脑前就等回来再说，专注番茄钟期间等专注结束。</p>
 <label for="greetAfterAwayMin">离开多久、回来时打招呼（分钟）</label><input id="greetAfterAwayMin" type="number" min="1" max="1440" step="1" value="10">
 </fieldset>
+<fieldset id="visit-settings" hidden><legend>局域网串门</legend>
+<label class="check"><input id="visitEnabled" type="checkbox" aria-describedby="visit-note">开启局域网串门</label>
+<p id="visit-note" class="hint">总开关：关着时不发信标、不开端口，局域网里什么都不做。开启后，同一局域网里开了串门的 dsh-pet 能互相看到；网络上只传昵称、宠物名和两只宠物说的话，截图、在用的应用、Claude 进度都不会发出去。首次开启时 macOS 会询问是否允许访问本地网络。</p>
+<div class="sub">
+<label class="check"><input id="visitHosting" type="checkbox" aria-describedby="hosting-note">允许别人来我家做客</label>
+<p id="hosting-note" class="hint">关掉后别人在局域网里看不到你；开着时每次进门也要你在右键菜单里点「让它进来」。</p>
+<label class="check"><input id="visitVisiting" type="checkbox" aria-describedby="visiting-note">允许我的宠物出门做客</label>
+<p id="visiting-note" class="hint">右键「更多 → 串门」里列出附近的邻居，点了去敲门。</p>
+<label class="check"><input id="visitChat" type="checkbox" aria-describedby="chat-note">串门时用模型聊天</label>
+<p id="chat-note" class="hint">两只宠物各用自己的人设和模型聊几句；关掉后只说固定的招呼和道别，不调用模型。</p>
+<div class="pair"><div><label for="visitNickname">邻居看到的昵称</label><input id="visitNickname" type="text" maxlength="12" placeholder="留空用电脑登录名" spellcheck="false"></div>
+<div><label for="visitStayMin">出门做客待多久（分钟）</label><input id="visitStayMin" type="number" min="1" max="60" step="1" value="10"></div></div>
+</div>
+</fieldset>
 <footer><p id="privacy">所有配置与密钥仅保存在当前机器。<br>关闭 AI 后，桌宠仍可正常显示、移动与互动。</p><button id="save" type="submit" disabled>保存到本机</button></footer>
 <p id="status" role="status" aria-live="polite">正在读取本机设置…</p>
 </form><noscript>需要启用 JavaScript 才能保存设置。请从桌宠菜单打开本页。</noscript></main></body></html>`;
@@ -55,7 +69,7 @@ export const settingsStyle = `
 :root{color-scheme:light;--ink:#203b4b;--muted:#526a78;--blue:#12618b;--line:#cbdce5;--paper:#fff;--water:#edf5fa}
 *{box-sizing:border-box}body{margin:0;background:var(--water);color:var(--ink);font:16px/1.6 "Microsoft YaHei UI","PingFang SC",sans-serif}
 main{max-width:720px;margin:48px auto;padding:0 24px 32px}header{padding:0 12px 28px}.fish{display:block;font:700 29px/1.3 Georgia,serif;color:var(--blue);letter-spacing:2px;margin-bottom:24px}.local{font-size:13px;color:var(--muted);margin:0 0 10px}h1{font-size:32px;line-height:1.3;letter-spacing:-1px;margin:0 0 16px;font-weight:700}.intro{margin:0;color:var(--muted)}
-form{background:var(--paper);border:1px solid var(--line);border-radius:16px 16px 6px 6px;padding:28px 32px 20px}fieldset{padding:0 0 28px;margin:0 0 24px;border:0;border-bottom:1px solid var(--line);min-width:0}legend{font-size:19px;font-weight:700;margin-bottom:18px;padding:0}label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}input:not([type=checkbox]),select{display:block;width:100%;min-height:44px;border:1px solid #a5bdcb;border-radius:6px;background:#fff;color:var(--ink);padding:9px 12px;font:inherit;font-size:15px}input::placeholder{color:#6a7e8b}input[type=checkbox]{accent-color:var(--blue);width:18px;height:18px;flex-shrink:0;margin:0}.check{display:flex;align-items:center;gap:10px;min-height:32px;cursor:pointer}.enabled{margin-top:24px}.clear{font-weight:400;color:var(--muted);font-size:13px}.hint{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}.key-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}.key-heading label{margin:0 0 6px}.key-heading .hint{margin:0 0 6px}.notice{font-size:13px;color:#704b13;background:#fff7e7;border-left:3px solid #c18e36;margin:12px 0 16px;padding:12px 14px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}footer{display:flex;align-items:center;justify-content:space-between;gap:18px}footer p{font-size:12px;color:var(--muted);margin:0}button{border:0;border-radius:7px;min-height:44px;padding:10px 20px;background:var(--blue);color:#fff;font:600 15px/1.5 inherit;white-space:nowrap;cursor:pointer}button:hover{background:#0b4e73}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #3a94c4;outline-offset:3px}#status{font-size:13px;min-height:24px;margin:18px 0 0;color:var(--blue)}#status[data-error=true]{color:#a13b30}
+form{background:var(--paper);border:1px solid var(--line);border-radius:16px 16px 6px 6px;padding:28px 32px 20px}fieldset{padding:0 0 28px;margin:0 0 24px;border:0;border-bottom:1px solid var(--line);min-width:0}legend{font-size:19px;font-weight:700;margin-bottom:18px;padding:0}label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}input:not([type=checkbox]),select{display:block;width:100%;min-height:44px;border:1px solid #a5bdcb;border-radius:6px;background:#fff;color:var(--ink);padding:9px 12px;font:inherit;font-size:15px}input::placeholder{color:#6a7e8b}input[type=checkbox]{accent-color:var(--blue);width:18px;height:18px;flex-shrink:0;margin:0}.check{display:flex;align-items:center;gap:10px;min-height:32px;cursor:pointer}.enabled{margin-top:24px}.clear{font-weight:400;color:var(--muted);font-size:13px}.hint{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}.key-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}.key-heading label{margin:0 0 6px}.key-heading .hint{margin:0 0 6px}.notice{font-size:13px;color:#704b13;background:#fff7e7;border-left:3px solid #c18e36;margin:12px 0 16px;padding:12px 14px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}.sub{margin:10px 0 0 8px;padding-left:20px;border-left:2px solid var(--line)}footer{display:flex;align-items:center;justify-content:space-between;gap:18px}footer p{font-size:12px;color:var(--muted);margin:0}button{border:0;border-radius:7px;min-height:44px;padding:10px 20px;background:var(--blue);color:#fff;font:600 15px/1.5 inherit;white-space:nowrap;cursor:pointer}button:hover{background:#0b4e73}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #3a94c4;outline-offset:3px}#status{font-size:13px;min-height:24px;margin:18px 0 0;color:var(--blue)}#status[data-error=true]{color:#a13b30}
 .test-row{display:flex;align-items:center;gap:14px;margin:20px 0 6px;flex-wrap:wrap}#test-btn{background:#fff;color:var(--blue);border:1.5px solid var(--blue);min-height:38px;padding:6px 18px;font-size:14px;border-radius:6px;cursor:pointer;font-weight:600}#test-btn:hover{background:#edf5fa}#test-btn:disabled{opacity:.6;cursor:wait}.test-result{font-size:13px;line-height:1.5;min-height:22px;flex:1 1 200px}.test-success{color:#1a7f37;font-weight:600}.test-error{color:#cf222e}.reply-preview{display:block;color:var(--muted);font-weight:normal;font-size:12px;margin-top:4px;word-break:break-all}
 @media(max-width:560px){main{margin:24px auto;padding:0 14px 24px}header{padding:0 8px 24px}h1{font-size:28px}form{padding:24px 20px 16px}.pair{grid-template-columns:1fr;gap:0}footer{align-items:stretch;flex-direction:column}button{width:100%}.fish{margin-bottom:18px}}
 `;
@@ -85,8 +99,12 @@ export const settingsScript = `
     }
     return response.json();
   }
-  // 「陪伴与提醒」只有独立应用有（/standalone-ai/app-settings）；CLI 里是 404，这一节保持隐藏
-  const appSection = get('app-settings');
+  // 「陪伴与提醒」「局域网串门」只有独立应用有（/standalone-ai/app-settings）；CLI 里是 404，这两节保持隐藏
+  const appSections = [get('app-settings'), get('visit-settings')];
+  // 串门的细节开关挂在总开关下面：总开关关着时置灰（值照常保存，再打开时还是原来的选择）
+  const visitDetails = ['visitHosting', 'visitVisiting', 'visitChat', 'visitNickname', 'visitStayMin'];
+  function syncVisitDetails() { for (const id of visitDetails) get(id).disabled = !get('visitEnabled').checked; }
+  get('visitEnabled').addEventListener('change', syncVisitDetails);
   let appAvailable = false;
   async function appRequest(method, body) {
     const response = await fetch('/standalone-ai/app-settings', {
@@ -113,6 +131,13 @@ export const settingsScript = `
     get('offWorkLeadMin').value = String(data.offWork.leadMin);
     get('offWorkWeekdaysOnly').checked = data.offWork.weekdaysOnly === true;
     get('greetAfterAwayMin').value = String(data.greetAfterAwayMin);
+    get('visitEnabled').checked = data.visit.enabled === true;
+    get('visitHosting').checked = data.visit.hosting === true;
+    get('visitVisiting').checked = data.visit.visiting === true;
+    get('visitChat').checked = data.visit.chat === true;
+    get('visitNickname').value = data.visit.nickname;
+    get('visitStayMin').value = String(data.visit.stayMin);
+    syncVisitDetails();
   }
   const num = id => Number(get(id).value);
   function populate(data) {
@@ -200,7 +225,11 @@ export const settingsScript = `
           pomodoro: { focusMin: num('focusMin'), breakMin: num('breakMin') },
           sitting: { enabled: get('sittingEnabled').checked, afterMin: num('sittingAfterMin'), repeatMin: num('sittingRepeatMin') },
           water: { enabled: get('waterEnabled').checked, everyMin: num('waterEveryMin') },
-          offWork: { enabled: get('offWorkEnabled').checked, time: get('offWorkTime').value, weekdaysOnly: get('offWorkWeekdaysOnly').checked, leadMin: num('offWorkLeadMin') }
+          offWork: { enabled: get('offWorkEnabled').checked, time: get('offWorkTime').value, weekdaysOnly: get('offWorkWeekdaysOnly').checked, leadMin: num('offWorkLeadMin') },
+          visit: {
+            enabled: get('visitEnabled').checked, hosting: get('visitHosting').checked, visiting: get('visitVisiting').checked,
+            chat: get('visitChat').checked, nickname: get('visitNickname').value.trim(), stayMin: num('visitStayMin')
+          }
         }));
       }
       message('已保存到本机。');
@@ -210,7 +239,7 @@ export const settingsScript = `
   if (!token) { message('请从桌宠菜单或本机启动器打开设置，以获得本次运行的访问凭据。', true); return; }
   request('GET').then(data => { populate(data); save.disabled = false; message('设置只在本机保存。'); })
     .catch(error => message(error.message, true));
-  appRequest('GET').then(data => { if (data) { populateApp(data); appSection.hidden = false; appAvailable = true; } })
+  appRequest('GET').then(data => { if (data) { populateApp(data); for (const section of appSections) section.hidden = false; appAvailable = true; } })
     .catch(error => message(error.message, true));
 })();
 `;

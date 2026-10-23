@@ -58,18 +58,34 @@ test('settings page saves the whole config, validates ranges, and the getter pic
   }
 });
 
-test('an older file without offWork still loads, keeping its own values and filling the default', () => {
+test('an older file without offWork / visit still loads, keeping its own values and filling the defaults', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pet-app-config-'));
   const path = join(dir, 'app-config.json');
   const warnings: string[] = [];
   try {
     const older: Record<string, unknown> = { ...DEFAULT_APP_CONFIG, water: { enabled: false, everyMin: 90 } };
     delete older.offWork;
+    delete older.visit;
     writeFileSync(path, JSON.stringify(older));
     const config = createAppConfig(path, (m) => warnings.push(m));
     assert.deepEqual(config().water, { enabled: false, everyMin: 90 });
     assert.deepEqual(config().offWork, DEFAULT_APP_CONFIG.offWork);
+    // 串门默认关：升级后不会自己往局域网发信标
+    assert.deepEqual(config().visit, {
+      enabled: false,
+      hosting: true,
+      visiting: true,
+      chat: true,
+      nickname: '',
+      stayMin: 10,
+    });
     assert.deepEqual(warnings, []);
+    const visit = { ...DEFAULT_APP_CONFIG.visit, enabled: true };
+    assert.throws(() =>
+      saveAppConfig(path, { ...older, visit: { ...visit, nickname: '一二三四五六七八九十十一十二' } }),
+    );
+    assert.throws(() => saveAppConfig(path, { ...older, visit: { ...visit, stayMin: 61 } }));
+    assert.throws(() => saveAppConfig(path, { ...older, visit: { ...visit, hosting: 'yes' } }));
     assert.throws(() =>
       saveAppConfig(path, { ...older, offWork: { enabled: true, time: '25:00', weekdaysOnly: true, leadMin: 10 } }),
     );

@@ -26,9 +26,20 @@ const electron: FeatureElectron = {
     getSources: () =>
       Promise.resolve([{ display_id: '1', thumbnail: { isEmpty: () => false, toJPEG: () => Buffer.from('jpeg') } }]),
   },
-  screen: { getCursorScreenPoint: () => ({ x: 0, y: 0 }), getDisplayNearestPoint: () => ({ id: 1 }) },
+  screen: {
+    getCursorScreenPoint: () => ({ x: 0, y: 0 }),
+    getDisplayNearestPoint: () => ({ id: 1, workArea: { x: 0, y: 0, width: 1440, height: 900 } }),
+  },
   systemPreferences: { getMediaAccessStatus: () => 'granted' },
   shell: { openExternal: () => Promise.resolve(), openPath: () => Promise.resolve('') },
+  // 这些测试不开串门（默认关），用不到窗口
+  BrowserWindow: Object.assign(
+    function () {
+      throw new Error('测试里不开窗口');
+    },
+    { getAllWindows: () => [] },
+  ) as unknown as FeatureElectron['BrowserWindow'],
+  ipcMain: { on: () => undefined, removeListener: () => undefined },
 };
 
 /** 看屏幕发给模型的指令、挑表情包时发给模型的话（按调用顺序） */
