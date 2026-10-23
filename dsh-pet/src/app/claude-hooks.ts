@@ -3,7 +3,8 @@
  *
  * 由 `~/.claude/settings.json` 里的 hook 调 `dsh-pet hook`（scripts/pet-cli.mjs），把 hook 的 stdin JSON
  * 原样 POST 到 `/app/claude-hook`。这里按 session 记账，供状态合成（status.ts）与说话决策使用：
- *   UserPromptSubmit → 干活中；Notification（要权限）→ 等主人确认，并说一句；
+ *   UserPromptSubmit → 干活中（只在开工后亮 WORKING_SHOW_MS，长任务不常驻气泡）；
+ *   Notification（要权限）→ 等主人确认，并说一句；
  *   Stop → 干完了，短暂显示「完成」；这一轮干了 ≥ ANNOUNCE_AFTER_MS 才说一句（秒回的问答不打扰）；
  *   SessionEnd → 移除。
  *
@@ -16,6 +17,8 @@ import { basename } from 'node:path';
 export const ANNOUNCE_AFTER_MS = 30_000;
 /** 「完成」状态显示多久 */
 export const DONE_SHOW_MS = 10_000;
+/** 「干活中」只在开工后显示多久：一轮可能干很久，一直挂着气泡太吵 */
+export const WORKING_SHOW_MS = 8_000;
 /** 等确认超过这么久没有后续事件，按回到干活中处理（权限给了以后到 Stop 之前不会再有事件） */
 export const WAITING_STALE_MS = 90_000;
 /** 干活中 / 等确认超过这么久没有任何事件，视为会话已被关掉 */
@@ -85,6 +88,7 @@ export class ClaudeSessions {
       }
       const effective = s.state === 'waiting' && now - s.since > WAITING_STALE_MS ? 'working' : s.state;
       if (effective === 'done' && now - s.since > DONE_SHOW_MS) continue;
+      if (effective === 'working' && now - s.since > WORKING_SHOW_MS) continue;
       live.push({ ...s, effective });
     }
     for (const state of ['waiting', 'working', 'done'] as const) {

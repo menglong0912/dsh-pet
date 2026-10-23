@@ -12,6 +12,8 @@
 const OPEN_SHORTCUT_HINT = /Mac/i.test(navigator.platform || navigator.userAgent) ? 'Cmd+左键' : 'Ctrl+左键';
 /** 本次点击是否按住了「呼出 DSH」的修饰键（Ctrl / Cmd） */
 const isOpenShortcut = (e) => !!(e && (e.ctrlKey || e.metaKey));
+/** macOS：窗口上沿要避开菜单栏（见 fitWindowTop） */
+const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent);
 
 // ---------- 单只宠物（行为与浏览器 PetCard 一致；纯逻辑来自 src/shared） ----------
 class PetSprite {
@@ -50,6 +52,8 @@ class PetSprite {
     const m = this.size * WINDOW_MARGIN_RATIO;
     const fontConf = pet.font || config.font || S.DEFAULT_FONT;
     this.margin = { t: Math.max(m, S.bubbleTopMarginPx(fontConf, this.size)), r: m, b: m, l: m };
+    // 上边距的完整值；实际的 margin.t 在 macOS 上会随位置收缩（fitWindowTop）
+    this.fullMarginT = this.margin.t;
     window.__dshPetDebug.winMargin = this.margin;
     // 宠物包围盒左上角在【工作区】坐标系里的位置（本窗口的位置 = 宠物的位置）
     this.pos = { x: 0, y: 0 };
@@ -371,8 +375,26 @@ class PetSprite {
     });
   }
 
+  /**
+   * macOS：窗口上沿不伸进菜单栏。窗口哪怕只是透明余量压到菜单栏下面，系统也会在透明菜单栏后面
+   * 垫上一整条系统壁纸（用动态壁纸类应用时就是一条突兀的「原壁纸」）。所以按需让出上余量（气泡空间）
+   * 与视频顶部的透明边，窗口顶最多到所在屏工作区上沿；只有身体命中区（头顶）本身走进菜单栏条带时
+   * 窗口才跟进去，不裁身体。代价：贴近顶部时气泡在菜单栏下沿被截，而不是画进菜单栏。
+   */
+  fitWindowTop() {
+    if (!IS_MAC) return;
+    const area = S.resolveRect(WORK_AREAS, this.pos.x + this.halfW, this.pos.y + this.halfH);
+    let top = this.pos.y - this.fullMarginT;
+    if (area) top = Math.max(top, Math.min(area.y, this.pos.y + this.hitRect.y));
+    const t = this.pos.y - top;
+    if (t === this.margin.t) return;
+    this.margin.t = t;
+    this.el.style.top = t + 'px';
+  }
+
   sendBounds(px, py) {
     this.pos = { x: Math.round(px), y: Math.round(py) };
+    this.fitWindowTop();
     window.__dshPetDebug.dragPos = { x: this.pos.x, y: this.pos.y };
     if (window.petBridge) {
       // 完整状态一次捎带：size/bottomPad 让静止宠物从首帧起就登记进碰撞站场
