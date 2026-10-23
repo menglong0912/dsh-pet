@@ -34,6 +34,7 @@ import { flattenPetList, readAllConfig } from '../host/config';
 import { dshHomeDir } from '../host/helper-process';
 import { apply } from '../host/index';
 import { createStandaloneAi } from '../standalone/ai-provider';
+import { registerStandaloneBalance } from '../standalone/balance';
 import { packageVersion } from '../standalone/check';
 import { createStandaloneContext, createStandaloneLogger, type RegisteredRoute } from '../standalone/context';
 import { configPathsFor } from '../standalone/options';
@@ -145,6 +146,8 @@ async function boot(): Promise<void> {
   context.ctx.dshPetAppContext = () => features?.activityContext() ?? '';
   // 插件自动碎碎念到点先问应用：看屏幕 / 应用说话占这一拍时插件就不说（见 features.takeWhisperTurn）
   context.ctx.dshPetAppWhisperTurn = (petId: string) => features?.takeWhisperTurn(petId) ?? false;
+  // 余额随机显示：要赶在 apply 发起启动时的第一次余额查询之前登记
+  registerStandaloneBalance();
   apply(context.ctx);
   log(`apply() 完成：routes=${routes.length} 失败=${context.failures.length}`);
 

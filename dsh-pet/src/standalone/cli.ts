@@ -16,8 +16,9 @@
  *   node lib/standalone.js --check      # 只体检，不开窗口
  *
  * 独立模式的边界：动画、物理拖拽、右键菜单、多开、自定义素材与宠物种类全部可用；
- * 余额、碎碎念、对话、系统通知依赖 DSH 的凭证/模型/会话，在独立模式下明确不可用
- * （结构化失败 + 日志，不假装成功）。详见 README 的「独立运行（不打开 DSH）」一节。
+ * 碎碎念、对话、系统通知依赖 DSH 的凭证/模型/会话，在独立模式下明确不可用
+ * （结构化失败 + 日志，不假装成功）；余额没有真实账户可查，随机显示 ¥1 – ¥1 亿（见 ./balance）。
+ * 详见 README 的「独立运行（不打开 DSH）」一节。
  */
 import { existsSync } from 'node:fs';
 
@@ -26,6 +27,7 @@ import { dshHomeDir, packageRoot } from '../host/helper-process';
 import { apply } from '../host/index';
 import { runCheck, packageVersion } from './check';
 import { createStandaloneAi } from './ai-provider';
+import { registerStandaloneBalance } from './balance';
 import { createRequestSecurity } from './request-security';
 import { writeStandaloneRuntime } from './runtime-state';
 import {
@@ -123,6 +125,8 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
   process.on('SIGINT', () => requestShutdown('SIGINT'));
   process.on('SIGTERM', () => requestShutdown('SIGTERM'));
 
+  // 余额随机显示：要赶在 apply 发起启动时的第一次余额查询之前登记
+  registerStandaloneBalance();
   // 起插件宿主半边：路由表、状态仓、桌面 Helper（含 bridge 管道）都在这一句里
   apply(context.ctx);
 
@@ -150,7 +154,8 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
     ai.isReady()
       ? '  AI          本机 API 已启用；自动碎碎念遵循设置页开关'
       : '  AI          未配置或未启用，不发送模型请求；右键“打开 AI 设置”后在本机填写',
-    '  不可用      余额 / 会话工作状态 / DSH 系统通知',
+    '  余额        没有真实账户可查，随机显示 ¥1 – ¥1 亿',
+    '  不可用      会话工作状态 / DSH 系统通知',
     '  退出        Ctrl+C，或 POST /shutdown',
     '',
   ]) {
