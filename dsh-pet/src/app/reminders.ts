@@ -5,7 +5,8 @@
  * 久坐：本轮连续使用（activity.ts 的 activeSince）达到 afterMin 提醒一次，之后每 repeatMin 再提醒；
  *       离开 ≥ 5 分钟再回来 activeSince 重置，自然重新计时。
  * 喝水：只累计在电脑前的时间，满 everyMin 提醒一次后清零（离开期间不涨，回来不会立刻催）。
- * 专注期间（quiet）久坐 / 喝水只记账不出声，到休息或停掉番茄钟后的下一拍再补上。
+ * 下班：每天到「下班时间 - leadMin」后、主人还在电脑前时提醒一次；那会儿不在就等回来再说，当天改了时间按新时间再算一次。
+ * 专注期间（quiet）久坐 / 喝水 / 下班只记账不出声，到休息或停掉番茄钟后的下一拍再补上。
  */
 import type { ActivitySnapshot } from './activity';
 
@@ -16,6 +17,14 @@ export interface PomodoroConfig {
 export interface HealthConfig {
   sitting: { enabled: boolean; afterMin: number; repeatMin: number };
   water: { enabled: boolean; everyMin: number };
+}
+export interface OffWorkConfig {
+  enabled: boolean;
+  /** 本地时间 HH:MM */
+  time: string;
+  weekdaysOnly: boolean;
+  /** 提前多少分钟提醒（0 = 到点提醒） */
+  leadMin: number;
 }
 
 export type PomodoroPhase = 'focus' | 'break';
@@ -107,5 +116,33 @@ export class HealthReminders {
       events.push('water');
     }
     return events;
+  }
+}
+
+export class OffWorkReminder {
+  /** 已提醒过的「日期 + 下班时间」：同一天同一个时间只提醒一次 */
+  private firedKey: string | null = null;
+  private readonly config: () => OffWorkConfig;
+
+  constructor(config: () => OffWorkConfig) {
+    this.config = config;
+  }
+
+  /**
+   * @param quiet 为 true 时先不提醒（番茄钟专注中），专注结束后的下一拍再说
+   * @returns 这一拍要提醒时返回离下班还剩几分钟（≤ 0 = 已经过了下班时间），不提醒返回 null
+   */
+  tick(now: number, present: boolean, quiet: boolean): number | null {
+    const cfg = this.config();
+    if (!cfg.enabled || !present || quiet) return null;
+    const date = new Date(now);
+    if (cfg.weekdaysOnly && (date.getDay() === 0 || date.getDay() === 6)) return null;
+    const [hour, minute] = cfg.time.split(':').map(Number);
+    const left = hour * 60 + minute - (date.getHours() * 60 + date.getMinutes());
+    if (left > cfg.leadMin) return null;
+    const key = `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()} ${cfg.time}`;
+    if (key === this.firedKey) return null;
+    this.firedKey = key;
+    return left;
   }
 }

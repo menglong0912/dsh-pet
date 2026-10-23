@@ -40,6 +40,11 @@ export const settingsPage = `<!doctype html>
 <label class="check"><input id="waterEnabled" type="checkbox" aria-describedby="water-note">喝水提醒</label>
 <label for="waterEveryMin">喝水间隔（分钟）</label><input id="waterEveryMin" type="number" min="10" max="600" step="1" value="60">
 <p id="water-note" class="hint">只累计在电脑前的时间，提醒一次后重新计时。</p>
+<label class="check"><input id="offWorkEnabled" type="checkbox" aria-describedby="offwork-note">下班提醒</label>
+<div class="pair"><div><label for="offWorkTime">下班时间</label><input id="offWorkTime" type="time" value="18:00" required></div>
+<div><label for="offWorkLeadMin">提前多久提醒（分钟）</label><input id="offWorkLeadMin" type="number" min="0" max="120" step="1" value="10"></div></div>
+<label class="check"><input id="offWorkWeekdaysOnly" type="checkbox">只在工作日（周一到周五）提醒</label>
+<p id="offwork-note" class="hint">每天在下班前这么多分钟提醒一次，填 0 就是到点提醒；那会儿不在电脑前就等回来再说，专注番茄钟期间等专注结束。</p>
 <label for="greetAfterAwayMin">离开多久、回来时打招呼（分钟）</label><input id="greetAfterAwayMin" type="number" min="1" max="1440" step="1" value="10">
 </fieldset>
 <footer><p id="privacy">所有配置与密钥仅保存在当前机器。<br>关闭 AI 后，桌宠仍可正常显示、移动与互动。</p><button id="save" type="submit" disabled>保存到本机</button></footer>
@@ -103,6 +108,10 @@ export const settingsScript = `
     get('sittingRepeatMin').value = String(data.sitting.repeatMin);
     get('waterEnabled').checked = data.water.enabled === true;
     get('waterEveryMin').value = String(data.water.everyMin);
+    get('offWorkEnabled').checked = data.offWork.enabled === true;
+    get('offWorkTime').value = data.offWork.time;
+    get('offWorkLeadMin').value = String(data.offWork.leadMin);
+    get('offWorkWeekdaysOnly').checked = data.offWork.weekdaysOnly === true;
     get('greetAfterAwayMin').value = String(data.greetAfterAwayMin);
   }
   const num = id => Number(get(id).value);
@@ -190,7 +199,8 @@ export const settingsScript = `
           screen: { enabled: get('screenEnabled').checked, intervalMin: num('screenIntervalMin') },
           pomodoro: { focusMin: num('focusMin'), breakMin: num('breakMin') },
           sitting: { enabled: get('sittingEnabled').checked, afterMin: num('sittingAfterMin'), repeatMin: num('sittingRepeatMin') },
-          water: { enabled: get('waterEnabled').checked, everyMin: num('waterEveryMin') }
+          water: { enabled: get('waterEnabled').checked, everyMin: num('waterEveryMin') },
+          offWork: { enabled: get('offWorkEnabled').checked, time: get('offWorkTime').value, weekdaysOnly: get('offWorkWeekdaysOnly').checked, leadMin: num('offWorkLeadMin') }
         }));
       }
       message('已保存到本机。');

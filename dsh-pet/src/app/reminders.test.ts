@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HealthReminders, Pomodoro } from './reminders.ts';
-import type { HealthConfig } from './reminders.ts';
+import { HealthReminders, OffWorkReminder, Pomodoro } from './reminders.ts';
+import type { HealthConfig, OffWorkConfig } from './reminders.ts';
 import type { ActivitySnapshot } from './activity.ts';
 
 const MIN = 60_000;
@@ -67,4 +67,41 @@ test('water counts only present time and caps sleep gaps', () => {
   // 系统睡了 2 小时：只按 1 分钟算
   assert.deepEqual(h.tick(123 * MIN, present(3 * MIN), false), ['water']);
   assert.deepEqual(h.tick(124 * MIN, present(3 * MIN), false), []);
+});
+
+test('off-work reminds once a day after the set time, waits for presence and focus, skips weekends', () => {
+  const cfg: OffWorkConfig = { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 0 };
+  const r = new OffWorkReminder(() => cfg);
+  // 2026-10-23 是周五（Date 按本地时间构造）
+  const at = (day: number, hour: number, minute = 0) => new Date(2026, 9, day, hour, minute).getTime();
+  assert.equal(r.tick(at(23, 17, 59), true, false), null);
+  assert.equal(r.tick(at(23, 18), false, false), null); // 不在电脑前：等回来
+  assert.equal(r.tick(at(23, 18, 5), true, true), null); // 专注中：等专注结束
+  assert.equal(r.tick(at(23, 18, 30), true, false), -30); // 晚了也提醒，告诉调用方已经过了
+  assert.equal(r.tick(at(23, 18, 31), true, false), null); // 当天只提醒一次
+  // 当天改晚了时间：按新时间再算一次
+  cfg.time = '19:00';
+  assert.equal(r.tick(at(23, 18, 40), true, false), null);
+  assert.equal(r.tick(at(23, 19), true, false), 0);
+  // 周末不提醒；关掉「仅工作日」就提醒
+  assert.equal(r.tick(at(24, 20), true, false), null);
+  cfg.weekdaysOnly = false;
+  assert.equal(r.tick(at(24, 20), true, false), -60);
+  // 第二天重新计
+  cfg.weekdaysOnly = true;
+  assert.equal(r.tick(at(26, 19), true, false), 0);
+  cfg.enabled = false;
+  assert.equal(r.tick(at(27, 19), true, false), null);
+});
+
+test('off-work reminds leadMin minutes early and reports how many minutes are left', () => {
+  const cfg: OffWorkConfig = { enabled: true, time: '17:30', weekdaysOnly: true, leadMin: 10 };
+  const r = new OffWorkReminder(() => cfg);
+  const at = (day: number, hour: number, minute = 0) => new Date(2026, 9, day, hour, minute).getTime();
+  assert.equal(r.tick(at(23, 17, 19), true, false), null);
+  assert.equal(r.tick(at(23, 17, 20), true, false), 10);
+  assert.equal(r.tick(at(23, 17, 30), true, false), null); // 提前提醒过了，到点不再说
+  // 提前那会儿不在：回来时离下班还剩几分钟就报几分钟
+  assert.equal(r.tick(at(26, 17, 20), false, false), null);
+  assert.equal(r.tick(at(26, 17, 26), true, false), 4);
 });

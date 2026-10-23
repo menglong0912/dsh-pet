@@ -3,7 +3,7 @@
  *
  * 纯逻辑都在旁边的模块里（activity / reminders / claude-hooks / status，各有单测）；这里只做接线：
  *   - 每 TICK_MS 采样一次：系统空闲秒数与锁屏（Electron powerMonitor）+ 前台应用（`lsappinfo`，无需授权）；
- *   - 根据采样推进番茄钟、久坐 / 喝水提醒、回来打招呼、定时看屏幕；
+ *   - 根据采样推进番茄钟、久坐 / 喝水 / 下班提醒、回来打招呼、定时看屏幕；
  *   - 与插件的自动碎碎念共用一个节拍（takeWhisperTurn）：看屏幕占它的拍，应用说话时它让一让；
  *   - 把 Claude Code 与番茄钟合成为一个外部工作状态（桌宠只有一个外部槽）；
  *   - 右键「更多」里注册「看看我在干嘛 / 开始·停止番茄钟」并长轮询点击。
@@ -26,7 +26,7 @@ import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
 import { ClaudeSessions } from './claude-hooks';
 import type { ClaudeHookPayload } from './claude-hooks';
-import { HealthReminders, Pomodoro } from './reminders';
+import { HealthReminders, OffWorkReminder, Pomodoro } from './reminders';
 import type { HealthEvent, PomodoroEvent } from './reminders';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
@@ -109,6 +109,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   const claude = new ClaudeSessions();
   const pomodoro = new Pomodoro(() => deps.appConfig().pomodoro);
   const health = new HealthReminders(() => deps.appConfig());
+  const offWork = new OffWorkReminder(() => deps.appConfig().offWork);
   let disposed = false;
   let lastStatus: WorkStatus | null = null;
   let lastScreenAt = Date.now();
@@ -383,6 +384,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const pomodoroEvent = pomodoro.tick(now, snap?.present ?? false);
     if (pomodoroEvent) void announcePomodoro(pomodoroEvent);
     for (const event of health.tick(now, snap, pomodoro.phase() === 'focus')) void announceHealth(event);
+    const offWorkLeft = offWork.tick(now, snap?.present ?? false, pomodoro.phase() === 'focus');
+    if (offWorkLeft !== null) void announceOffWork(offWorkLeft);
 
     // 自动碎碎念在跑时，看屏幕占它让出的那一拍（takeWhisperTurn），不另起一路；没在跑才自己按间隔看
     if (!whisperRunning(now) && screenDue(now)) void lookAtScreen(false);
@@ -461,6 +464,17 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return event === 'sit'
       ? speak(`主人已经连续坐了 ${sat}。提醒主人站起来活动一下。`, '坐太久啦，起来动一动～')
       : speak('提醒主人喝口水。', '该喝水啦～');
+  }
+
+  /** @param left 离下班还剩几分钟（≤ 0 = 已经过了） */
+  function announceOffWork(left: number): Promise<void> {
+    const { time } = deps.appConfig().offWork;
+    return left > 0
+      ? speak(
+          `再过 ${left} 分钟就到主人的下班时间 ${time} 了。提醒主人收拾收拾，准备下班。`,
+          `还有 ${left} 分钟下班啦～`,
+        )
+      : speak(`已经过了主人的下班时间 ${time}，主人还在电脑前。提醒主人收拾一下准备下班。`, '到点啦，该下班啦～');
   }
 
   async function refreshStatus(now: number): Promise<void> {

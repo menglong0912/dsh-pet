@@ -27,6 +27,18 @@ const schema = z
       repeatMin: z.number().min(5).max(600),
     }),
     water: z.object({ enabled: z.boolean(), everyMin: z.number().min(10).max(600) }),
+    /** 下班提醒；后加的字段，旧文件里没有时按默认值补上（不让整份配置因缺字段作废） */
+    offWork: z
+      .object({
+        enabled: z.boolean(),
+        /** 本地时间 HH:MM */
+        time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+        /** 只在周一到周五提醒 */
+        weekdaysOnly: z.boolean(),
+        /** 提前多少分钟提醒（0 = 到点提醒）；比 offWork 晚加，同样缺了按默认补 */
+        leadMin: z.number().min(0).max(120).default(10),
+      })
+      .default({ enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 }),
   })
   .strict();
 
@@ -50,6 +62,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   pomodoro: { focusMin: 25, breakMin: 5 },
   sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
   water: { enabled: true, everyMin: 60 },
+  offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
 };
 
 /**

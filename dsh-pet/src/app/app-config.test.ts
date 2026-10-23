@@ -57,3 +57,31 @@ test('settings page saves the whole config, validates ranges, and the getter pic
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an older file without offWork still loads, keeping its own values and filling the default', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pet-app-config-'));
+  const path = join(dir, 'app-config.json');
+  const warnings: string[] = [];
+  try {
+    const older: Record<string, unknown> = { ...DEFAULT_APP_CONFIG, water: { enabled: false, everyMin: 90 } };
+    delete older.offWork;
+    writeFileSync(path, JSON.stringify(older));
+    const config = createAppConfig(path, (m) => warnings.push(m));
+    assert.deepEqual(config().water, { enabled: false, everyMin: 90 });
+    assert.deepEqual(config().offWork, DEFAULT_APP_CONFIG.offWork);
+    assert.deepEqual(warnings, []);
+    assert.throws(() =>
+      saveAppConfig(path, { ...older, offWork: { enabled: true, time: '25:00', weekdaysOnly: true, leadMin: 10 } }),
+    );
+    assert.throws(() =>
+      saveAppConfig(path, { ...older, offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 121 } }),
+    );
+    // 已经有 offWork 但没有 leadMin（加提前提醒之前存过设置页）：只补 leadMin，自己设的时间不动
+    writeFileSync(path, JSON.stringify({ ...older, offWork: { enabled: true, time: '17:30', weekdaysOnly: false } }));
+    utimesSync(path, new Date(), new Date(Date.now() + 1000));
+    assert.deepEqual(config().offWork, { enabled: true, time: '17:30', weekdaysOnly: false, leadMin: 10 });
+    assert.deepEqual(warnings, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

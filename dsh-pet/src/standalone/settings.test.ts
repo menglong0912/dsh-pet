@@ -188,6 +188,7 @@ test('settings browser script shows and saves the app section when the app serve
     pomodoro: { focusMin: 25, breakMin: 5 },
     sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
     water: { enabled: true, everyMin: 60 },
+    offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
   };
   runInNewContext(settingsScript, {
     URLSearchParams,
@@ -206,9 +207,14 @@ test('settings browser script shows and saves the app section when the app serve
   assert.equal(element('focusMin').value, '25');
   assert.equal(element('sittingAfterMin').value, '50');
   assert.equal(element('greetAfterAwayMin').value, '10');
+  assert.equal(element('offWorkTime').value, '18:00');
+  assert.equal(element('offWorkLeadMin').value, '10');
+  assert.equal(element('offWorkWeekdaysOnly').checked, true);
   element('screenIntervalMin').value = '30';
   element('focusMin').value = '50';
   element('waterEnabled').checked = false;
+  element('offWorkTime').value = '17:30';
+  element('offWorkLeadMin').value = '15';
   await element('settings').listeners.submit({ preventDefault() {} });
   const post = requests.find(({ url, options }) => url === '/standalone-ai/app-settings' && options.method === 'POST');
   assert.deepEqual(JSON.parse(post?.options.body ?? '{}'), {
@@ -216,5 +222,6 @@ test('settings browser script shows and saves the app section when the app serve
     screen: { enabled: true, intervalMin: 30 },
     pomodoro: { focusMin: 50, breakMin: 5 },
     water: { enabled: false, everyMin: 60 },
+    offWork: { enabled: true, time: '17:30', weekdaysOnly: true, leadMin: 15 },
   });
 });
