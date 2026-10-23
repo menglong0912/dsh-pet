@@ -63,6 +63,8 @@ interface ElectronApp {
   getPath(name: 'appData' | 'logs'): string;
   requestSingleInstanceLock(): boolean;
   exit(code?: number): void;
+  relaunch(): void;
+  quit(): void;
   on(event: 'web-contents-created', listener: (event: unknown, contents: WebContentsLike) => void): void;
   on(event: 'second-instance', listener: () => void): void;
   on(event: 'will-quit', listener: () => void): void;
@@ -137,6 +139,22 @@ async function boot(): Promise<void> {
   // helper 读它决定建几个窗口；读不到时它会回落到单个默认窗口，首帧再由渲染端自校正
   process.env.DSH_PET_PETS = JSON.stringify(desktopPets());
 
+  // 托盘勾选 / 右键关闭桌面显示 / 设置页保存都会走插件的 syncDesktop：DSH 里它重启 helper，
+  // 这里 helper 就在本进程、窗口与托盘只在启动时建一次，所以它们依据的配置变了就整个应用重启
+  const launchedLayout = desktopLayout();
+  let relaunching = false;
+  context.ctx.dshPetAppDesktopChanged = () => {
+    const layout = desktopLayout();
+    if (relaunching || layout === null || layout === launchedLayout) return;
+    relaunching = true;
+    log('桌面宠物或托盘配置变了，重启应用');
+    // 稍等再退：触发这次变更的请求（如设置页保存）还要把响应发回去
+    setTimeout(() => {
+      app.relaunch();
+      app.quit();
+    }, 500);
+  };
+
   // 同一个进程里跑 helper：建窗、托盘、IPC、碰撞全在它内部完成（CJS，需要 require）
   // 渲染端日志必须转出来：打包后的应用没有控制台，渲染端报错只会表现成「窗口透明」。
   app.on('web-contents-created', (_event, contents) => {
@@ -184,6 +202,23 @@ function desktopPets(): Array<{ id: string; size: number }> {
   } catch (error) {
     log(`读配置失败（回落单窗）：${error instanceof Error ? error.message : String(error)}`);
     return [];
+  }
+}
+
+/**
+ * 窗口与托盘依据的那部分配置（托盘列出全部宠物的名字与显示勾选，还受 trayEnabled 开关）。
+ * 读不到配置时返回 null：不因为一次读坏就重启应用。
+ */
+function desktopLayout(): string | null {
+  try {
+    const merged = readAllConfig(configPathsFor(packageRoot, dshHomeDir()));
+    return JSON.stringify({
+      tray: merged.main?.trayEnabled !== false,
+      pets: flattenPetList(merged).map((pet) => [pet.id, pet.name, pet.display, pet.size]),
+    });
+  } catch (error) {
+    log(`读配置失败（不重启）：${error instanceof Error ? error.message : String(error)}`);
+    return null;
   }
 }
 

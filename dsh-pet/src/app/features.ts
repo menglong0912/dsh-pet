@@ -245,7 +245,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         }),
       );
       if (!text) return { ok: false, reason: 'empty' };
-      await say(text);
+      // 宠物被隐藏时插件不让说（pet-not-displayed）：如实报失败，别让调用方以为说出来了
+      if (!(await say(text))) return { ok: false, text, reason: 'say-failed' };
       return { ok: true, text };
     } catch (error) {
       log(`看屏幕失败：${errorText(error)}`);

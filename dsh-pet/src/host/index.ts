@@ -1252,6 +1252,9 @@ export function apply(ctx: any): void {
     desktopSyncQueue = desktopSyncQueue
       .then(async () => {
         refreshDesktop();
+        // 独立应用（宿主即应用）没有 Helper 可重启：窗口与托盘是启动时建的，交给应用挂在 ctx 上的钩子
+        // 决定是否整体重启（src/app/main.ts）；DSH 内没有这个钩子
+        if (inProcessHost) return (ctx as { dshPetAppDesktopChanged?: () => void }).dshPetAppDesktopChanged?.();
         await stopHelperAndWait('desktop-config-change');
         startHelper();
       })
