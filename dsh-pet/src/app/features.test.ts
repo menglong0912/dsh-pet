@@ -15,8 +15,8 @@ import type { AppFeatures, FeatureElectron } from './features.ts';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-/** 假环境里可调的两样：键鼠空闲秒数、插件碎碎念间隔（测试改完要还原） */
-const env = { idleSec: 0, whisperSec: 60 };
+/** 假环境里可调的：键鼠空闲秒数、插件碎碎念间隔、挑表情包时模型的回答（测试改完要还原） */
+const env = { idleSec: 0, whisperSec: 60, memeAnswer: '无' };
 
 const electron: FeatureElectron = {
   powerMonitor: { getSystemIdleTime: () => env.idleSec, getSystemIdleState: () => 'active' },
@@ -29,12 +29,18 @@ const electron: FeatureElectron = {
   shell: { openExternal: () => Promise.resolve() },
 };
 
-/** 看屏幕发给模型的指令（按调用顺序） */
+/** 看屏幕发给模型的指令、挑表情包时发给模型的话（按调用顺序） */
 const visionPrompts: string[] = [];
+const memeAsks: string[] = [];
 
 const ai = {
   canSeeLocally: () => true,
-  isReady: () => false,
+  isReady: () => true,
+  currentSelection: () => ({ provider: 'local', model: 'qwen' }),
+  stream: async function* (options: { messages: Array<{ content: Array<{ text: string }> }> }) {
+    memeAsks.push(options.messages[0].content[0].text);
+    yield { type: 'text', text: env.memeAnswer };
+  },
   getSettings: () => ({ whisperIntervalSec: env.whisperSec }),
   streamVision: async function* (input: { prompt: string }) {
     visionPrompts.push(input.prompt);
@@ -115,13 +121,39 @@ test('看屏幕：宠物被隐藏、插件拒绝说话时如实报失败', async
   });
 });
 
-test('看屏幕：开着碎碎念配图就从表情包池随机抽一张，话按图写、图随气泡显示', async () => {
-  // 包内默认配置 whisperImageEnabled = true（与碎碎念配图同一个开关）
-  await withFeatures({ memes: [{ name: '就一碗', desc: '捧着一只碗' }] }, async (features, _said, bodies) => {
-    assert.deepEqual(await features.lookAtScreen(true), { ok: true, text: '主人在写代码呀', image: '就一碗' });
-    assert.equal(last(bodies)?.image, '就一碗');
-    assert.match(last(visionPrompts) ?? '', /就一碗（捧着一只碗）/);
-  });
+test('看屏幕：先说话，再按说出来的话从表情包池挑最搭的一张（看屏幕指令里不提表情包）', async () => {
+  const memes = [
+    { name: '就一碗', desc: '捧着一只碗' },
+    { name: '大的', desc: '比划一个大' },
+    { name: '大的要来啦', desc: '举着大喇叭喊' },
+  ];
+  env.memeAnswer = '「大的要来啦」。'; // 带引号句号、且包含短名「大的」：取完整的那张
+  try {
+    await withFeatures({ memes }, async (features, _said, bodies) => {
+      assert.deepEqual(await features.lookAtScreen(true), { ok: true, text: '主人在写代码呀', image: '大的要来啦' });
+      assert.equal(last(bodies)?.image, '大的要来啦');
+      assert.match(last(memeAsks) ?? '', /这句话：主人在写代码呀/);
+      assert.match(last(memeAsks) ?? '', /就一碗：捧着一只碗/);
+      // 回归：图写进看屏幕指令时小模型会顺着表情包名字发挥，看屏幕就不说屏幕了
+      assert.doesNotMatch(last(visionPrompts) ?? '', /就一碗|大的要来啦|表情包/);
+    });
+  } finally {
+    env.memeAnswer = '无';
+  }
+});
+
+test('看屏幕：模型说都不搭、或答的不在池里 → 随机配一张', async () => {
+  const memes = [{ name: '就一碗', desc: '捧着一只碗' }];
+  try {
+    for (const answer of ['无', '我觉得哪张都行']) {
+      env.memeAnswer = answer;
+      await withFeatures({ memes }, async (features) => {
+        assert.deepEqual(await features.lookAtScreen(true), { ok: true, text: '主人在写代码呀', image: '就一碗' });
+      });
+    }
+  } finally {
+    env.memeAnswer = '无';
+  }
 });
 
 test('看屏幕：表情包池为空就不配图', async () => {

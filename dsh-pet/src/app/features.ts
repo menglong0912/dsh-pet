@@ -48,6 +48,12 @@ const SELF_APP_NAMES = new Set(['dsh-pet', 'Electron']);
 const SCREEN_SETTINGS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
 const LINE_RULE = '只说一句话，20 字以内，不加引号，不解释，不提你是 AI。';
 
+/** 表情包池里的一张（插件 GET /memes 的条目） */
+interface Meme {
+  name: string;
+  desc: string;
+}
+
 /** 本模块用到的 Electron 能力（只声明用到的成员：静态 import 'electron' 会让 tsc 整仓找不到类型） */
 export interface FeatureElectron {
   powerMonitor: {
@@ -225,25 +231,61 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   // ---------- 看屏幕 ----------
 
-  /**
-   * 看屏幕的配图：与碎碎念同一个开关（whisperImageEnabled）、同一个表情包池（插件的 GET /memes），随机抽一张；
-   * 没开 / 池为空 / 取不到就不配图。
-   */
-  async function pickMeme(): Promise<{ name: string; desc: string } | null> {
+  /** 看屏幕配图用的表情包池：与碎碎念同一个开关（whisperImageEnabled）、同一个池（插件的 GET /memes）；没开 / 取不到 → 空 */
+  async function memePool(): Promise<Meme[]> {
     try {
       const found = findPetInstance(readAllConfig(deps.configPaths), petId());
-      if (found?.conf.whisperImageEnabled !== true) return null;
+      if (found?.conf.whisperImageEnabled !== true) return [];
       const result = await petRequest('GET', '/memes');
       if (result.ok !== true || !Array.isArray(result.memes)) {
         log(`取表情包失败：${JSON.stringify(result)}`);
-        return null;
+        return [];
       }
-      const pool = result.memes as Array<{ name: string; desc: string }>;
-      return pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : null;
+      return result.memes as Meme[];
     } catch (error) {
       log(`取表情包失败：${errorText(error)}`);
+      return [];
+    }
+  }
+
+  /** 让模型按这句话从池里挑最搭的一张；它说都不搭、答的不在池里或调用失败 → null */
+  async function chooseMeme(text: string, pool: Meme[]): Promise<Meme | null> {
+    if (!ai.isReady()) return null;
+    try {
+      const list = pool.map((meme) => `${meme.name}：${meme.desc}`).join('\n');
+      const answer = await collect(
+        ai.stream({
+          provider: ai.currentSelection().provider,
+          model: ai.currentSelection().model,
+          system: '你在给一句话挑一张配图的表情包。只回答表情包的名称，不加任何别的字；都不搭就回答：无',
+          messages: [
+            { role: 'user', content: [{ type: 'text', text: `这句话：${text}\n\n表情包（名称：描述）：\n${list}` }] },
+          ],
+        }),
+      );
+      // 模型常会带上引号 / 句号或多说几个字：精确命中优先，否则取答案里出现的最长名称（防「大的要来啦」误中短名）
+      const exact = pool.find((meme) => meme.name === answer.replace(/[「」『』"'“”‘’。.\s]/g, ''));
+      if (exact) return exact;
+      const hits = pool.filter((meme) => answer.includes(meme.name)).sort((a, b) => b.name.length - a.name.length);
+      return hits[0] ?? null;
+    } catch (error) {
+      log(`挑表情包失败：${errorText(error)}`);
       return null;
     }
+  }
+
+  /**
+   * 给看屏幕说的话配图：先按话挑最搭的一张，挑不出就随机一张；池为空（含没开配图）不配。
+   * 话先说、图后配：试过先抽图再把图的描述写进看屏幕指令，本机小模型会顺着表情包名字发挥
+   * （「大的要来啦」→「大事要来啦，主人快躲开」），看屏幕就成了看表情包。
+   */
+  async function memeFor(text: string): Promise<Meme | null> {
+    const pool = await memePool();
+    if (pool.length === 0) return null;
+    const chosen = await chooseMeme(text, pool);
+    const meme = chosen ?? pool[Math.floor(Math.random() * pool.length)];
+    log(`看屏幕配图：${meme.name}（${chosen ? '按话挑' : '随机'}）`);
+    return meme;
   }
 
   async function lookAtScreen(
@@ -280,22 +322,18 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       const source = sources.find((s) => s.display_id === String(display.id)) ?? sources[0];
       if (!source || source.thumbnail.isEmpty()) return { ok: false, reason: 'capture-failed' };
       const image = 'data:image/jpeg;base64,' + source.thumbnail.toJPEG(70).toString('base64');
-      const meme = await pickMeme();
       const text = await collect(
         ai.streamVision({
           system: systemPrompt(),
           prompt:
             '这是主人此刻的电脑屏幕截图（画面里那个小女仆就是你自己，别管她）。看看主人在做什么，随口吐槽或关心一句。' +
             '不要复述屏幕上的具体文字、聊天内容、人名、账号或数字，不要描述截图本身。' +
-            // 与碎碎念配图同一种写法（host/whisper.ts）：话要和图对得上，但不描述图
-            (meme
-              ? `这次会配一张表情包一起显示，图的内容是：${meme.name}（${meme.desc}），让这句话和这张图的情绪自然契合，不要描述表情包。`
-              : '') +
             LINE_RULE,
           image,
         }),
       );
       if (!text) return { ok: false, reason: 'empty' };
+      const meme = await memeFor(text);
       // 宠物被隐藏时插件不让说（pet-not-displayed）：如实报失败，别让调用方以为说出来了
       if (!(await say(text, meme?.name))) return { ok: false, text, reason: 'say-failed' };
       return { ok: true, text, ...(meme ? { image: meme.name } : {}) };
