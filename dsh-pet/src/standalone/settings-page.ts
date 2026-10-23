@@ -28,7 +28,7 @@ export const settingsPage = `<!doctype html>
 </fieldset>
 <fieldset id="app-settings" hidden><legend>陪伴与提醒</legend>
 <label class="check"><input id="screenEnabled" type="checkbox" aria-describedby="screen-note">定时看屏幕吐槽</label>
-<p id="screen-note" class="hint">只在上面的接口是本机地址（127.0.0.1 / localhost）时生效，截图只发给本机模型；专注番茄钟期间、离开电脑或一分钟没碰键鼠时不看。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
+<p id="screen-note" class="hint">只在上面的接口是本机地址（127.0.0.1 / localhost）时生效，截图只发给本机模型；专注番茄钟期间、离开电脑或一分钟没碰键鼠时不看。开着自动碎碎念时，到点的那一句碎碎念换成看屏幕，两者不会互相顶掉。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
 <label for="screenIntervalMin">看屏幕间隔（分钟）</label><input id="screenIntervalMin" type="number" min="3" max="1440" step="1" value="15">
 <div class="pair"><div><label for="focusMin">番茄钟专注（分钟）</label><input id="focusMin" type="number" min="1" max="180" step="1" value="25"></div>
 <div><label for="breakMin">番茄钟休息（分钟）</label><input id="breakMin" type="number" min="1" max="60" step="1" value="5"></div></div>

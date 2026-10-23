@@ -4,6 +4,7 @@
  * 纯逻辑都在旁边的模块里（activity / reminders / claude-hooks / status，各有单测）；这里只做接线：
  *   - 每 TICK_MS 采样一次：系统空闲秒数与锁屏（Electron powerMonitor）+ 前台应用（`lsappinfo`，无需授权）；
  *   - 根据采样推进番茄钟、久坐 / 喝水提醒、回来打招呼、定时看屏幕；
+ *   - 与插件的自动碎碎念共用一个节拍（takeWhisperTurn）：看屏幕占它的拍，应用说话时它让一让；
  *   - 把 Claude Code 与番茄钟合成为一个外部工作状态（桌宠只有一个外部槽）；
  *   - 右键「更多」里注册「看看我在干嘛 / 开始·停止番茄钟」并长轮询点击。
  *
@@ -40,6 +41,8 @@ const MENU_LOOK = '看看我在干嘛';
 const MENU_POMODORO_START = '开始番茄钟';
 /** 自动看屏幕要求键鼠最近活动过（秒）：人在看视频 / 发呆时不打扰 */
 const SCREEN_ACTIVE_IDLE_SEC = 60;
+/** 应用刚说过话这么久内，自动碎碎念让一让（气泡默认显示 10 秒） */
+const SPOKE_HOLD_MS = 15_000;
 /** 前台是这些应用时视为「取不到」（桌宠自己的窗口被点到前台） */
 const SELF_APP_NAMES = new Set(['dsh-pet', 'Electron']);
 const SCREEN_SETTINGS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
@@ -74,8 +77,13 @@ export interface AppFeatures {
   say(text: string): Promise<boolean>;
   /** 按人设碎碎念一句（插件的 /whisper，结果原样返回） */
   whisper(): Promise<Record<string, unknown>>;
-  /** 看一眼屏幕并吐槽；返回结果说明（给 HTTP 调用方看） */
-  lookAtScreen(manual: boolean): Promise<{ ok: boolean; text?: string; reason?: string }>;
+  /** 看一眼屏幕并吐槽；返回结果说明（给 HTTP 调用方看；image = 配的表情包名） */
+  lookAtScreen(manual: boolean): Promise<{ ok: boolean; text?: string; image?: string; reason?: string }>;
+  /**
+   * 插件自动碎碎念到点时先问这里（ctx.dshPetAppWhisperTurn）：返回 true = 这一拍归应用，插件不说。
+   * 到点该看屏幕就用看屏幕代替这句；应用正在 / 刚刚说话就让一让——两种气泡不互相顶掉、不同时抢模型。
+   */
+  takeWhisperTurn(petId: string): boolean;
   dispose(): void;
 }
 
@@ -102,7 +110,13 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let tickTimer: ReturnType<typeof setTimeout> | null = null;
   /** 说话串行：上一句发出去再生成下一句，免得两个气泡互相顶掉 */
   let speaking: Promise<unknown> = Promise.resolve();
+  /** 正在生成要说的话（speak 里），此时碎碎念会撞上模型单飞 */
+  let generating = false;
   let screenBusy = false;
+  /** 上次成功说话的时间（SPOKE_HOLD_MS 用） */
+  let lastSpokeAt = 0;
+  /** 插件上次来问碎碎念这一拍的时间：判断自动碎碎念在不在跑 */
+  let lastWhisperTurnAt = 0;
 
   // ---------- 桌宠路由 ----------
 
@@ -131,10 +145,12 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return (await response.json()) as Record<string, unknown>;
   }
 
-  async function say(text: string): Promise<boolean> {
+  /** @param image 配图：表情包池里的名称（插件按池校验） */
+  async function say(text: string, image?: string): Promise<boolean> {
     try {
-      const result = await petRequest('POST', '/broadcast', { text, anim: true });
+      const result = await petRequest('POST', '/broadcast', { text, anim: true, ...(image ? { image } : {}) });
       if (result.ok !== true) log(`说话失败：${JSON.stringify(result)}`);
+      else lastSpokeAt = Date.now();
       return result.ok === true;
     } catch (error) {
       log(`说话失败：${errorText(error)}`);
@@ -194,7 +210,14 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   function speak(instruction: string, fallback: string): Promise<void> {
     const next = speaking.then(async () => {
       if (disposed) return;
-      await say((await generate(instruction)) ?? fallback);
+      generating = true;
+      let text: string | null;
+      try {
+        text = await generate(instruction);
+      } finally {
+        generating = false;
+      }
+      await say(text ?? fallback);
     });
     speaking = next.catch(() => undefined);
     return next;
@@ -202,7 +225,30 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   // ---------- 看屏幕 ----------
 
-  async function lookAtScreen(manual: boolean): Promise<{ ok: boolean; text?: string; reason?: string }> {
+  /**
+   * 看屏幕的配图：与碎碎念同一个开关（whisperImageEnabled）、同一个表情包池（插件的 GET /memes），随机抽一张；
+   * 没开 / 池为空 / 取不到就不配图。
+   */
+  async function pickMeme(): Promise<{ name: string; desc: string } | null> {
+    try {
+      const found = findPetInstance(readAllConfig(deps.configPaths), petId());
+      if (found?.conf.whisperImageEnabled !== true) return null;
+      const result = await petRequest('GET', '/memes');
+      if (result.ok !== true || !Array.isArray(result.memes)) {
+        log(`取表情包失败：${JSON.stringify(result)}`);
+        return null;
+      }
+      const pool = result.memes as Array<{ name: string; desc: string }>;
+      return pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : null;
+    } catch (error) {
+      log(`取表情包失败：${errorText(error)}`);
+      return null;
+    }
+  }
+
+  async function lookAtScreen(
+    manual: boolean,
+  ): Promise<{ ok: boolean; text?: string; image?: string; reason?: string }> {
     if (screenBusy) return { ok: false, reason: 'busy' };
     if (!ai.canSeeLocally()) {
       if (manual) await say('看屏幕要用本机模型哦，先在 AI 设置里填本机地址～');
@@ -234,20 +280,25 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       const source = sources.find((s) => s.display_id === String(display.id)) ?? sources[0];
       if (!source || source.thumbnail.isEmpty()) return { ok: false, reason: 'capture-failed' };
       const image = 'data:image/jpeg;base64,' + source.thumbnail.toJPEG(70).toString('base64');
+      const meme = await pickMeme();
       const text = await collect(
         ai.streamVision({
           system: systemPrompt(),
           prompt:
             '这是主人此刻的电脑屏幕截图（画面里那个小女仆就是你自己，别管她）。看看主人在做什么，随口吐槽或关心一句。' +
             '不要复述屏幕上的具体文字、聊天内容、人名、账号或数字，不要描述截图本身。' +
+            // 与碎碎念配图同一种写法（host/whisper.ts）：话要和图对得上，但不描述图
+            (meme
+              ? `这次会配一张表情包一起显示，图的内容是：${meme.name}（${meme.desc}），让这句话和这张图的情绪自然契合，不要描述表情包。`
+              : '') +
             LINE_RULE,
           image,
         }),
       );
       if (!text) return { ok: false, reason: 'empty' };
       // 宠物被隐藏时插件不让说（pet-not-displayed）：如实报失败，别让调用方以为说出来了
-      if (!(await say(text))) return { ok: false, text, reason: 'say-failed' };
-      return { ok: true, text };
+      if (!(await say(text, meme?.name))) return { ok: false, text, reason: 'say-failed' };
+      return { ok: true, text, ...(meme ? { image: meme.name } : {}) };
     } catch (error) {
       log(`看屏幕失败：${errorText(error)}`);
       if (manual) await say('刚才没看清，等会儿再看～');
@@ -295,17 +346,51 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     if (pomodoroEvent) void announcePomodoro(pomodoroEvent);
     for (const event of health.tick(now, snap, pomodoro.phase() === 'focus')) void announceHealth(event);
 
-    if (
-      config.screen.enabled &&
-      snap?.present &&
-      electron.powerMonitor.getSystemIdleTime() < SCREEN_ACTIVE_IDLE_SEC &&
-      pomodoro.phase() !== 'focus' &&
-      now - lastScreenAt >= config.screen.intervalMin * 60_000
-    ) {
-      void lookAtScreen(false);
-    }
+    // 自动碎碎念在跑时，看屏幕占它让出的那一拍（takeWhisperTurn），不另起一路；没在跑才自己按间隔看
+    if (!whisperRunning(now) && screenDue(now)) void lookAtScreen(false);
     await refreshStatus(now);
     await refreshMenu(now);
+  }
+
+  /**
+   * 到点该自动看屏幕：开着、人在且 activeIdleSec 内碰过键鼠、不在专注、离上次够间隔、能看（本机模型 + 已授权）
+   * @param activeIdleSec 「最近碰过键鼠」的窗口（秒）
+   */
+  function screenDue(now: number, activeIdleSec = SCREEN_ACTIVE_IDLE_SEC): boolean {
+    const config = deps.appConfig();
+    return (
+      config.screen.enabled &&
+      tracker.snapshot()?.present === true &&
+      electron.powerMonitor.getSystemIdleTime() < activeIdleSec &&
+      pomodoro.phase() !== 'focus' &&
+      now - lastScreenAt >= config.screen.intervalMin * 60_000 &&
+      !screenBusy &&
+      ai.canSeeLocally() &&
+      electron.systemPreferences.getMediaAccessStatus('screen') === 'granted'
+    );
+  }
+
+  /** 插件的自动碎碎念周期（秒，与插件同口径：至少 60 秒） */
+  function whisperPeriodSec(): number {
+    return Math.max(60, ai.getSettings().whisperIntervalSec);
+  }
+
+  /** 插件的自动碎碎念在跑：最近两个周期内来问过拍 */
+  function whisperRunning(now: number): boolean {
+    return now - lastWhisperTurnAt <= 2 * whisperPeriodSec() * 1000;
+  }
+
+  function takeWhisperTurn(id: string): boolean {
+    if (id !== petId()) return false;
+    const now = Date.now();
+    lastWhisperTurnAt = now;
+    // 拍与拍之间可能隔好几分钟，「碰过键鼠」放宽到这一拍以来：看视频 / 发呆一整拍仍然不看，
+    // 但不会因为恰好在这一拍的瞬间停手了一分钟就错过（只按 60 秒卡，长间隔下几乎轮不到看屏幕）
+    if (screenDue(now, Math.max(SCREEN_ACTIVE_IDLE_SEC, whisperPeriodSec()))) {
+      void lookAtScreen(false);
+      return true;
+    }
+    return screenBusy || generating || now - lastSpokeAt < SPOKE_HOLD_MS;
   }
 
   function schedule(): void {
@@ -443,6 +528,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     say,
     whisper: () => petRequest('POST', '/whisper'),
     lookAtScreen,
+    takeWhisperTurn,
     dispose() {
       disposed = true;
       if (tickTimer !== null) clearTimeout(tickTimer);

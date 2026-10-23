@@ -686,6 +686,22 @@ describe('/pose —— 桌面端实况（GET 查询 / POST 上报），与 surfa
   });
 });
 
+describe('/memes —— 表情包池（只读，与碎碎念 / /broadcast 配图同一个池）', () => {
+  test('不给 pet → pet-required；非 GET → 405', async () => {
+    const r = await call('/dsh-pet-7340/memes');
+    assert.equal(r.status, 200);
+    assert.equal((JSON.parse(r.body) as { reason: string }).reason, 'pet-required');
+    assert.equal((await call('/dsh-pet-7340/memes?pet=main', 'POST')).status, 405);
+  });
+
+  test('配置不可达时显式 ok:false/generate-error（不回一个空池假装成功）', async () => {
+    const r = await call('/dsh-pet-7340/memes?pet=main');
+    assert.equal(r.status, 200);
+    const body = JSON.parse(r.body) as { ok: boolean; reason: string };
+    assert.equal(body.ok, false);
+    assert.equal(body.reason, 'generate-error');
+  });
+});
 describe('?rounds= —— 非法值 bad-request，合法值不误杀（issue #141）', () => {
   // 源码形态下配置不可达：能报 bad-request 就证明校验抢在读盘之前（否则会是 generate-error）。
   test('非法 → bad-request（负数 / 小数 / 非数字 / 超上限）', async () => {

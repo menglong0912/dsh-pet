@@ -143,6 +143,8 @@ async function boot(): Promise<void> {
 
   // 插件拼人设时追加「主人此刻」一行（src/host/index.ts 的 petSystemPrompt 读这个钩子）
   context.ctx.dshPetAppContext = () => features?.activityContext() ?? '';
+  // 插件自动碎碎念到点先问应用：看屏幕 / 应用说话占这一拍时插件就不说（见 features.takeWhisperTurn）
+  context.ctx.dshPetAppWhisperTurn = (petId: string) => features?.takeWhisperTurn(petId) ?? false;
   apply(context.ctx);
   log(`apply() 完成：routes=${routes.length} 失败=${context.failures.length}`);
 

@@ -2119,6 +2119,28 @@ export function apply(ctx: any): void {
       }
     }
 
+    // 表情包池（只读）：GET /dsh-pet-7340/memes?pet=<id> → { ok, memes: [{ name, desc }] }。
+    // 与碎碎念 / 对话配图、POST /broadcast 的 image 校验是**同一个池**（readMemePool + memeDirsFor），
+    // 调用方先挑图、按图的描述写好话，再 /broadcast { text, image }，图文才对得上（独立应用看屏幕就这么配图）。
+    if (rest === 'memes') {
+      if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      try {
+        const who = requirePet(url.searchParams, () => readAllConfig(configPaths));
+        if (!who.ok) return who.res;
+        return {
+          kind: 'json',
+          status: 200,
+          obj: { ok: true, memes: readMemePool(who.conf.memes, memeDirsFor(who.entry)) },
+        };
+      } catch (e) {
+        return {
+          kind: 'json',
+          status: 200,
+          obj: { ok: false, reason: 'generate-error', message: e instanceof Error ? e.message : String(e) },
+        };
+      }
+    }
+
     // 播放回执：/dsh-pet-7340/playback/<id>        （GET 查询，可挂起等待）
     //           /dsh-pet-7340/playback/<id>/report （POST，**渲染端上报**）
     //
@@ -2655,6 +2677,11 @@ export function apply(ctx: any): void {
           // （见 src/client/pet.ts 的冻结判定），代价是叶子照常推进、渲染端自己不看。
           if (lock.locked(petId)) continue;
           lastWhisperAt.set(petId, now);
+          // 独立应用可以拿走这一拍（到点该看屏幕就用看屏幕代替这句、刚说过话就让一让），
+          // 免得两种气泡互相顶掉、同时抢模型（src/app/features.ts）；DSH 内没有这个钩子
+          if ((ctx as { dshPetAppWhisperTurn?: (id: string) => boolean }).dshPetAppWhisperTurn?.(petId) === true) {
+            continue;
+          }
           // 不 await：生成要几秒，别把调度拍拖住（每只宠物独立生成，互不阻塞）
           void publishWhisper(petId).catch(() => {});
         }
