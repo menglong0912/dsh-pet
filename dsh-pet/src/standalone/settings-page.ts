@@ -14,6 +14,8 @@ export const settingsPage = `<!doctype html>
 <input id="apiKey" name="apiKey" type="password" autocomplete="new-password" maxlength="8192" placeholder="留空保留已保存的密钥" aria-describedby="key-note">
 <p id="key-note" class="hint">密钥只写入本机配置，不会回显。留空不会删除旧密钥。</p>
 <label class="check clear"><input id="clearApiKey" type="checkbox">清除已保存的密钥，并关闭 AI</label>
+<label class="check"><input id="disableThinking" type="checkbox" aria-describedby="thinking-note">关闭模型思考</label>
+<p id="thinking-note" class="hint">仅 OpenAI 兼容协议生效：请求带上 chat_template_kwargs.enable_thinking=false，适用于 llama.cpp / vLLM 部署的 Qwen 等思考模型（否则思考会占满输出上限、回复为空）。官方 OpenAI 接口不认这个参数，不要勾选。</p>
 <label class="check enabled"><input id="enabled" type="checkbox">启用 AI 对话</label>
 <div class="test-row"><button id="test-btn" type="button">测试连接</button><span id="test-result" class="test-result" role="status" aria-live="polite"></span></div>
 </fieldset>
@@ -66,7 +68,7 @@ export const settingsScript = `
     for (const id of ['protocol','baseUrl','model','whisperIntervalSec','maxTokens']) {
       if (data[id] !== undefined) get(id).value = String(data[id]);
     }
-    for (const id of ['enabled','automaticWhispers']) get(id).checked = data[id] === true;
+    for (const id of ['enabled','automaticWhispers','disableThinking']) get(id).checked = data[id] === true;
     get('key-state').textContent = data.hasKey ? '已保存 · 不回显' : '尚未设置';
     get('apiKey').value = '';
     get('clearApiKey').checked = false;
@@ -89,6 +91,7 @@ export const settingsScript = `
         baseUrl: get('baseUrl').value.trim(),
         model: get('model').value.trim(),
         apiKey: get('apiKey').value.trim(),
+        disableThinking: get('disableThinking').checked,
       };
       try {
         const response = await fetch('/standalone-ai/test', {
@@ -132,6 +135,7 @@ export const settingsScript = `
       protocol: get('protocol').value, baseUrl: get('baseUrl').value.trim(), model: get('model').value.trim(),
       apiKey: get('apiKey').value, clearApiKey: get('clearApiKey').checked,
       enabled: get('enabled').checked, automaticWhispers: get('automaticWhispers').checked,
+      disableThinking: get('disableThinking').checked,
       whisperIntervalSec: Number(get('whisperIntervalSec').value), maxTokens: Number(get('maxTokens').value)
     };
     get('apiKey').value = '';

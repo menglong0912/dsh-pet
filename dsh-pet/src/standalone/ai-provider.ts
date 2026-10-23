@@ -11,6 +11,8 @@ const MAX_OUTPUT_CHARS = 16_384;
 const MAX_EVENTS = 4096;
 const REQUESTS_PER_MINUTE = 6;
 const RATE_WINDOW_MS = 60_000;
+/** 识图请求里单张图片（data URL）的上限：桌宠截图压成 JPEG 后通常 100–300 KB */
+const MAX_IMAGE_CHARS = 4 * 1024 * 1024;
 const textBlock = z.object({ type: z.literal('text'), text: z.string().max(MAX_INPUT_CHARS) });
 const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
@@ -34,6 +36,19 @@ export interface StandaloneAiService {
     signal?: AbortSignal,
   ): Promise<undefined | { id: string; name: string }>;
   stream(options: unknown): AsyncIterable<{ type: 'text'; text: string }>;
+  /**
+   * 带一张图的单轮请求（独立应用「看屏幕」用）。截图属于隐私，只允许 OpenAI 兼容协议 +
+   * 本机地址（127.0.0.1 / localhost / ::1）；不满足时直接抛错，绝不把图发到远端。
+   */
+  streamVision(input: {
+    system: string;
+    prompt: string;
+    /** `data:image/...;base64,` 形式 */
+    image: string;
+    signal?: AbortSignal;
+  }): AsyncIterable<{ type: 'text'; text: string }>;
+  /** 当前设置能否走 streamVision（不发请求） */
+  canSeeLocally(): boolean;
   getSettings(): StandaloneAiPublicSettings;
   saveSettings(input: unknown): Promise<StandaloneAiPublicSettings>;
   testConnection(input: {
@@ -41,6 +56,7 @@ export interface StandaloneAiService {
     baseUrl?: string;
     model?: string;
     apiKey?: string;
+    disableThinking?: boolean;
   }): Promise<{ ok: boolean; message: string; reply?: string }>;
   isReady(): boolean;
   canWhisper(): boolean;
@@ -88,6 +104,15 @@ function parseRequest(options: unknown, model: string): { request: AiRequest; si
   return { request: { system, messages }, signal: data.signal };
 }
 
+/** 只认本机回环地址：识图的截图不能离开这台机器 */
+function isLoopback(baseUrl: string): boolean {
+  try {
+    return ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(baseUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(new Error('Standalone AI request cancelled.'));
   return new Promise<T>((resolve, reject) => {
@@ -131,6 +156,37 @@ export function createStandaloneAi(
     if (!ready()) throw new Error('Standalone AI is not ready. Configure and enable the model first.');
     const settings = store.current();
     const { request, signal: callerSignal } = parseRequest(options, settings.model);
+    yield* run(settings, request, callerSignal);
+  }
+
+  const localVision = () =>
+    ready() && store.current().protocol === 'openai-compatible' && isLoopback(store.current().baseUrl);
+
+  async function* streamVision(input: {
+    system: string;
+    prompt: string;
+    image: string;
+    signal?: AbortSignal;
+  }): AsyncIterable<{ type: 'text'; text: string }> {
+    if (!localVision()) throw new Error('Standalone AI vision requires a local OpenAI-compatible endpoint.');
+    if (!/^data:image\/(?:png|jpeg|webp);base64,/.test(input.image) || input.image.length > MAX_IMAGE_CHARS)
+      throw new Error('Standalone AI image input is invalid or too large.');
+    if (input.system.length + input.prompt.length > MAX_INPUT_CHARS || !input.prompt.trim())
+      throw new Error('Standalone AI input is empty or exceeds limits.');
+    const request: AiRequest = {
+      system: input.system,
+      messages: [{ role: 'user', content: input.prompt }],
+      images: [input.image],
+    };
+    yield* run(store.current(), request, input.signal);
+  }
+
+  /** 一次请求的公共执行：单飞、限频、超时、输出上限与错误归一（stream / streamVision 共用） */
+  async function* run(
+    settings: ReturnType<typeof store.current>,
+    request: AiRequest,
+    callerSignal: AbortSignal | undefined,
+  ): AsyncIterable<{ type: 'text'; text: string }> {
     if (callerSignal?.aborted) throw new Error('Standalone AI request cancelled.');
     if (active) throw new Error('Standalone AI is busy. Please wait.');
     const recent = requests.filter((time) => now() - time < RATE_WINDOW_MS);
@@ -204,6 +260,8 @@ export function createStandaloneAi(
         ? { id: model, name: model }
         : undefined,
     stream,
+    streamVision,
+    canSeeLocally: localVision,
     getSettings: () => store.publicSettings(),
     async saveSettings(input) {
       if (disposed) throw new Error('Standalone AI is disposed.');
@@ -222,13 +280,21 @@ export function createStandaloneAi(
       }
     },
     isReady: ready,
-    async testConnection(input: { protocol?: string; baseUrl?: string; model?: string; apiKey?: string }) {
+    async testConnection(input: {
+      protocol?: string;
+      baseUrl?: string;
+      model?: string;
+      apiKey?: string;
+      disableThinking?: boolean;
+    }) {
       if (disposed) return { ok: false, message: '服务已关闭' };
       const current = store.current();
       const protocol = input.protocol === 'anthropic' ? 'anthropic' : (input.protocol ?? current.protocol);
       const baseUrl = (input.baseUrl !== undefined ? input.baseUrl : current.baseUrl).trim();
       const model = (input.model !== undefined ? input.model : current.model).trim();
       const apiKey = (input.apiKey !== undefined && input.apiKey !== '' ? input.apiKey : current.apiKey).trim();
+      const disableThinking =
+        typeof input.disableThinking === 'boolean' ? input.disableThinking : current.disableThinking;
 
       if (!baseUrl) {
         return { ok: false, message: '请先填写接口地址（Base URL）' };
@@ -250,6 +316,7 @@ export function createStandaloneAi(
         whisperIntervalSec: 300,
         maxTokens: 32,
         timeoutMs: 15_000,
+        disableThinking,
       };
 
       const controller = new AbortController();

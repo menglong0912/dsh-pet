@@ -73,3 +73,20 @@ test('persists only in isolated home, redacts keys, supports keep and clear, rel
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('disableThinking defaults to false for old files and survives patches that omit it', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pet-ai-'));
+  try {
+    const legacy = { ...DEFAULT_AI_SETTINGS, ...configured } as Record<string, unknown>;
+    delete legacy.disableThinking;
+    createAiConfig(home); // 建好 dsh-pet 目录
+    writeFileSync(join(home, 'dsh-pet', 'standalone-ai.json'), JSON.stringify(legacy));
+    const store = createAiConfig(home);
+    assert.equal(store.publicSettings().disableThinking, false);
+    assert.equal((await store.save({ disableThinking: true })).disableThinking, true);
+    assert.equal((await store.save({ model: 'other-model' })).disableThinking, true);
+    assert.equal(createAiConfig(home).publicSettings().disableThinking, true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

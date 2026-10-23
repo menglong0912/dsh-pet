@@ -34,6 +34,12 @@ files:
 asar: true
 npmRebuild: false
 
+# 命令行（dsh-pet say / look / hook …）放在 asar 外面：它由系统 node 直接执行，读不了 asar。
+# 装好后软链到 ~/.local/bin/dsh-pet；Claude Code hook 也调它。
+extraResources:
+  - from: scripts/pet-cli.mjs
+    to: pet-cli.mjs
+
 # 与 package.json 的 @electron/get 默认下载版本保持一致；改版本时两处一起改
 electronVersion: 43.3.0
 # electronDist 由 scripts/dist.mjs 经 `--config.electronDist=<本机解压目录>` 传入：
@@ -46,3 +52,20 @@ win:
   icon: assets/logo.png
   target:
     - dir
+
+# macOS：同样只出解包形态（dist-app/mac-arm64/dsh-pet.app），自用、不公证。
+#   identity "-"：ad-hoc 签名。Apple Silicon 要求可执行代码带有效签名，改名/改 Info.plist 后必须重签；
+#                  没有开发者证书时 ad-hoc 是唯一选择。ad-hoc 的指定要求默认是 cdhash（每次打包都变），
+#                  屏幕录制等系统授权会随之失效，所以 scripts/dist.mjs 打完后把外层 .app 重签成
+#                  「只认 bundle id」的指定要求，授权一次即可跨版本保留。
+#   hardenedRuntime false：它只为公证服务；ad-hoc 签名下开着它会因库校验（Electron Framework 不同签名）启动失败。
+#   LSUIElement：纯菜单栏应用，启动时不在 Dock 闪一下（helper 的 app.dock.hide() 要等 ready 才生效）。
+#   icon：logo.png 只有 256px，electron-builder 要求 ≥512，由 scripts/dist.mjs 放大后经 --config.mac.icon 传入。
+mac:
+  target:
+    - dir
+  category: public.app-category.entertainment
+  identity: '-'
+  hardenedRuntime: false
+  extendInfo:
+    LSUIElement: true

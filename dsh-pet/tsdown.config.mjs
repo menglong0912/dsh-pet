@@ -90,9 +90,16 @@ export default defineConfig([
       app: 'src/app/main.ts',
     },
     // zod 打进包：应用产物要做到「不依赖 node_modules」，而配置校验每次启动都要用。
+    // openai / @anthropic-ai/sdk 同理（独立 AI 的传输层静态 import 它们）：漏打时在仓库里跑看不出来——
+    // 模块解析会一路向上找到仓库的 node_modules——装到 /Applications 才报 ERR_MODULE_NOT_FOUND。
     // @electron/get 与 @electron-internal/extract-zip 保持外部——它们只在「下载 Electron」时被
     // 动态解析，应用模式永远不走那条路（见 src/host/helper-process.ts 的 import 注释）。
-    noExternal: [/^@deepseek-ai\/(?:dsh-home-paths|dsh-credentials|dsh-llm)$/, /^zod$/],
+    noExternal: [
+      /^@deepseek-ai\/(?:dsh-home-paths|dsh-credentials|dsh-llm)$/,
+      /^zod$/,
+      /^openai(?:\/|$)/,
+      /^@anthropic-ai\/sdk(?:\/|$)/,
+    ],
     external: ['electron', /^@electron\//, /^node:/, /^@deepseek-ai\/(?!dsh-home-paths$|dsh-credentials$|dsh-llm$)/],
     alias: {
       '@deepseek-ai/dsh-home-paths': shim('dsh-home-paths'),

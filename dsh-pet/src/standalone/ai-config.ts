@@ -10,6 +10,8 @@ export interface StandaloneAiPublicSettings {
   whisperIntervalSec: number;
   maxTokens: number;
   timeoutMs: number;
+  /** OpenAI 兼容协议下请求体带 chat_template_kwargs.enable_thinking=false（llama.cpp / vLLM 部署的 Qwen 等） */
+  disableThinking: boolean;
   hasKey: boolean;
 }
 export type StandaloneAiSettings = Omit<StandaloneAiPublicSettings, 'hasKey'> & { apiKey: string };
@@ -23,6 +25,7 @@ export const DEFAULT_AI_SETTINGS: Readonly<StandaloneAiSettings> = Object.freeze
   whisperIntervalSec: 300,
   maxTokens: 1024,
   timeoutMs: 30_000,
+  disableThinking: false,
   apiKey: '',
 });
 
@@ -61,6 +64,9 @@ const fields = {
   whisperIntervalSec: z.number().int().min(60).max(86400),
   maxTokens: z.number().int().min(128).max(4096),
   timeoutMs: z.number().int().min(1000).max(60_000),
+  // 可选而非 default(false)：partial() 也会补默认值，那样每次补丁保存都会把它冲回 false。
+  // 旧版设置文件没有这个字段，由 validateSettings 合并 previous 时补齐。
+  disableThinking: z.boolean().optional(),
   apiKey: z
     .string()
     .max(4096)
@@ -77,7 +83,7 @@ export function validateSettings(input: unknown, previous: Readonly<StandaloneAi
     const apiKey = clearApiKey ? '' : values.apiKey || previous.apiKey;
     const next = persistedSchema.parse({ ...previous, ...values, apiKey });
     if (next.enabled && (!next.model || !next.baseUrl || !next.apiKey)) throw new Error('Incomplete settings');
-    return next;
+    return { ...next, disableThinking: next.disableThinking ?? false };
   } catch {
     throw new Error('Invalid standalone AI settings.');
   }

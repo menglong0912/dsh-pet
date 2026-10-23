@@ -368,3 +368,63 @@ test('testConnection checks parameters and reports success or friendly error', a
     },
   );
 });
+
+test('disableThinking sends chat_template_kwargs only when enabled, including testConnection', async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  await fixture(
+    async (ai) => {
+      assert.equal(await collect(ai.stream(options)), 'ok');
+      await ai.saveSettings({ disableThinking: true });
+      assert.equal(await collect(ai.stream(options)), 'ok');
+      assert.equal((await ai.testConnection({})).ok, true);
+      assert.equal((await ai.testConnection({ disableThinking: false })).ok, true);
+    },
+    async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return openAiResponse('ok');
+    },
+  );
+  const off = { enable_thinking: false };
+  assert.deepEqual(
+    bodies.map((body) => body.chat_template_kwargs),
+    [undefined, off, off, undefined],
+  );
+});
+
+test('streamVision attaches the image only for local OpenAI-compatible endpoints', async () => {
+  const image = 'data:image/jpeg;base64,AAAA';
+  const vision = { system: 'persona', prompt: 'look', image };
+  let body: Record<string, unknown> | undefined;
+  await fixture(
+    async (ai) => {
+      // 远端地址：拒绝且不发请求
+      assert.equal(ai.canSeeLocally(), false);
+      await assert.rejects(collect(ai.streamVision(vision)), /requires a local/);
+      assert.equal(body, undefined);
+
+      await ai.saveSettings({ baseUrl: 'http://127.0.0.1:18080/v1' });
+      assert.equal(ai.canSeeLocally(), true);
+      assert.equal(await collect(ai.streamVision(vision)), 'seen');
+      // body 在 fetch 回调里赋值，TS 看不到，上面的 assert 会把它收窄成 undefined
+      assert.deepEqual((body as Record<string, unknown> | undefined)?.messages, [
+        { role: 'system', content: 'persona' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'look' },
+            { type: 'image_url', image_url: { url: image } },
+          ],
+        },
+      ]);
+      await assert.rejects(collect(ai.streamVision({ ...vision, image: 'https://evil.test/x.png' })), /invalid/);
+      await assert.rejects(collect(ai.streamVision({ ...vision, prompt: ' ' })), /empty/);
+
+      await ai.saveSettings({ protocol: 'anthropic', baseUrl: 'http://localhost:9000' });
+      assert.equal(ai.canSeeLocally(), false);
+    },
+    async (_url, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return openAiResponse('seen');
+    },
+  );
+});

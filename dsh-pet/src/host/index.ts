@@ -772,13 +772,18 @@ export function apply(ctx: any): void {
    *
    *  收 `findPetInstance` 的**命中结果**而不是 `(petId, cfg)`：两个调用方都已经解析过了，这里再查一次
    *  只会多出一处"查不到就兜底 main"的不可达分支。 */
-  const petSystemPrompt = (found: { conf: Record<string, unknown>; pet: Record<string, unknown> }): string =>
-    composeSystemPrompt({
+  const petSystemPrompt = (found: { conf: Record<string, unknown>; pet: Record<string, unknown> }): string => {
+    const base = composeSystemPrompt({
       prompt: petPersona(found.conf, found.pet),
       name: String(found.pet.name ?? ''),
       id: String(found.pet.id ?? ''),
       now: new Date(),
     });
+    // 独立应用挂在 ctx 上的「主人此刻」背景（前台应用 / 连续使用 / 离开多久，见 src/app/activity.ts）；
+    // DSH 内没有这个钩子，原样返回
+    const appContext = (ctx as { dshPetAppContext?: () => string }).dshPetAppContext?.() ?? '';
+    return appContext ? base + '\n' + appContext : base;
+  };
 
   /** 对话记忆轮数（1 轮 = 1 问 1 答）：该宠物**所属条目**的 chatMemoryRounds（合并器已填默认非负数字）。
    *  同样收**已解析的条目配置**：两个调用方都已经拿到 `findPetInstance` 的结果。 */

@@ -766,7 +766,19 @@ async function startTray() {
           checked: isDesktopDisplay(pet.display),
           click: () => traySetPetDisplay(pet.id, toggleDisplay(pet.display)),
         })),
-        ...(APP_MODE ? [{ type: 'separator' }, { label: '退出', click: () => app.quit() }] : []),
+        ...(APP_MODE
+          ? [
+              { type: 'separator' },
+              // 开机自启 = 系统登录项；勾选状态每次建菜单时从系统读，用户在系统设置里删掉也能如实反映
+              {
+                label: '开机自启',
+                type: 'checkbox',
+                checked: app.getLoginItemSettings().openAtLogin,
+                click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
+              },
+              { label: '退出', click: () => app.quit() },
+            ]
+          : []),
       ]),
     );
     // Windows 上 setContextMenu 只接管右键，左键默认什么都不做（macOS 相反：左键即弹菜单）

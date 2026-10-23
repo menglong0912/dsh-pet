@@ -8,7 +8,8 @@ import tseslint from 'typescript-eslint';
 import reactHooks from 'eslint-plugin-react-hooks';
 
 export default tseslint.config(
-  { ignores: ['lib/**', 'scripts/**', 'assets/**', 'runtime/**', 'node_modules/**'] },
+  // dist-app：electron-builder 产物（含随 .app 放在 asar 外的 pet-cli.mjs 副本）
+  { ignores: ['lib/**', 'scripts/**', 'assets/**', 'runtime/**', 'node_modules/**', 'dist-app/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

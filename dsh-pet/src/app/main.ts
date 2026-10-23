@@ -24,7 +24,7 @@
  *   DSH_PET_SITE_URL      交给 helper：右键「打开网站」用它（这里指向带令牌的配置页）
  */
 import { createServer } from 'node:http';
-import type { ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -42,6 +42,12 @@ import type { RequestSecurity } from '../standalone/request-security';
 import { settingsHandler, testHandler } from '../standalone/server';
 import { settingsPage, settingsScript, settingsStyle } from '../standalone/settings-page';
 import type { StandaloneAiService } from '../standalone/ai-provider';
+import { createAppConfig } from './app-config';
+import { createAppRoutes } from './app-routes';
+import { removeDiscovery, writeDiscovery } from './discovery';
+import { startAppFeatures } from './features';
+import type { AppFeatures, FeatureElectron } from './features';
+import { teeOutputToFile } from './log-file';
 
 /**
  * `electron` 由 Electron 运行时提供，**不是本包的依赖**。只声明实际用到的成员：
@@ -54,11 +60,13 @@ interface WebContentsLike {
   ): void;
 }
 interface ElectronApp {
+  getPath(name: 'appData' | 'logs'): string;
   requestSingleInstanceLock(): boolean;
   exit(code?: number): void;
   on(event: 'web-contents-created', listener: (event: unknown, contents: WebContentsLike) => void): void;
   on(event: 'second-instance', listener: () => void): void;
   on(event: 'will-quit', listener: () => void): void;
+  whenReady(): Promise<void>;
 }
 const { app } = createRequire(import.meta.url)('electron') as { app: ElectronApp };
 
@@ -83,6 +91,11 @@ if (!locked) {
  * 之前被 require（内部有 `app.commandLine.appendSwitch`，ready 后再加不生效）。
  */
 async function boot(): Promise<void> {
+  // 双击 / 开机自启没有终端：日志另存一份到 ~/Library/Logs/dsh-pet/app.log
+  if (!process.stdout.isTTY) teeOutputToFile(join(app.getPath('logs'), 'app.log'));
+  // 独立应用用自己的数据目录（与 helper 的 userData 同一处），不和 DSH 的 ~/.dsh 共用配置、记忆与 AI 设置；
+  // 显式设了 DSH_HOME 时尊重它。必须赶在下面任何 dshHomeDir() 之前。
+  if (!process.env.DSH_HOME) process.env.DSH_HOME = join(app.getPath('appData'), 'dsh-pet');
   const logger = createStandaloneLogger();
   const routes: RegisteredRoute[] = [];
   let port = 0;
@@ -98,7 +111,9 @@ async function boot(): Promise<void> {
     authenticatedUrl: security.authenticatedUrl,
   });
 
-  const server = await startRouter(routes, { security, ai });
+  // 扩展功能（src/app/features.ts）要等 app ready 才能用 powerMonitor / desktopCapturer，之前 /app/* 回 503
+  let features: AppFeatures | null = null;
+  const server = await startRouter(routes, { security, ai, appRoutes: createAppRoutes(() => features, log) });
   port = server.port;
   const origin = `http://127.0.0.1:${port}`;
   log(`本机服务 ${origin}`);
@@ -114,6 +129,8 @@ async function boot(): Promise<void> {
   process.env.DSH_PET_SITE_URL = security.authenticatedUrl(origin);
   if (!process.env.DSH_PET_SCALE) process.env.DSH_PET_SCALE = '1';
 
+  // 插件拼人设时追加「主人此刻」一行（src/host/index.ts 的 petSystemPrompt 读这个钩子）
+  context.ctx.dshPetAppContext = () => features?.activityContext() ?? '';
   apply(context.ctx);
   log(`apply() 完成：routes=${routes.length} 失败=${context.failures.length}`);
 
@@ -129,8 +146,23 @@ async function boot(): Promise<void> {
   });
   createRequire(import.meta.url)(helperMain);
 
+  void app.whenReady().then(() => {
+    const home = dshHomeDir();
+    features = startAppFeatures({
+      electron: createRequire(import.meta.url)('electron') as FeatureElectron,
+      ai,
+      configPaths: configPathsFor(packageRoot, home),
+      appConfig: createAppConfig(join(home, 'dsh-pet', 'app-config.json'), log),
+      petBase: `${origin}/dsh-pet-7340`,
+      log,
+    });
+    writeDiscovery(home, { port, pid: process.pid, version: packageVersion(packageRoot) });
+  });
+
   app.on('second-instance', () => log('已有一个实例在运行，忽略本次启动'));
   app.on('will-quit', () => {
+    features?.dispose();
+    removeDiscovery(dshHomeDir(), process.pid);
     void ai.dispose();
     void context.dispose().catch(() => undefined);
     void server.close().catch(() => undefined);
@@ -158,6 +190,8 @@ function desktopPets(): Array<{ id: string; size: number }> {
 interface RouterDeps {
   security: RequestSecurity;
   ai: StandaloneAiService;
+  /** 应用自己的 /app/* 接口；不是这组路径时返回 false */
+  appRoutes: (req: IncomingMessage, res: ServerResponse, pathname: string) => boolean;
 }
 
 /**
@@ -220,6 +254,8 @@ function startRouter(
       sendText(res, 200, 'text/html', landingPage(boundPort));
       return;
     }
+
+    if (deps.appRoutes(req, res, url.pathname)) return;
 
     // ---- 插件路由（桌面窗口）----
     const route = routes.find((candidate) =>

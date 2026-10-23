@@ -9,6 +9,7 @@ export interface StandaloneSettingsService {
     baseUrl?: string;
     model?: string;
     apiKey?: string;
+    disableThinking?: boolean;
   }): Promise<{ ok: boolean; message: string; reply?: string }>;
 }
 
@@ -36,6 +37,7 @@ const settingsSchema = z
     whisperIntervalSec: z.number().int().min(60).max(86400).optional(),
     maxTokens: z.number().int().min(128).max(4096).optional(),
     timeoutMs: z.number().int().min(1000).max(60000).optional(),
+    disableThinking: z.boolean().optional(),
   })
   .strict();
 
@@ -54,6 +56,7 @@ const publicNames = [
   'whisperIntervalSec',
   'maxTokens',
   'timeoutMs',
+  'disableThinking',
   'hasKey',
 ] as const;
 export function publicSettings(input: unknown): Record<string, unknown> {

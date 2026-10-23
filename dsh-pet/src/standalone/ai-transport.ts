@@ -10,6 +10,8 @@ export interface AiTextMessage {
 export interface AiRequest {
   system: string;
   messages: AiTextMessage[];
+  /** 附在最后一条用户消息上的图片（data URL）；只有 OpenAI 兼容协议支持 */
+  images?: string[];
 }
 export type AiTransportEvent = { text?: string; refusal?: boolean };
 const quiet = { debug() {}, info() {}, warn() {}, error() {} };
@@ -62,12 +64,26 @@ export async function* sdkTextStream(
   };
   if (settings.protocol === 'openai-compatible') {
     const client = new OpenAI({ ...shared, organization: null, project: null, webhookSecret: null });
+    const images = request.images ?? [];
+    const last = request.messages.length - 1;
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       ...(request.system ? [{ role: 'system' as const, content: request.system }] : []),
-      ...request.messages,
+      ...request.messages.map((message, index): OpenAI.Chat.Completions.ChatCompletionMessageParam =>
+        index === last && message.role === 'user' && images.length
+          ? {
+              role: 'user',
+              content: [
+                { type: 'text', text: message.content },
+                ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+              ],
+            }
+          : message,
+      ),
     ];
+    // chat_template_kwargs 不在 OpenAI 类型里，SDK 会原样透传进请求体；官方 OpenAI 会拒收未知参数，所以只按设置开启
+    const thinking = settings.disableThinking ? { chat_template_kwargs: { enable_thinking: false } } : {};
     const stream = await client.chat.completions.create(
-      { model: settings.model, messages, stream: true, max_tokens: settings.maxTokens, n: 1 },
+      { model: settings.model, messages, stream: true, max_tokens: settings.maxTokens, n: 1, ...thinking },
       { signal },
     );
     for await (const event of stream) {
@@ -77,6 +93,7 @@ export async function* sdkTextStream(
     }
     return;
   }
+  if (request.images?.length) throw new Error('Images are only supported for OpenAI-compatible endpoints.');
   // Explicit authToken:null prevents SDK environment/OAuth/profile credential resolution.
   const client = new Anthropic({ ...shared, authToken: null, webhookKey: null });
   const opus = settings.model === 'claude-opus-5-5';
