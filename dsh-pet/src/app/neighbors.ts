@@ -245,3 +245,18 @@ export function shouldAutoAdmit(
   if (!visitor.id || !autoAdmitFriends || present !== true) return false;
   return book.get(visitor.id)?.friend === true;
 }
+
+/**
+ * 这一位能不能和本机互相捎话（T7，features.ts 收发两个方向都用）：
+ * 验过身份（做客时是主人家的应答签名、接待时是客人的敲门签名）、确实是熟人、开着「和熟人互相捎话」，
+ * 三者同时满足才行——没验过身份的一律当陌生人，捎的话一句都不收。
+ */
+export function notesAllowed(
+  book: { get(id: string): NeighborRecord | undefined },
+  id: string | undefined,
+  verified: boolean,
+  notesEnabled: boolean,
+): boolean {
+  if (!id || !verified || !notesEnabled) return false;
+  return book.get(id)?.friend === true;
+}

@@ -74,6 +74,8 @@ export const settingsPage = `<!doctype html>
 <p id="chat-note" class="hint">两只宠物各用自己的人设和模型聊几句；关掉后只说固定的招呼和道别，不调用模型。</p>
 <label class="check"><input id="visitAutoAdmit" type="checkbox" aria-describedby="autoadmit-note">熟人来敲门直接请进</label>
 <p id="autoadmit-note" class="hint">在「邻居」里标成熟人的邻居来敲门时不再等主人点头，直接请进来；只在主人在电脑前时才自动，其余照旧等主人右键应门。</p>
+<label class="check"><input id="visitNotes" type="checkbox" aria-describedby="notes-note">和熟人互相捎话</label>
+<p id="notes-note" class="hint">右键「捎话给 X」写一句话，让宠物带给熟人（串门时带给对方主人，家里来熟客时托它带回去）；也只收熟人的捎话。</p>
 <div class="pair"><div><label for="visitNickname">邻居看到的昵称</label><input id="visitNickname" type="text" maxlength="12" placeholder="留空用电脑登录名" spellcheck="false"></div>
 <div><label for="visitStayMin">出门做客待多久（分钟）</label><input id="visitStayMin" type="number" min="1" max="60" step="1" value="10"></div></div>
 </div>
@@ -132,7 +134,7 @@ export const settingsScript = `
   // 「陪伴与提醒」「局域网串门」只有独立应用有（/standalone-ai/app-settings）；CLI 里是 404，这两节保持隐藏
   const appSections = [get('app-settings'), get('visit-settings')];
   // 串门的细节开关挂在总开关下面：总开关关着时置灰（值照常保存，再打开时还是原来的选择）
-  const visitDetails = ['visitHosting', 'visitVisiting', 'visitChat', 'visitAutoAdmit', 'visitNickname', 'visitStayMin'];
+  const visitDetails = ['visitHosting', 'visitVisiting', 'visitChat', 'visitAutoAdmit', 'visitNotes', 'visitNickname', 'visitStayMin'];
   function syncVisitDetails() { for (const id of visitDetails) get(id).disabled = !get('visitEnabled').checked; }
   get('visitEnabled').addEventListener('change', syncVisitDetails);
   let appAvailable = false;
@@ -164,6 +166,7 @@ export const settingsScript = `
     get('visitVisiting').checked = data.visit.visiting === true;
     get('visitChat').checked = data.visit.chat === true;
     get('visitAutoAdmit').checked = data.visit.autoAdmitFriends === true;
+    get('visitNotes').checked = data.visit.notes !== false;
     get('visitNickname').value = data.visit.nickname;
     get('visitStayMin').value = String(data.visit.stayMin);
     syncVisitDetails();
@@ -376,7 +379,7 @@ export const settingsScript = `
           offWork: { enabled: get('offWorkEnabled').checked, time: get('offWorkTime').value, weekdaysOnly: get('offWorkWeekdaysOnly').checked, leadMin: num('offWorkLeadMin') },
           visit: {
             enabled: get('visitEnabled').checked, hosting: get('visitHosting').checked, visiting: get('visitVisiting').checked,
-            chat: get('visitChat').checked, autoAdmitFriends: get('visitAutoAdmit').checked,
+            chat: get('visitChat').checked, autoAdmitFriends: get('visitAutoAdmit').checked, notes: get('visitNotes').checked,
             nickname: get('visitNickname').value.trim(), stayMin: num('visitStayMin')
           }
         }));

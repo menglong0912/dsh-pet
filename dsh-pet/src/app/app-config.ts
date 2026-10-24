@@ -55,6 +55,8 @@ const schema = z
         stayMin: z.number().min(1).max(60),
         /** 熟人来敲门直接请进，不用主人点头；比 stayMin 晚加，同样缺了按默认补 */
         autoAdmitFriends: z.boolean().default(false),
+        /** 和熟人互相捎话（主人亲手写的话，只对熟人收发）；比 autoAdmitFriends 晚加，同样缺了按默认补 */
+        notes: z.boolean().default(true),
       })
       .default({
         enabled: false,
@@ -64,6 +66,7 @@ const schema = z
         nickname: '',
         stayMin: 10,
         autoAdmitFriends: false,
+        notes: true,
       }),
   })
   .strict();
@@ -106,6 +109,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     nickname: '',
     stayMin: 10,
     autoAdmitFriends: false,
+    notes: true,
   },
 };
 

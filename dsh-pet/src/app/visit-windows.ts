@@ -35,6 +35,9 @@ export interface WindowLike {
   setVisibleOnAllWorkspaces(visible: boolean, options: { visibleOnFullScreen: boolean }): void;
   loadURL(url: string): Promise<void>;
   showInactive(): void;
+  show(): void;
+  focus(): void;
+  once(event: 'closed', listener: () => void): void;
   destroy(): void;
   webContents: { getURL(): string; executeJavaScript(code: string): Promise<unknown> };
 }
@@ -228,8 +231,8 @@ export function petHitRect(bounds: Rect): Rect {
 export interface GuestWindow {
   /** 客人站在自家宠物哪一边 */
   side: 'left' | 'right';
-  /** 客人说一句（气泡显示 10 秒） */
-  say(text: string): void;
+  /** 客人说一句（气泡默认显示 10 秒；捎话要看得久一点，可另给时长） */
+  say(text: string, durationMs?: number): void;
   /** 挥手（进门、告辞时） */
   wave(): void;
   /** 播一段内置皮肤的动画（一起玩），播完回到待机 */
@@ -354,7 +357,7 @@ export function openGuestWindow(
     get side() {
       return side;
     },
-    say: (text) => run(`guest.say(${JSON.stringify(text)})`),
+    say: (text, durationMs) => run(`guest.say(${JSON.stringify(text)}, ${Number(durationMs) || 10000})`),
     wave: () => run('guest.wave()'),
     play: (anim) => run(`guest.play(${JSON.stringify(anim)})`),
     close(afterMs) {
@@ -438,11 +441,11 @@ window.guest = {
   face(facing) {
     canvas.classList.toggle('right', facing === 'right');
   },
-  say(text) {
+  say(text, duration) {
     bubble.textContent = String(text);
     bubble.classList.add('on');
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => bubble.classList.remove('on'), 10000);
+    hideTimer = setTimeout(() => bubble.classList.remove('on'), Number(duration) || 10000);
   },
   wave() {
     play('点击回应-元气挥手', false);

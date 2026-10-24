@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NeighborBook, memoryLine, NEIGHBORS_MAX, orderNeighbors, REVISIT_MS, shouldAutoAdmit } from './neighbors.ts';
+import {
+  NeighborBook,
+  memoryLine,
+  NEIGHBORS_MAX,
+  notesAllowed,
+  orderNeighbors,
+  REVISIT_MS,
+  shouldAutoAdmit,
+} from './neighbors.ts';
 
 function withPath(fn: (path: string, warns: string[]) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-pet-neighbors-'));
@@ -162,6 +170,23 @@ test('shouldAutoAdmit only fires for a verified friend with the switch on and th
     assert.equal(shouldAutoAdmit(book, verified, true, true), false);
     book.setFriend(id, true);
     assert.equal(shouldAutoAdmit(book, verified, true, true), true);
+  });
+});
+
+test('notesAllowed only fires for a verified friend with notes switched on', () => {
+  withPath((path) => {
+    const book = new NeighborBook(path, () => undefined);
+    const id = 'a'.repeat(32);
+    book.met(id, { owner: '小李', pet: '阿花' }, 'hosted', 1_000);
+    // 三者缺一不可：没验证过身份（id 是空的）、不是熟人、关了「和熟人互相捎话」，一句都不收也不发
+    assert.equal(notesAllowed(book, undefined, true, true), false);
+    assert.equal(notesAllowed(book, id, false, true), false);
+    assert.equal(notesAllowed(book, id, true, false), false);
+    assert.equal(notesAllowed(book, id, true, true), false);
+    book.setFriend(id, true);
+    assert.equal(notesAllowed(book, id, true, true), true);
+    // 没记过的 id 查不到记录，同样不行
+    assert.equal(notesAllowed(book, 'b'.repeat(32), true, true), false);
   });
 });
 

@@ -9,6 +9,8 @@
  *   POST /v1/knock { owner, pet, id?, pub?, ts?, sig? }    敲门：挂着等主人在右键菜单里点「让进 / 不让进」，最多 KNOCK_WAIT_MS
  *                                    （带身份的客人另加签名四件套；应答也带上主人家的 id / pub / sig，见 visit-identity.ts）
  *   POST /v1/chat  { token, text }   客人说一句，回 { reply }（这边的宠物回的那句）
+ *   POST /v1/note  { token, text }   客人捎话（它家主人写给这边的，只收熟人的，每趟最多 NOTE_MAX 条、
+ *                                    两条隔 NOTE_GAP_MS；events 里的 note 事件捎回去是另一个方向）
  *   POST /v1/ping  { token }         客人每 PING_MS 报一次还在，回 { events }：这边攒下要告诉客人的事
  *                                    （这边宠物主动说的话、主人摸了它一下、一起玩什么、请它吃什么）；被请回家后回 reason: sent-home
  *   POST /v1/leave { token, text }   客人告辞（text 是告别的话，可空）
@@ -55,6 +57,10 @@ const KNOCK_TS_SKEW_MS = 120_000;
 /** 防重放缓存里一条 (id, ts) 记多久、最多存几条 */
 const REPLAY_MS = 120_000;
 const REPLAY_MAX = 256;
+/** 每趟每个方向最多捎几句话 */
+export const NOTE_MAX = 5;
+/** 捎话两条之间至少隔这么久 */
+export const NOTE_GAP_MS = 10_000;
 
 // 控制字符、零宽字符与双向文本控制符：换行会撑坏气泡，双向控制符能把显示顺序倒过来骗人
 // eslint-disable-next-line no-control-regex
@@ -260,9 +266,13 @@ export interface Visitor {
 
 export type KnockFailure = 'busy' | 'too-soon' | 'declined' | 'no-answer';
 
-/** 这边要告诉客人的事（客人报平安时捎过去）：这边宠物主动说了句话 / 主人摸了客人一下 / 一起玩什么 / 请它吃什么 */
+/** 这边要告诉客人的事（客人报平安时捎过去）：这边宠物主动说了句话 / 主人摸了客人一下 / 一起玩什么 / 请它吃什么 / 捎给客人主人的话 */
 export type HostEvent =
-  { type: 'line'; text: string } | { type: 'poke' } | { type: 'play'; what: string } | { type: 'gift'; what: string };
+  | { type: 'line'; text: string }
+  | { type: 'poke' }
+  | { type: 'play'; what: string }
+  | { type: 'gift'; what: string }
+  | { type: 'note'; text: string };
 /** 一次最多捎几件事（攒多了丢最早的） */
 const EVENTS_MAX = 8;
 
@@ -275,6 +285,8 @@ export interface HostHandlers {
   knockEnded(visitor: Visitor, reason: 'no-answer' | 'gone'): void;
   /** 客人说了一句，返回这边宠物回的话 */
   line(visitor: Visitor, text: string): Promise<string>;
+  /** 客人捎来的话（它家主人写给这边的）：返回收不收——只收自己熟人的（T7，features.ts 查邻居簿） */
+  note(visitor: Visitor, text: string): boolean;
   /** 客人走了：leave = 告辞（text 是告别的话，可空）；lost = 太久没动静 */
   left(visitor: Visitor, reason: 'leave' | 'lost', text: string): void;
 }
@@ -285,6 +297,9 @@ interface Session {
   lastSeen: number;
   /** 等客人下次报平安时捎过去的事 */
   outbox: HostEvent[];
+  /** 这趟客人已经捎来几句话、上一条是什么时候（限额在接待端卡） */
+  noteCount: number;
+  lastNoteAt: number;
 }
 
 interface PendingKnock {
@@ -430,6 +445,18 @@ export class VisitHost {
         });
         return send(res, 200, { ok: true, reply: cleanText(reply, LINE_MAX) });
       }
+      case '/v1/note': {
+        const text = cleanText(body.text, LINE_MAX);
+        if (!text) return send(res, 400, { ok: false, reason: 'bad-request' });
+        // 先卡限额（纯协议层），再问这边收不收（features.ts 查邻居簿）；收下的才算数
+        const now = this.now();
+        if (session.noteCount >= NOTE_MAX || (session.noteCount > 0 && now - session.lastNoteAt < NOTE_GAP_MS))
+          return send(res, 200, { ok: false, reason: 'too-many' });
+        if (!this.handlers.note(session.visitor, text)) return send(res, 200, { ok: false, reason: 'not-friend' });
+        session.noteCount += 1;
+        session.lastNoteAt = now;
+        return send(res, 200, { ok: true });
+      }
       case '/v1/leave':
         this.session = null;
         this.handlers.left(session.visitor, 'leave', cleanText(body.text, LINE_MAX));
@@ -480,7 +507,7 @@ export class VisitHost {
     }
     if (!answer) return send(res, 200, { ok: false, reason: 'declined' });
     const token = randomBytes(16).toString('hex');
-    this.session = { visitor, token, lastSeen: this.now(), outbox: [] };
+    this.session = { visitor, token, lastSeen: this.now(), outbox: [], noteCount: 0, lastNoteAt: 0 };
     this.sentHomeToken = null;
     // 给验明正身的客人签应答：客人拿它认下这家人（T4 记邻居、T7 捎话都以这个为准）
     const identity = this.options.identity;
@@ -637,6 +664,8 @@ export function parseEvents(raw: unknown): HostEvent[] {
     if (event?.type === 'poke') events.push({ type: 'poke' });
     const text = cleanText(event?.text, LINE_MAX);
     if (event?.type === 'line' && text) events.push({ type: 'line', text });
+    // 捎给客人主人的话：只当文本显示，不进任何提示词（features.ts 的 onHostEvent）
+    if (event?.type === 'note' && text) events.push({ type: 'note', text });
     const what = cleanText(event?.what, NAME_MAX);
     if (event?.type === 'play' && what) events.push({ type: 'play', what });
     if (event?.type === 'gift' && what) events.push({ type: 'gift', what });
@@ -658,6 +687,21 @@ export async function tripRequest(
   if (result.ok === true)
     return { ok: true, reply: cleanText(result.reply, LINE_MAX), events: parseEvents(result.events) };
   return { ok: false, reason: result.reason === 'sent-home' ? 'sent-home' : 'not-visiting' };
+}
+
+export type NoteReply =
+  { ok: true } | { ok: false; reason: 'not-friend' | 'too-many' | 'sent-home' | 'not-visiting' | 'old-host' };
+
+/**
+ * 捎话（客人 → 主人家）；连不上时抛错。
+ * 旧主人家没有这条路径，回的是 404 + not-found：如实映射成 old-host，客人那边好说「对方的版本太旧」。
+ */
+export async function sendNote(host: HostAddress, body: { token: string; text: string }): Promise<NoteReply> {
+  const result = await post(host, '/v1/note', body, 5_000);
+  if (result.ok === true) return { ok: true };
+  if (result.reason === 'not-friend' || result.reason === 'too-many' || result.reason === 'sent-home')
+    return { ok: false, reason: result.reason };
+  return { ok: false, reason: result.reason === 'not-found' ? 'old-host' : 'not-visiting' };
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {

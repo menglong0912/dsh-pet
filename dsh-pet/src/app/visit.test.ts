@@ -14,6 +14,7 @@ import {
   parseBeacon,
   parseEvents,
   PING_MS,
+  sendNote,
   tripRequest,
   VisitHost,
 } from './visit.ts';
@@ -152,6 +153,10 @@ async function withHost(
       calls.push(`line ${text}`);
       return Promise.resolve(`欢迎\n${visitor.pet}～`);
     },
+    note: (visitor, text) => {
+      calls.push(`note ${visitor.owner}:${text}`);
+      return true;
+    },
     left: (_visitor, reason, text) => calls.push(`left ${reason} ${text}`),
     ...overrides,
   };
@@ -264,6 +269,8 @@ test('events from the other side are checked like everything else it sends', () 
     parseEvents([
       { type: 'line', text: '你好\u202e呀\n' },
       { type: 'line', text: '' },
+      { type: 'note', text: '帮我告诉我主人：明天带伞' },
+      { type: 'note', text: '\u0000' },
       { type: 'poke', extra: 1 },
       { type: 'play', what: '吃西瓜吃西瓜吃西瓜吃西瓜吃西瓜' },
       { type: 'play' },
@@ -275,6 +282,7 @@ test('events from the other side are checked like everything else it sends', () 
     ]),
     [
       { type: 'line', text: '你好 呀' },
+      { type: 'note', text: '帮我告诉我主人：明天带伞' },
       { type: 'poke' },
       { type: 'play', what: '吃西瓜吃西瓜吃西瓜吃西瓜' },
       { type: 'gift', what: '糖葫芦' },
@@ -298,6 +306,73 @@ test('the host can send a guest home, and the guest hears it on its next ping', 
     // 送走客人不经 left（主人自己点的，调用方自己收尾）
     assert.deepEqual(calls, ['knocked 小王/小鱼@127.0.0.1']);
   });
+});
+
+test('notes: a friend’s note gets through (cleaned), strangers, floods and old hosts are told why', async () => {
+  let clock = 0;
+  let accept = true;
+  const notes: string[] = [];
+  await withHost(
+    {
+      now: () => clock,
+      note: (visitor, text) => {
+        notes.push(`${visitor.owner}:${text}`);
+        return accept;
+      },
+    },
+    async (host, port) => {
+      const target = { address: '127.0.0.1', port };
+      const [answer] = await knockAndAnswer(host, port, true);
+      const token = answer.ok ? answer.token : '';
+      // 熟人的收下，超长的按 cleanText 截到 LINE_MAX
+      assert.deepEqual(await sendNote(target, { token, text: '告诉我主人：明天带伞' }), { ok: true });
+      clock += 10_000;
+      assert.deepEqual(await sendNote(target, { token, text: '一'.repeat(80) }), { ok: true });
+      assert.deepEqual(notes, ['小王:告诉我主人：明天带伞', `小王:${'一'.repeat(60)}`]);
+      assert.deepEqual(await sendNote(target, { token, text: '太快' }), { ok: false, reason: 'too-many' });
+      clock += 10_000;
+      // 不是熟人（对方没把自己标成熟人）：拒收（先问收不收，才算这条数）
+      accept = false;
+      assert.deepEqual(await sendNote(target, { token, text: '试试' }), { ok: false, reason: 'not-friend' });
+      accept = true;
+      for (let n = 2; n <= 4; n += 1) {
+        clock += 10_000;
+        assert.deepEqual(await sendNote(target, { token, text: `第 ${n} 句` }), { ok: true });
+      }
+      // 每趟最多 5 条：隔得再久也捎不进第 6 条
+      clock += 10_000;
+      assert.deepEqual(await sendNote(target, { token, text: '第 6 句' }), { ok: false, reason: 'too-many' });
+      // 没进门 / 被请回家：如实带原因回去
+      const stranger = 'f'.repeat(32);
+      assert.deepEqual(await sendNote(target, { token: stranger, text: '谁？' }), {
+        ok: false,
+        reason: 'not-visiting',
+      });
+      host.sendHome();
+      assert.deepEqual(await sendNote(target, { token, text: '还在吗' }), { ok: false, reason: 'sent-home' });
+    },
+  );
+
+  // 旧主人家没有 /v1/note（404 + not-found）：客人这边认得出「对方的版本太旧」
+  const old = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const body = JSON.stringify({ ok: false, reason: 'not-found' });
+      res.writeHead(404, { 'content-type': 'application/json', 'content-length': body.length });
+      res.end(body);
+    });
+  });
+  await new Promise<void>((done) => old.listen(0, '127.0.0.1', done));
+  try {
+    const port = (old.address() as AddressInfo).port;
+    assert.deepEqual(await sendNote({ address: '127.0.0.1', port }, { token: 'ab'.repeat(16), text: '你好' }), {
+      ok: false,
+      reason: 'old-host',
+    });
+  } finally {
+    old.closeAllConnections();
+    await new Promise<void>((done) => old.close(() => done()));
+  }
 });
 
 test('nobody answering the door ends the knock; a busy host turns knocks away without asking', async () => {

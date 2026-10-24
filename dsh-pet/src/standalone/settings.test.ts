@@ -212,6 +212,7 @@ test('settings browser script shows and saves the app section when the app serve
       nickname: '',
       stayMin: 10,
       autoAdmitFriends: false,
+      notes: true,
     },
   };
   runInNewContext(settingsScript, {
@@ -269,6 +270,7 @@ test('settings browser script shows and saves the app section when the app serve
       nickname: '小王',
       stayMin: 20,
       autoAdmitFriends: false,
+      notes: true,
     },
   });
 });

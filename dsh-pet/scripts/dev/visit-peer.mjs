@@ -15,8 +15,8 @@
  *   --identity none 模拟旧版本，不签名。visit 模式签名需要主人家的 id（来自信标）：脚本连脚本自测时
  *   从 host 模式打印的「身份」里抄过来，用 --host-id 带上；不带 --host-id 就不签名（当旧版本客人）。
  *
- * host 的标准输入命令：line <话> / poke / play <项> / gift <项> / home（请客人回家）；ask 模式下 y / n 答复敲门。
- * visit 的标准输入命令：say <话> / leave（告辞，后面可以带告别的话）。
+ * host 的标准输入命令：line <话> / poke / play <项> / gift <项> / note <话>（捎给客人的主人）/ friend <y|n>（收不收客人的捎话，默认收）/ home（请客人回家）；ask 模式下 y / n 答复敲门。
+ * visit 的标准输入命令：say <话> / note <话>（捎给对方主人）/ leave（告辞，后面可以带告别的话）。
  * 两种模式 10 分钟后自动退出。
  */
 import { randomUUID } from 'node:crypto';
@@ -25,7 +25,7 @@ import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { BEACON_PORT, PING_MS, VisitHost, encodeBeacon, knockOn, tripRequest } from '../../src/app/visit.ts';
+import { BEACON_PORT, PING_MS, VisitHost, encodeBeacon, knockOn, sendNote, tripRequest } from '../../src/app/visit.ts';
 import { generateVisitIdentity, loadVisitIdentity } from '../../src/app/visit-identity.ts';
 
 const OWNER_DEFAULT = '测试邻居';
@@ -93,6 +93,8 @@ function identityOf(options) {
 
 async function runHost(options) {
   const identity = identityOf(options);
+  // 客人捎来的话收不收（收 = 模拟熟人；要测 not-friend 就 friend n）
+  let friend = true;
   const host = new VisitHost(
     {
       canHost: () => true,
@@ -109,6 +111,14 @@ async function runHost(options) {
       async line(visitor, text) {
         print(`${visitor.pet}：${text}`);
         return REPLY;
+      },
+      note(visitor, text) {
+        if (!friend) {
+          print(`${visitor.owner} 捎来一句话：${text}（friend n，没收）`);
+          return false;
+        }
+        print(`${visitor.owner} 捎来一句话：${text}`);
+        return true;
       },
       left(visitor, reason, text) {
         print(`${visitor.pet} ${reason === 'leave' ? `告辞：${text || '（没说话）'}` : '太久没动静，当它走了'}`);
@@ -163,6 +173,23 @@ async function runHost(options) {
         print(sent ? `捎给客人：${command === 'play' ? '一起' : '请它吃'}${text}` : '没有客人在，捎不出去');
         return;
       }
+      case 'note': {
+        if (!text) {
+          print('用法：note <话>');
+          return;
+        }
+        print(host.tell({ type: 'note', text }) ? `托客人捎话给它的主人：${text}` : '没有客人在，捎不出去');
+        return;
+      }
+      case 'friend': {
+        if (text !== 'y' && text !== 'n') {
+          print('用法：friend <y|n>（收不收客人的捎话，默认 y）');
+          return;
+        }
+        friend = text === 'y';
+        print(friend ? '客人的捎话按熟人收' : '客人的捎话一律拒收（not-friend）');
+        return;
+      }
       case 'home': {
         const visitor = host.sendHome();
         print(visitor ? `请 ${visitor.pet} 回家了` : '没有客人在');
@@ -171,7 +198,7 @@ async function runHost(options) {
       default:
         if (input) {
           print(
-            `不认识的命令：${command}（line / poke / play / gift / home${options.accept === 'ask' ? ' / y / n' : ''}）`,
+            `不认识的命令：${command}（line / poke / play / gift / note / friend / home${options.accept === 'ask' ? ' / y / n' : ''}）`,
           );
         }
     }
@@ -204,6 +231,7 @@ function hostPortFromLog() {
 
 function printEvent(event) {
   if (event.type === 'line') print(`它家宠物说：${event.text}`);
+  else if (event.type === 'note') print(`它家宠物带回它主人的话：${event.text}`);
   else if (event.type === 'poke') print('它家主人摸了你一下');
   else if (event.type === 'play') print(`它家请你一起玩：${event.what}`);
   else print(`它家请你吃：${event.what}`);
@@ -211,6 +239,14 @@ function printEvent(event) {
 
 /** 被请回家 / 不被当客人了：都该走了 */
 const HOME_REASONS = { 'sent-home': '被请回家了', 'not-visiting': '那边已经不当我是客人了' };
+/** 捎话没捎成的结果 */
+const NOTE_FAIL_REASONS = {
+  'not-friend': '对方没把我们当熟人',
+  'too-many': '发太多了',
+  'sent-home': '已经回家了',
+  'not-visiting': '那边已经不当我是客人了',
+  'old-host': '对方的版本太旧，没有捎话这个功能',
+};
 
 async function runVisit(options) {
   const identity = identityOf(options);
@@ -270,12 +306,18 @@ async function runVisit(options) {
     const input = raw.trim();
     const command = input.split(/\s+/)[0];
     const text = input.slice(command.length).trim();
-    if (command !== 'say' && command !== 'leave') {
-      if (input) print(`不认识的命令：${command}（say / leave）`);
+    if (command !== 'say' && command !== 'note' && command !== 'leave') {
+      if (input) print(`不认识的命令：${command}（say / note / leave）`);
       return;
     }
-    if (command === 'say' && !text) {
-      print('用法：say <话>');
+    if (command !== 'leave' && !text) {
+      print(`用法：${command} <话>`);
+      return;
+    }
+    if (command === 'note') {
+      void sendNote(host, { token, text })
+        .then((result) => print(result.ok ? '捎到啦' : `没捎成：${NOTE_FAIL_REASONS[result.reason] ?? result.reason}`))
+        .catch((error) => print(`没送到：${errorText(error)}`));
       return;
     }
     void tripRequest(host, command === 'say' ? '/v1/chat' : '/v1/leave', { token, text })

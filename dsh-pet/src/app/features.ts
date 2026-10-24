@@ -11,6 +11,7 @@
  *     出门时自家宠物变半透明、把别人家的聊天转播回来，客人来了在自家宠物旁边开个小窗（能摸、能一起玩）；
  *     两边接着前文聊、主人家也会起话题；串门的台词只按人设生成，不带「主人此刻」；
  *     开着串门时，用餐时间宠物也分到一份零食（snacks.ts，晚上偶尔有宵夜），家里来客时请它吃；
+ *     熟人之间还能捎话（note-window.ts 的小输入窗）：主人的话经宠物带给对方主人，原文不进提示词与日记；
  *   - 右键菜单根上注册「看看我在干嘛 / 宠物日记」与串门的项（「串门」子菜单列附近的邻居，
  *     有人敲门时的应答项、送客 / 回家项），并长轮询点击。
  *
@@ -38,12 +39,34 @@ import { HealthReminders, OffWorkReminder } from './reminders';
 import { findSnack, SnackPouch } from './snacks';
 import type { Snack } from './snacks';
 import type { HealthEvent } from './reminders';
-import { NeighborBook, orderNeighbors, shouldAutoAdmit } from './neighbors';
+import { NeighborBook, notesAllowed, orderNeighbors, shouldAutoAdmit } from './neighbors';
 import type { LastGuest, NeighborRecord } from './neighbors';
+import { createNoteOpener } from './note-window';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
-import { cleanText, knockOn, LINE_MAX, NAME_MAX, Neighborhood, PING_MS, tripRequest, VisitHost } from './visit';
-import type { HostEvent, HostHandlers, KnockAnswer, KnockFailure, Neighbor, TripReply, Visitor } from './visit';
+import {
+  cleanText,
+  knockOn,
+  LINE_MAX,
+  NAME_MAX,
+  Neighborhood,
+  NOTE_GAP_MS,
+  NOTE_MAX,
+  PING_MS,
+  sendNote,
+  tripRequest,
+  VisitHost,
+} from './visit';
+import type {
+  HostEvent,
+  HostHandlers,
+  KnockAnswer,
+  KnockFailure,
+  Neighbor,
+  NoteReply,
+  TripReply,
+  Visitor,
+} from './visit';
 import { loadVisitIdentity, resetVisitIdentity } from './visit-identity';
 import {
   findPlayThing,
@@ -83,6 +106,10 @@ const MENU_NEIGHBORS_MAX = 15;
 const RELAY_MS = 8_000;
 /** 转播的气泡每条至少显示这么久才换下一条：对方回话快时，自己说的那句也看得清 */
 const RELAY_MIN_MS = 4_000;
+/** 捎到的话在客人窗口的气泡里显示多久（比聊天的话久：主人要读自己写的那句到了没） */
+const NOTE_BUBBLE_MS = 20_000;
+/** 捎到的话转播回自家显示多久 */
+const NOTE_RELAY_MS = 15_000;
 /** 自动看屏幕要求键鼠最近活动过（秒）：人在看视频 / 发呆时不打扰 */
 const SCREEN_ACTIVE_IDLE_SEC = 60;
 /** 应用刚说过话这么久内，自动碎碎念让一让（气泡默认显示 10 秒） */
@@ -115,6 +142,9 @@ interface Trip {
   answers: number;
   /** 在对方家吃到的零食（回家记日记） */
   treats: string[];
+  /** 这趟已经捎了几句话给对方主人、上一条是什么时候（NOTE_MAX / NOTE_GAP_MS 限额） */
+  notesSent: number;
+  lastNoteAt: number;
   /** 进门时记好的上次见面备忘（neighbors.meet；整趟用它，不每句现读记录）；没记录 null */
   memory: string | null;
   /** 说话按趟串行：上一句的回话到了再说下一句 */
@@ -142,6 +172,9 @@ interface Hosting {
   memory: string | null;
   /** 上次把摸一下 / 一起玩捎给客人的时间（NUDGE_GAP_MS） */
   lastNudgeAt: number;
+  /** 这趟已经托客人捎了几句话给它主人、上一条是什么时候（NOTE_MAX / NOTE_GAP_MS 限额） */
+  notesSent: number;
+  lastNoteAt: number;
   openerTimer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -275,6 +308,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let relayFreeAt = 0;
   /** 自家宠物在哪（客人站它旁边） */
   const homePet = watchHomePet(electron);
+  /** 捎话的小输入窗（同一时间只开一个） */
+  const noteOpener = createNoteOpener(electron, `${new URL(deps.petBase).origin}/app/note`, () => homePet.box());
 
   // ---------- 桌宠路由 ----------
 
@@ -891,6 +926,15 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       await say(reply);
       return reply;
     },
+    note(visitor, text) {
+      // 只收熟人的捎话：验过身份（有 id 才算验上）、是熟人、开着捎话，缺一样都不收
+      if (!notesAllowed(neighbors, visitor.id, visitor.id !== undefined, deps.appConfig().visit.notes)) return false;
+      log(`串门：${visitor.owner} 托 ${visitor.pet} 捎来一句话`);
+      // 客人窗口的气泡里念出来，自家宠物不复述；原文不进提示词
+      if (hosting?.visitor === visitor) hosting.window.say(`${visitor.owner} 托我带话：${text}`, NOTE_BUBBLE_MS);
+      diary.note(Date.now(), 'visit', `${visitor.owner} 托 ${visitor.pet} 带来一句话`);
+      return true;
+    },
     left(visitor, reason, text) {
       seeGuestOff(
         visitor,
@@ -929,6 +973,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       openers: 0,
       memory,
       lastNudgeAt: 0,
+      notesSent: 0,
+      lastNoteAt: 0,
       openerTimer: null,
     };
     hosting = current;
@@ -1047,12 +1093,17 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       // 只对验证过身份的客人提供熟人开关：陌生人没身份可标，冒名的也不能被拉成熟人
       const guestId = guest.id;
       if (guestId) actions.set(friendLabel(neighbors, guestId, guest.owner), () => toggleFriend(neighbors, guestId));
+      // 捎话也只对熟客开（托它带回去给它的主人）；客人带 id 就是敲门签名验上了
+      if (notesAllowed(neighbors, guestId, guestId !== undefined, notesOn()))
+        actions.set(`捎话给 ${guest.owner}`, () => void fireNote(noteViaGuest()));
     } else if (trip) {
       actions.set(`从 ${trip.host.owner} 家回来`, () => comeHome('called'));
       const hostId = trip.host.id;
-      // 只对验证过身份的主人家提供熟人开关（trip.verified：见 startTrip）
+      // 只对验证过身份的主人家提供熟人开关（trip.verified：见 startTrip）；捎话也只对熟人家开
       if (trip.verified)
         actions.set(friendLabel(neighbors, hostId, trip.host.owner), () => toggleFriend(neighbors, hostId));
+      if (trip.verified && notesAllowed(neighbors, hostId, true, notesOn()))
+        actions.set(`捎话给 ${trip.host.owner}`, () => void fireNote(noteToHost()));
     } else if (enabled && visiting && knockingOn === null) {
       const ordered = orderNeighbors(neighborhood?.list() ?? [], neighbors, lastGuest, Date.now());
       // 回访项也算在 MENU_NEIGHBORS_MAX 里：放了回访，列表就少列一位
@@ -1077,6 +1128,69 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       }
     }
     return actions;
+  }
+
+  /** 捎话开关现在的值（「捎话给 X」菜单项和收捎话都用） */
+  function notesOn(): boolean {
+    return deps.appConfig().visit.notes;
+  }
+
+  /**
+   * 捎话不等小窗：菜单长轮询是逐个 await 点击的（pollMenu → onMenuClick → 动作），
+   * 小窗最长开 2 分钟，等它的话期间所有菜单点击都会卡住。失败路径都在动作里处理过，这里只兜底记日志，
+   * 不许出现未处理的 Promise 拒绝。
+   */
+  function fireNote(sending: Promise<void>): Promise<void> {
+    return sending.catch((error: unknown) => log(`串门：捎话出错：${errorText(error)}`));
+  }
+
+  /** 出门在熟人家：主人写一句话，捎给对方主人；结果转播回自家（不说 say：那会先把宠物叫回家） */
+  async function noteToHost(): Promise<void> {
+    const current = trip;
+    if (!current) return;
+    const owner = current.host.owner;
+    const text = await noteOpener.ask(owner);
+    if (text === null || trip !== current) return;
+    const now = Date.now();
+    if (current.notesSent >= NOTE_MAX || (current.notesSent > 0 && now - current.lastNoteAt < NOTE_GAP_MS)) {
+      relay('（捎话：发太多了，等一会儿再捎）');
+      return;
+    }
+    let result: NoteReply | null = null;
+    try {
+      result = await sendNote(current.host, { token: current.token, text });
+    } catch (error) {
+      log(`串门：捎话没送到：${errorText(error)}`);
+    }
+    if (trip !== current) return;
+    if (result?.ok) {
+      current.notesSent += 1;
+      current.lastNoteAt = Date.now();
+      diary.note(Date.now(), 'visit', `帮主人给 ${owner} 捎了句话`);
+      relay('（捎话：捎到啦～）');
+      return;
+    }
+    relay(`（捎话：${noteFailText(owner, result)}）`);
+  }
+
+  /** 家里来了熟客：主人写一句话，托客人带回去给它的主人 */
+  async function noteViaGuest(): Promise<void> {
+    const current = hosting;
+    if (!current) return;
+    const { owner, pet } = current.visitor;
+    const text = await noteOpener.ask(owner);
+    if (text === null) return;
+    const now = Date.now();
+    if (current.notesSent >= NOTE_MAX || (current.notesSent > 0 && now - current.lastNoteAt < NOTE_GAP_MS)) {
+      void say('捎话发太多了，等一会儿再捎～');
+      return;
+    }
+    // 攒着等客人下次报平安时捎过去（旧客人会丢掉不认识的 note 事件）；日记只记捎过，不记内容
+    if (!visitHost?.tell({ type: 'note', text })) return;
+    current.notesSent += 1;
+    current.lastNoteAt = Date.now();
+    diary.note(Date.now(), 'visit', `帮主人给 ${owner} 捎了句话`);
+    void say(`好啦，这句话我让 ${pet} 带给 ${owner}～`);
   }
 
   /** 出门：先敲门，对方主人点头了才进门 */
@@ -1133,6 +1247,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       rounds: 0,
       answers: 0,
       treats: [],
+      notesSent: 0,
+      lastNoteAt: 0,
       queue: Promise.resolve(),
       failures: 0,
       pinging: false,
@@ -1213,6 +1329,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       current.lastLineAt = Date.now();
       relay(`${pet}：${event.text}`);
       ask = GUEST_ASK.answer;
+    } else if (event.type === 'note') {
+      // 主人家托自家宠物带回给它主人的话：只转播给主人看，不回话、不进提示词。
+      // 收的条件和发的一样（notesAllowed）：没验上主人家的身份、不是熟人、关了捎话，都直接丢
+      if (!notesAllowed(neighbors, current.host.id, current.verified, notesOn())) {
+        log(`串门：${owner} 家捎来的话没认上，丢了`);
+        return;
+      }
+      relay(`（${owner} 托我带回来的话）${event.text}`, NOTE_RELAY_MS, NOTE_RELAY_MS);
+      diary.note(Date.now(), 'visit', `${owner} 托我带回一句话`);
+      return;
     } else if (event.type === 'play') {
       // 只认自己也有的项目：对方捎来的名字不进提示词
       const thing = findPlayThing(event.what);
@@ -1237,25 +1363,27 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /**
    * 做客时把聊天转播回自家：自家宠物冒气泡（不走 say：say 会先叫它回家），这几秒窗口调亮看得清。
-   * 一条接一条排着放，每条至少 RELAY_MIN_MS；排到时已经回家了就不放。
+   * 一条接一条排着放，每条至少显示 holdMs 才许被下一条顶掉（聊天是 RELAY_MIN_MS；
+   * 捎到的话要显示满自己的时长）；排到时已经回家了就不放。
+   * @param durationMs 气泡显示多久（捎到的话比聊天久，默认 RELAY_MS）
    */
-  function relay(text: string): void {
+  function relay(text: string, durationMs = RELAY_MS, holdMs = RELAY_MIN_MS): void {
     const now = Date.now();
     const wait = Math.max(0, relayFreeAt - now);
-    relayFreeAt = now + wait + RELAY_MIN_MS;
+    relayFreeAt = now + wait + holdMs;
     setTimeout(() => {
-      if (trip) showRelay(text);
+      if (trip) showRelay(text, durationMs);
     }, wait);
   }
 
-  function showRelay(text: string): void {
+  function showRelay(text: string, durationMs: number): void {
     fadeHome(electron, RELAY_OPACITY);
     if (relayTimer !== null) clearTimeout(relayTimer);
     relayTimer = setTimeout(() => {
       relayTimer = null;
       if (trip) fadeHome(electron, AWAY_OPACITY);
-    }, RELAY_MS);
-    void petRequest('POST', '/broadcast', { text, anim: false, duration: RELAY_MS })
+    }, durationMs);
+    void petRequest('POST', '/broadcast', { text, anim: false, duration: durationMs })
       .then((result) => {
         if (result.ok !== true) log(`串门：转播没显示出来：${JSON.stringify(result)}`);
       })
@@ -1451,6 +1579,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     dispose() {
       disposed = true;
       if (tickTimer !== null) clearTimeout(tickTimer);
+      noteOpener.dispose();
       // 在别人家做客：告个辞（不等）；家里的客人窗口关掉
       void comeHome('called');
       if (hosting && hosting.openerTimer !== null) clearTimeout(hosting.openerTimer);
@@ -1476,6 +1605,23 @@ function friendLabel(book: NeighborBook, id: string, owner: string): string {
 /** 点一下菜单项：是熟人的取消，不是的设为 */
 function toggleFriend(book: NeighborBook, id: string): void {
   book.setFriend(id, book.get(id)?.friend !== true);
+}
+
+/** 捎话没捎成的经过（noteToHost 转播给主人用） */
+function noteFailText(owner: string, result: NoteReply | null): string {
+  switch (result && !result.ok ? result.reason : 'unreachable') {
+    case 'not-friend':
+      return `${owner} 那边没把我们当熟人`;
+    case 'too-many':
+      return '发太多了，等一会儿再捎';
+    case 'old-host':
+      return '对方的版本太旧，捎不了话';
+    case 'sent-home':
+    case 'not-visiting':
+      return '已经回家了';
+    default:
+      return '没送到，再试一次';
+  }
 }
 
 function knockFailText(owner: string, reason: KnockFailure | 'unreachable'): string {

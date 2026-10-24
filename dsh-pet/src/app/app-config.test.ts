@@ -97,6 +97,7 @@ test('an older file without offWork / visit still loads, keeping its own values 
       nickname: '',
       stayMin: 10,
       autoAdmitFriends: false,
+      notes: true,
     });
     assert.deepEqual(warnings, []);
     const visit = { ...DEFAULT_APP_CONFIG.visit, enabled: true };
@@ -133,11 +134,40 @@ test('an older visit section without autoAdmitFriends still loads, filling the d
     writeFileSync(path, JSON.stringify(older));
     const config = createAppConfig(path, (m) => warnings.push(m));
     // 只补 autoAdmitFriends，其余自己设的值不动；补的是 false，升级后不会自动给熟人开门
-    assert.deepEqual(config().visit, { ...older.visit, autoAdmitFriends: false });
+    assert.deepEqual(config().visit, { ...older.visit, autoAdmitFriends: false, notes: true });
     assert.deepEqual(warnings, []);
     assert.throws(() =>
       saveAppConfig(path, { ...DEFAULT_APP_CONFIG, visit: { ...older.visit, autoAdmitFriends: 'yes' } }),
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an older visit section without notes still loads, filling the default (on)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pet-app-config-'));
+  const path = join(dir, 'app-config.json');
+  const warnings: string[] = [];
+  try {
+    const older = {
+      ...DEFAULT_APP_CONFIG,
+      visit: {
+        enabled: true,
+        hosting: true,
+        visiting: true,
+        chat: true,
+        nickname: '小李',
+        stayMin: 10,
+        autoAdmitFriends: false,
+      },
+    };
+    delete (older.visit as Record<string, unknown>).notes;
+    writeFileSync(path, JSON.stringify(older));
+    const config = createAppConfig(path, (m) => warnings.push(m));
+    // 只补 notes，其余自己设的值不动；补的是 true，升级后熟人间捎话默认开着
+    assert.deepEqual(config().visit, { ...older.visit, notes: true });
+    assert.deepEqual(warnings, []);
+    assert.throws(() => saveAppConfig(path, { ...DEFAULT_APP_CONFIG, visit: { ...older.visit, notes: 'yes' } }));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
