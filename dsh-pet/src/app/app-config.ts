@@ -20,7 +20,6 @@ const schema = z
       enabled: z.boolean(),
       intervalMin: z.number().min(3).max(1440),
     }),
-    pomodoro: z.object({ focusMin: z.number().min(1).max(180), breakMin: z.number().min(1).max(60) }),
     sitting: z.object({
       enabled: z.boolean(),
       afterMin: z.number().min(5).max(600),
@@ -61,12 +60,22 @@ const schema = z
 
 export type AppConfig = z.infer<typeof schema>;
 
+/** 去掉的功能留在旧文件里的字段（番茄钟）：读和存时都先丢掉，不让整份配置因多一个字段作废 */
+const RETIRED_KEYS = ['pomodoro'];
+
+function withoutRetired(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const rest: Record<string, unknown> = { ...value };
+  for (const key of RETIRED_KEYS) delete rest[key];
+  return rest;
+}
+
 /**
  * 设置页保存（整份配置）：校验后写回文件，返回新配置；输入非法时抛错（调用方回 400）。
  * 先写临时文件再改名：读的一侧按 mtime 重读，不会读到写了一半的文件。
  */
 export function saveAppConfig(path: string, input: unknown): AppConfig {
-  const next = schema.parse(input);
+  const next = schema.parse(withoutRetired(input));
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
   renameSync(tmp, path);
@@ -76,7 +85,6 @@ export function saveAppConfig(path: string, input: unknown): AppConfig {
 export const DEFAULT_APP_CONFIG: AppConfig = {
   greetAfterAwayMin: 10,
   screen: { enabled: true, intervalMin: 15 },
-  pomodoro: { focusMin: 25, breakMin: 5 },
   sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
   water: { enabled: true, everyMin: 60 },
   offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
@@ -106,7 +114,7 @@ export function createAppConfig(path: string, warn: (message: string) => void): 
     if (mtime === loadedMtime) return current;
     loadedMtime = mtime;
     try {
-      current = schema.parse(JSON.parse(readFileSync(path, 'utf8')));
+      current = schema.parse(withoutRetired(JSON.parse(readFileSync(path, 'utf8'))));
     } catch (error) {
       warn(`应用配置无效，继续使用上一份：${path}（${error instanceof Error ? error.message : String(error)}）`);
     }

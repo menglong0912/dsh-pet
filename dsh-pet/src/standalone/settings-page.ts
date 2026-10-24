@@ -28,15 +28,12 @@ export const settingsPage = `<!doctype html>
 </fieldset>
 <fieldset id="app-settings" hidden><legend>陪伴与提醒</legend>
 <label class="check"><input id="screenEnabled" type="checkbox" aria-describedby="screen-note">定时看屏幕吐槽</label>
-<p id="screen-note" class="hint">只在上面的接口是本机地址（127.0.0.1 / localhost）时生效，截图只发给本机模型；专注番茄钟期间、离开电脑或一分钟没碰键鼠时不看。开着自动碎碎念时，到点的那一句碎碎念换成看屏幕，两者不会互相顶掉。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
+<p id="screen-note" class="hint">只在上面的接口是本机地址（127.0.0.1 / localhost）时生效，截图只发给本机模型；离开电脑或一分钟没碰键鼠时不看。开着自动碎碎念时，到点的那一句碎碎念换成看屏幕，两者不会互相顶掉。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
 <label for="screenIntervalMin">看屏幕间隔（分钟）</label><input id="screenIntervalMin" type="number" min="3" max="1440" step="1" value="15">
-<div class="pair"><div><label for="focusMin">番茄钟专注（分钟）</label><input id="focusMin" type="number" min="1" max="180" step="1" value="25"></div>
-<div><label for="breakMin">番茄钟休息（分钟）</label><input id="breakMin" type="number" min="1" max="60" step="1" value="5"></div></div>
-<p class="hint">番茄钟从右键「开始番茄钟」开始；改时长从下一段专注或休息起生效。</p>
 <label class="check"><input id="sittingEnabled" type="checkbox" aria-describedby="sitting-note">久坐提醒</label>
 <div class="pair"><div><label for="sittingAfterMin">连续坐多久提醒（分钟）</label><input id="sittingAfterMin" type="number" min="5" max="600" step="1" value="50"></div>
 <div><label for="sittingRepeatMin">还没起身，每隔（分钟）</label><input id="sittingRepeatMin" type="number" min="5" max="600" step="1" value="20"></div></div>
-<p id="sitting-note" class="hint">离开电脑 5 分钟以上算起身，重新计时；专注番茄钟期间不打扰。</p>
+<p id="sitting-note" class="hint">离开电脑 5 分钟以上算起身，重新计时。</p>
 <label class="check"><input id="waterEnabled" type="checkbox" aria-describedby="water-note">喝水提醒</label>
 <label for="waterEveryMin">喝水间隔（分钟）</label><input id="waterEveryMin" type="number" min="10" max="600" step="1" value="60">
 <p id="water-note" class="hint">只累计在电脑前的时间，提醒一次后重新计时。</p>
@@ -44,7 +41,7 @@ export const settingsPage = `<!doctype html>
 <div class="pair"><div><label for="offWorkTime">下班时间</label><input id="offWorkTime" type="time" value="18:00" required></div>
 <div><label for="offWorkLeadMin">提前多久提醒（分钟）</label><input id="offWorkLeadMin" type="number" min="0" max="120" step="1" value="10"></div></div>
 <label class="check"><input id="offWorkWeekdaysOnly" type="checkbox">只在工作日（周一到周五）提醒</label>
-<p id="offwork-note" class="hint">每天在下班前这么多分钟提醒一次，填 0 就是到点提醒；那会儿不在电脑前就等回来再说，专注番茄钟期间等专注结束。</p>
+<p id="offwork-note" class="hint">每天在下班前这么多分钟提醒一次，填 0 就是到点提醒；那会儿不在电脑前就等回来再说。</p>
 <label for="greetAfterAwayMin">离开多久、回来时打招呼（分钟）</label><input id="greetAfterAwayMin" type="number" min="1" max="1440" step="1" value="10">
 </fieldset>
 <fieldset id="visit-settings" hidden><legend>局域网串门</legend>
@@ -119,8 +116,6 @@ export const settingsScript = `
   function populateApp(data) {
     get('screenEnabled').checked = data.screen.enabled === true;
     get('screenIntervalMin').value = String(data.screen.intervalMin);
-    get('focusMin').value = String(data.pomodoro.focusMin);
-    get('breakMin').value = String(data.pomodoro.breakMin);
     get('sittingEnabled').checked = data.sitting.enabled === true;
     get('sittingAfterMin').value = String(data.sitting.afterMin);
     get('sittingRepeatMin').value = String(data.sitting.repeatMin);
@@ -222,7 +217,6 @@ export const settingsScript = `
         populateApp(await appRequest('POST', {
           greetAfterAwayMin: num('greetAfterAwayMin'),
           screen: { enabled: get('screenEnabled').checked, intervalMin: num('screenIntervalMin') },
-          pomodoro: { focusMin: num('focusMin'), breakMin: num('breakMin') },
           sitting: { enabled: get('sittingEnabled').checked, afterMin: num('sittingAfterMin'), repeatMin: num('sittingRepeatMin') },
           water: { enabled: get('waterEnabled').checked, everyMin: num('waterEveryMin') },
           offWork: { enabled: get('offWorkEnabled').checked, time: get('offWorkTime').value, weekdaysOnly: get('offWorkWeekdaysOnly').checked, leadMin: num('offWorkLeadMin') },

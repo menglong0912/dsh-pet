@@ -38,7 +38,6 @@ test('settings page saves the whole config, validates ranges, and the getter pic
     const edited = {
       ...DEFAULT_APP_CONFIG,
       screen: { enabled: false, intervalMin: 30 },
-      pomodoro: { focusMin: 50, breakMin: 10 },
       water: { enabled: false, everyMin: 90 },
     };
     assert.deepEqual(saveAppConfig(path, edited), edited);
@@ -53,6 +52,25 @@ test('settings page saves the whole config, validates ranges, and the getter pic
     assert.throws(() => saveAppConfig(path, { screen: edited.screen }));
     assert.throws(() => saveAppConfig(path, undefined));
     assert.equal(readFileSync(path, 'utf8'), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a file from before the pomodoro was removed still loads with all its settings, and saving drops the old field', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pet-app-config-'));
+  const path = join(dir, 'app-config.json');
+  const warnings: string[] = [];
+  try {
+    const visit = { ...DEFAULT_APP_CONFIG.visit, enabled: true, stayMin: 20 };
+    const older = { ...DEFAULT_APP_CONFIG, visit, pomodoro: { focusMin: 50, breakMin: 10 } };
+    writeFileSync(path, JSON.stringify(older));
+    const config = createAppConfig(path, (m) => warnings.push(m));
+    assert.deepEqual(config(), { ...DEFAULT_APP_CONFIG, visit });
+    assert.deepEqual(warnings, []);
+    // 还开着旧设置页的标签页保存时会带上它：照样能存，存下来的文件里没有它
+    assert.deepEqual(saveAppConfig(path, older), { ...DEFAULT_APP_CONFIG, visit });
+    assert.equal('pomodoro' in JSON.parse(readFileSync(path, 'utf8')), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -40,6 +40,7 @@ const daySchema = z.object({
   events: z.array(
     z.object({
       at: z.number(),
+      // pomodoro：番茄钟已去掉、不再记，留着是为了旧日子的记录照样读得出来
       kind: z.enum(['return', 'pomodoro', 'sit', 'water', 'off-work', 'claude', 'screen', 'visit']),
       text: z.string(),
     }),
@@ -250,7 +251,7 @@ ${articles}
 `;
 }
 
-/** 日记下面那行小字：在电脑前多久、番茄钟几个、Claude 干完几次活 */
+/** 日记下面那行小字：在电脑前多久、番茄钟几个（只有去掉番茄钟之前的日子有）、Claude 干完几次活 */
 function facts(day: DiaryDay): string {
   const count = (kind: DiaryEventKind) => day.events.filter((event) => event.kind === kind).length;
   const parts = [`在电脑前 ${durationText(day.presentMs)}`];

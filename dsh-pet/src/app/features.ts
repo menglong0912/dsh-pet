@@ -3,14 +3,14 @@
  *
  * 纯逻辑都在旁边的模块里（activity / reminders / claude-hooks / status，各有单测）；这里只做接线：
  *   - 每 TICK_MS 采样一次：系统空闲秒数与锁屏（Electron powerMonitor）+ 前台应用（`lsappinfo`，无需授权）；
- *   - 根据采样推进番茄钟、久坐 / 喝水 / 下班提醒、回来打招呼、定时看屏幕；
+ *   - 根据采样推进久坐 / 喝水 / 下班提醒、回来打招呼、定时看屏幕；
  *   - 与插件的自动碎碎念共用一个节拍（takeWhisperTurn）：看屏幕占它的拍，应用说话时它让一让；
- *   - 把 Claude Code 与番茄钟合成为一个外部工作状态（桌宠只有一个外部槽）；
+ *   - 把 Claude Code 与串门合成为一个外部工作状态（桌宠只有一个外部槽）；
  *   - 把一天里的事记进宠物日记（diary.ts），第二天回到电脑前时补写前一天的日记；
  *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口、visit-talk.ts 管怎么聊）：设置里开了才发信标、开接待端口；
  *     出门时自家宠物变半透明、把别人家的聊天转播回来，客人来了在自家宠物旁边开个小窗（能摸、能一起玩）；
  *     两边接着前文聊、主人家也会起话题；串门的台词只按人设生成，不带「主人此刻」；
- *   - 右键菜单根上注册「看看我在干嘛 / 开始·停止番茄钟 / 宠物日记」与串门的项（「串门」子菜单列附近的邻居，
+ *   - 右键菜单根上注册「看看我在干嘛 / 宠物日记」与串门的项（「串门」子菜单列附近的邻居，
  *     有人敲门时的应答项、送客 / 回家项），并长轮询点击。
  *
  * 驱动桌宠一律走插件自己的 HTTP 路由（/broadcast、/work-status、/menu/*），与第三方调用者同一契约，
@@ -34,8 +34,8 @@ import type { AppConfig } from './app-config';
 import { ClaudeSessions } from './claude-hooks';
 import { dateLabel, Diary, diaryDate } from './diary';
 import type { ClaudeHookPayload } from './claude-hooks';
-import { HealthReminders, OffWorkReminder, Pomodoro } from './reminders';
-import type { HealthEvent, PomodoroEvent } from './reminders';
+import { HealthReminders, OffWorkReminder } from './reminders';
+import type { HealthEvent } from './reminders';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
 import { cleanText, knockOn, LINE_MAX, NAME_MAX, Neighborhood, PING_MS, tripRequest, VisitHost } from './visit';
@@ -67,11 +67,10 @@ const TICK_MS = 5_000;
 /** 右键菜单的 owner（插件按它归组、按它投递点击；helper 按它把这组项放根菜单，见 main.ts） */
 export const MENU_OWNER = 'dsh-pet-app';
 const MENU_LOOK = '看看我在干嘛';
-const MENU_POMODORO_START = '开始番茄钟';
 const MENU_DIARY = '宠物日记';
 /** 「串门」子菜单：label 带这个前缀加「/」的项，helper 收成根菜单上的一个子菜单（shared/menu 的 buildAppMenuNodes） */
 const MENU_VISIT_GROUP = '串门';
-/** 插件每个 owner 最多 20 项：根上固定 3 项 + 串门应答最多 2 项，邻居最多列这么多 */
+/** 插件每个 owner 最多 20 项：根上固定 2 项，邻居最多列这么多（家里有客时换成送客 + 一起玩的 9 项） */
 const MENU_NEIGHBORS_MAX = 15;
 /** 做客时转播回自家的气泡显示多久（窗口同时调亮这么久） */
 const RELAY_MS = 8_000;
@@ -198,7 +197,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   const { electron, ai, log } = deps;
   const tracker = new ActivityTracker();
   const claude = new ClaudeSessions();
-  const pomodoro = new Pomodoro(() => deps.appConfig().pomodoro);
   const health = new HealthReminders(() => deps.appConfig());
   const offWork = new OffWorkReminder(() => deps.appConfig().offWork);
   const diary = new Diary(deps.diaryDir, Date.now(), log);
@@ -531,22 +529,17 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         void speak(`主人离开电脑 ${durationText(event.awayMs)}，刚刚回来。欢迎主人回来。`, '欢迎回来～');
       }
     }
-    const pomodoroEvent = pomodoro.tick(now, snap?.present ?? false);
-    if (pomodoroEvent === 'break-start') {
-      diary.note(now, 'pomodoro', `主人专注完一个 ${config.pomodoro.focusMin} 分钟的番茄钟`);
-    }
-    if (pomodoroEvent) void announcePomodoro(pomodoroEvent);
-    for (const event of health.tick(now, snap, pomodoro.phase() === 'focus')) {
+    for (const event of health.tick(now, snap)) {
       diary.note(now, event, event === 'sit' ? '提醒主人起来活动一下' : '提醒主人喝水');
       void announceHealth(event);
     }
-    const offWorkLeft = offWork.tick(now, snap?.present ?? false, pomodoro.phase() === 'focus');
+    const offWorkLeft = offWork.tick(now, snap?.present ?? false);
     if (offWorkLeft !== null) {
       diary.note(now, 'off-work', offWorkLeft > 0 ? '提醒主人快下班了' : '过了下班时间主人还在电脑前，提醒主人下班');
       void announceOffWork(offWorkLeft);
     }
-    // 新的一天主人回到电脑前（专注时不打扰）：补写前一天的日记
-    if (snap?.present && pomodoro.phase() !== 'focus' && diaryCheckedFor !== diaryDate(now)) {
+    // 新的一天主人回到电脑前：补写前一天的日记
+    if (snap?.present && diaryCheckedFor !== diaryDate(now)) {
       diaryCheckedFor = diaryDate(now);
       const date = diary.pending(now);
       if (date) void catchUpDiary(date).catch((error: unknown) => log(`宠物日记：补写失败：${errorText(error)}`));
@@ -556,11 +549,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     if (!whisperRunning(now) && screenDue(now)) void lookAtScreen(false);
     await syncVisit();
     await refreshStatus(now);
-    await refreshMenu(now);
+    await refreshMenu();
   }
 
   /**
-   * 到点该自动看屏幕：开着、人在且 activeIdleSec 内碰过键鼠、不在专注、离上次够间隔、能看（本机模型 + 已授权）
+   * 到点该自动看屏幕：开着、没出门、人在且 activeIdleSec 内碰过键鼠、离上次够间隔、能看（本机模型 + 已授权）
    * @param activeIdleSec 「最近碰过键鼠」的窗口（秒）
    */
   function screenDue(now: number, activeIdleSec = SCREEN_ACTIVE_IDLE_SEC): boolean {
@@ -570,7 +563,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       trip === null &&
       tracker.snapshot()?.present === true &&
       electron.powerMonitor.getSystemIdleTime() < activeIdleSec &&
-      pomodoro.phase() !== 'focus' &&
       now - lastScreenAt >= config.screen.intervalMin * 60_000 &&
       !screenBusy &&
       ai.canSeeLocally() &&
@@ -610,21 +602,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         .catch((error: unknown) => log(`采样失败：${errorText(error)}`))
         .finally(schedule);
     }, TICK_MS);
-  }
-
-  function announcePomodoro(event: PomodoroEvent): Promise<void> {
-    const { focusMin, breakMin } = deps.appConfig().pomodoro;
-    switch (event) {
-      case 'focus-start':
-        return speak(`主人开始专注 ${focusMin} 分钟。给主人打打气。`, `专注 ${focusMin} 分钟，加油～`);
-      case 'break-start':
-        return speak(
-          `主人刚专注完一个番茄钟，接下来休息 ${breakMin} 分钟。提醒主人起来活动、喝口水。`,
-          `辛苦啦，休息 ${breakMin} 分钟吧～`,
-        );
-      case 'stopped-away':
-        return speak('番茄钟休息结束时主人不在电脑前，番茄钟先停下了。告诉主人一声。', '番茄钟先停下啦～');
-    }
   }
 
   function announceHealth(event: HealthEvent): Promise<void> {
@@ -699,11 +676,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   }
 
   async function refreshStatus(now: number): Promise<void> {
-    const phase = pomodoro.phase();
     const stayMs = deps.appConfig().visit.stayMin * 60_000;
     const next = composeWorkStatus(
       claude.view(now),
-      phase ? { phase, remainingMin: pomodoro.remainingMin(now) } : null,
       trip
         ? { owner: trip.host.owner, remainingMin: Math.max(1, Math.ceil((trip.since + stayMs - now) / 60_000)) }
         : null,
@@ -820,11 +795,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     knocked(visitor) {
       log(`串门：${visitor.owner}（${visitor.address}）家的 ${visitor.pet} 来敲门`);
       void say(`${visitor.owner} 家的 ${visitor.pet} 来敲门啦，右键点「让 ${visitor.pet} 进来」请它进门～`);
-      void refreshMenu(Date.now());
+      void refreshMenu();
     },
     knockEnded(visitor, reason) {
       log(`串门：${visitor.owner} 家的 ${visitor.pet} ${reason === 'gone' ? '不等了' : '敲门没等到答复'}`);
-      void refreshMenu(Date.now());
+      void refreshMenu();
     },
     async line(visitor, text) {
       const current = hosting?.visitor === visitor ? hosting : null;
@@ -952,7 +927,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       `${visitor.owner} 家的宠物 ${visitor.pet} 来串门，待了 ${durationText(Date.now() - (current?.since ?? Date.now()))}`,
     );
     void say(line);
-    void refreshMenu(Date.now());
+    void refreshMenu();
   }
 
   /**
@@ -999,7 +974,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
     if (trip || knockingOn || visitHost?.guest() || visitHost?.knocking() || !deps.appConfig().visit.visiting) return;
     knockingOn = neighbor;
-    void refreshMenu(Date.now());
+    void refreshMenu();
     void say(`我去 ${neighbor.owner} 家敲门啦～`);
     let answer: KnockAnswer | null;
     try {
@@ -1047,7 +1022,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     log(`串门：进了 ${host.owner} 家的门`);
     current.talkTimer = setTimeout(() => void talk(current), 3_000);
     void refreshStatus(Date.now());
-    void refreshMenu(Date.now());
+    void refreshMenu();
   }
 
   /** 做客时自己开口：头一句打招呼，之后隔 30–90 秒接着聊（刚有人说过话就再等等），说满 tripRounds 句就只回不说 */
@@ -1214,7 +1189,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const ending = reason === 'sent-home' ? '，被它家主人请回来了' : reason === 'lost' ? '，后来连不上就回来了' : '';
     diary.note(Date.now(), 'visit', `去 ${owner} 家串门，和它家的宠物 ${pet} 聊了 ${chats} 句${ending}`);
     void refreshStatus(Date.now());
-    void refreshMenu(Date.now());
+    void refreshMenu();
     const back = `我从 ${owner} 家回来啦～`;
     // 不用模型聊天：回家也只说固定的一句
     if (!deps.appConfig().visit.chat) {
@@ -1231,16 +1206,12 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   // ---------- 右键菜单 ----------
 
-  function wantedLabels(now: number): string[] {
-    const phase = pomodoro.phase();
-    const pomodoroLabel = phase
-      ? `停止番茄钟 · ${phase === 'focus' ? '专注' : '休息'}剩 ${pomodoro.remainingMin(now)} 分`
-      : MENU_POMODORO_START;
-    return [MENU_LOOK, pomodoroLabel, MENU_DIARY, ...visitActions().keys()];
+  function wantedLabels(): string[] {
+    return [MENU_LOOK, MENU_DIARY, ...visitActions().keys()];
   }
 
-  async function refreshMenu(now: number, force = false): Promise<void> {
-    const labels = wantedLabels(now);
+  async function refreshMenu(force = false): Promise<void> {
+    const labels = wantedLabels();
     if (!force && labels.join('\n') === menuLabels.join('\n')) return;
     try {
       const result = await petRequest('POST', '/menu/item', { owner: MENU_OWNER, labels });
@@ -1255,11 +1226,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const now = Date.now();
     if (label === MENU_LOOK) {
       await lookAtScreen(true);
-    } else if (label === MENU_POMODORO_START) {
-      void announcePomodoro(pomodoro.start(now));
-    } else if (label.startsWith('停止番茄钟')) {
-      pomodoro.stop();
-      void say('番茄钟停下啦～');
     } else if (label === MENU_DIARY) {
       await openDiary(now);
     } else {
@@ -1269,7 +1235,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       else if (label.startsWith(`${MENU_VISIT_GROUP}/去 `)) await say('它好像已经不在附近了～');
     }
     await refreshStatus(now);
-    await refreshMenu(now);
+    await refreshMenu();
   }
 
   /** 长轮询菜单点击（插件单次最多挂 10 秒） */
@@ -1286,7 +1252,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         };
         if (result.ok !== true) {
           // 宿主重启过 / 被清掉：重新注册
-          if (result.reason === 'unknown-owner') await refreshMenu(Date.now(), true);
+          if (result.reason === 'unknown-owner') await refreshMenu(true);
           else await delay(5_000);
           continue;
         }
@@ -1300,7 +1266,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
   }
 
-  void refreshMenu(Date.now(), true).then(() => pollMenu());
+  void refreshMenu(true).then(() => pollMenu());
   void tick()
     .catch((error: unknown) => log(`采样失败：${errorText(error)}`))
     .finally(schedule);

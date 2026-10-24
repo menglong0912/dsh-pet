@@ -133,7 +133,7 @@ async function boot(): Promise<void> {
   process.env.DSH_PET_IN_PROCESS = '1';
   process.env.DSH_PET_APP_MODE = '1';
   process.env.DSH_PET_OPEN_TARGET = 'site';
-  // 应用自己的菜单项（看屏幕 / 番茄钟）放根菜单，不按第三方收进「更多」
+  // 应用自己的菜单项（看屏幕 / 日记 / 串门）放根菜单，不按第三方收进「更多」
   process.env.DSH_PET_APP_MENU_OWNER = MENU_OWNER;
   // 不注入宿主 PID：helper 的「宿主没了就退出」只对双进程有意义，同进程里设了会自己杀自己
   delete process.env.DSH_PET_HOST_PID;

@@ -102,7 +102,7 @@ test('settings browser script strips fragment, keeps key write-only and explicit
     document: { getElementById: element },
     fetch: async (url: string, options: { method: string; body?: string; headers: Record<string, string> }) => {
       requests.push({ url, options });
-      // CLI 没有「看屏幕与番茄钟」一节：app-settings 是 404，页面既不显示也不保存它
+      // CLI 没有「陪伴与提醒」一节：app-settings 是 404，页面既不显示也不保存它
       if (url === '/standalone-ai/app-settings') return { ok: false, status: 404, json: async () => ({}) };
       return {
         ok: true,
@@ -185,7 +185,6 @@ test('settings browser script shows and saves the app section when the app serve
   const app = {
     greetAfterAwayMin: 10,
     screen: { enabled: true, intervalMin: 15 },
-    pomodoro: { focusMin: 25, breakMin: 5 },
     sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
     water: { enabled: true, everyMin: 60 },
     offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
@@ -205,7 +204,6 @@ test('settings browser script shows and saves the app section when the app serve
   assert.equal(element('app-settings').hidden, false);
   assert.equal(element('screenEnabled').checked, true);
   assert.equal(element('screenIntervalMin').value, '15');
-  assert.equal(element('focusMin').value, '25');
   assert.equal(element('sittingAfterMin').value, '50');
   assert.equal(element('greetAfterAwayMin').value, '10');
   assert.equal(element('offWorkTime').value, '18:00');
@@ -219,7 +217,6 @@ test('settings browser script shows and saves the app section when the app serve
   assert.equal(element('visitHosting').disabled, true);
   assert.equal(element('visitStayMin').disabled, true);
   element('screenIntervalMin').value = '30';
-  element('focusMin').value = '50';
   element('waterEnabled').checked = false;
   element('offWorkTime').value = '17:30';
   element('offWorkLeadMin').value = '15';
@@ -236,7 +233,6 @@ test('settings browser script shows and saves the app section when the app serve
   assert.deepEqual(JSON.parse(post?.options.body ?? '{}'), {
     ...app,
     screen: { enabled: true, intervalMin: 30 },
-    pomodoro: { focusMin: 50, breakMin: 5 },
     water: { enabled: false, everyMin: 60 },
     offWork: { enabled: true, time: '17:30', weekdaysOnly: true, leadMin: 15 },
     visit: { enabled: true, hosting: false, visiting: true, chat: false, nickname: '小王', stayMin: 20 },

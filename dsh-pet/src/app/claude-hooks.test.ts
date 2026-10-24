@@ -40,14 +40,11 @@ test('session lifecycle drives speech and the composed view', () => {
   assert.equal(c.handle({ hook_event_name: 'PreToolUse' }, 0), null);
 });
 
-test('working is tracked but never shown, so it never hides the pomodoro', () => {
+test('working is tracked but never shown', () => {
   const c = new ClaudeSessions();
   c.handle(ev('UserPromptSubmit'), 0);
   assert.equal(c.view(0), null);
-  assert.deepEqual(composeWorkStatus(c.view(0), { phase: 'focus', remainingMin: 20 }), {
-    state: 'working',
-    task: '番茄钟 · 剩 20 分',
-  });
+  assert.equal(composeWorkStatus(c.view(0)), null);
 });
 
 test('multiple sessions: waiting is counted, working stays hidden, stale sessions drop', () => {
@@ -62,33 +59,24 @@ test('multiple sessions: waiting is counted, working stays hidden, stale session
   assert.equal(c.view(50 + WORKING_STALE_MS + 1), null);
 });
 
-test('composeWorkStatus priority: claude waiting > away visiting > pomodoro > claude done', () => {
-  const pomodoro = { phase: 'focus' as const, remainingMin: 12 };
-  assert.deepEqual(composeWorkStatus({ state: 'waiting', count: 1, project: 'p' }, pomodoro), {
+test('composeWorkStatus priority: claude waiting > away visiting > claude done', () => {
+  assert.deepEqual(composeWorkStatus({ state: 'waiting', count: 1, project: 'p' }), {
     state: 'waiting',
     task: 'Claude · p 等你确认',
   });
-  assert.deepEqual(composeWorkStatus({ state: 'waiting', count: 2, project: 'p' }, null), {
+  assert.deepEqual(composeWorkStatus({ state: 'waiting', count: 2, project: 'p' }), {
     state: 'waiting',
     task: 'Claude ×2 · p 等你确认',
   });
-  assert.deepEqual(composeWorkStatus({ state: 'success', count: 1, project: 'p' }, pomodoro), {
-    state: 'working',
-    task: '番茄钟 · 剩 12 分',
-  });
-  assert.deepEqual(composeWorkStatus(null, { phase: 'break', remainingMin: 3 }), {
-    state: 'result',
-    task: '休息中 · 剩 3 分',
-  });
-  assert.deepEqual(composeWorkStatus({ state: 'success', count: 1, project: 'p' }, null), {
+  assert.deepEqual(composeWorkStatus({ state: 'success', count: 1, project: 'p' }), {
     state: 'success',
     task: 'Claude · p 完成啦',
   });
-  assert.equal(composeWorkStatus(null, null), null);
-  // 出门做客：排在 Claude 等确认之后、番茄钟之前
+  assert.equal(composeWorkStatus(null), null);
+  // 出门做客：排在 Claude 等确认之后、Claude 刚完成之前
   const away = { owner: '小王', remainingMin: 8 };
-  assert.deepEqual(composeWorkStatus({ state: 'waiting', count: 1, project: 'p' }, pomodoro, away)?.state, 'waiting');
-  assert.deepEqual(composeWorkStatus({ state: 'success', count: 1, project: 'p' }, pomodoro, away), {
+  assert.deepEqual(composeWorkStatus({ state: 'waiting', count: 1, project: 'p' }, away)?.state, 'waiting');
+  assert.deepEqual(composeWorkStatus({ state: 'success', count: 1, project: 'p' }, away), {
     state: 'working',
     task: '在 小王 家做客 · 剩 8 分',
   });
