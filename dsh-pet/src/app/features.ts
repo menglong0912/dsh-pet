@@ -1136,9 +1136,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   }
 
   /**
-   * 捎话不等小窗：菜单长轮询是逐个 await 点击的（pollMenu → onMenuClick → 动作），
-   * 小窗最长开 2 分钟，等它的话期间所有菜单点击都会卡住。失败路径都在动作里处理过，这里只兜底记日志，
-   * 不许出现未处理的 Promise 拒绝。
+   * 捎话不等小窗：小窗最长开 2 分钟，等它的话调用方（菜单点击的处理）会被拖住很久。
+   * 失败路径都在动作里处理过，这里只兜底记日志，不许出现未处理的 Promise 拒绝。
    */
   function fireNote(sending: Promise<void>): Promise<void> {
     return sending.catch((error: unknown) => log(`串门：捎话出错：${errorText(error)}`));
@@ -1521,7 +1520,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
           continue;
         }
         for (const [label, pet] of Object.entries(result.events ?? {})) {
-          if (pet !== null) await onMenuClick(label);
+          // 不等动作做完就接着轮询：动作可能很慢（敲门要等对方主人点头、看屏幕 / 写日记要等模型生成），
+          // 等的话这段时间里后面的点击全被堵住，得等它结束才一起处理。各动作有自己的防重入保护
+          // （screenBusy、knockingOn、trip……），并发点进来也乱不了；失败在这里兜底记日志，不能有未处理的拒绝
+          if (pet !== null)
+            void onMenuClick(label).catch((error: unknown) => log(`菜单项「${label}」没处理成：${errorText(error)}`));
         }
       } catch (error) {
         log(`菜单轮询失败：${errorText(error)}`);

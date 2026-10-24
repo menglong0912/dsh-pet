@@ -17,8 +17,8 @@ import type { AppFeatures, FeatureElectron } from './features.ts';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-/** 假环境里可调的：键鼠空闲秒数、插件碎碎念间隔、挑表情包时模型的回答（测试改完要还原） */
-const env = { idleSec: 0, whisperSec: 60, memeAnswer: '无' };
+/** 假环境里可调的：键鼠空闲秒数、插件碎碎念间隔、挑表情包时模型的回答、看屏幕时模型磨蹭多久（测试改完要还原） */
+const env = { idleSec: 0, whisperSec: 60, memeAnswer: '无', visionDelayMs: 0, visionDone: 0 };
 
 const electron: FeatureElectron = {
   powerMonitor: { getSystemIdleTime: () => env.idleSec, getSystemIdleState: () => 'active' },
@@ -57,7 +57,9 @@ const ai = {
   getSettings: () => ({ whisperIntervalSec: env.whisperSec }),
   streamVision: async function* (input: { prompt: string }) {
     visionPrompts.push(input.prompt);
+    if (env.visionDelayMs > 0) await new Promise((done) => setTimeout(done, env.visionDelayMs));
     yield { type: 'text', text: '主人在写代码呀' };
+    env.visionDone += 1;
   },
 } as unknown as StandaloneAiService;
 
@@ -67,7 +69,13 @@ const ai = {
  * fn 的 home 是这套编排的临时数据目录（宠物日记在 home/diary）。
  */
 async function withFeatures(
-  options: { broadcast?: Record<string, unknown>; config?: AppConfig; memes?: Array<{ name: string; desc: string }> },
+  options: {
+    broadcast?: Record<string, unknown>;
+    config?: AppConfig;
+    memes?: Array<{ name: string; desc: string }>;
+    /** 依次吐给 /menu/events 的菜单点击（label 一项；用完照旧回空） */
+    clicks?: string[];
+  },
   fn: (features: AppFeatures, said: string[], bodies: Array<Record<string, unknown>>, home: string) => Promise<void>,
 ): Promise<void> {
   const said: string[] = [];
@@ -87,8 +95,11 @@ async function withFeatures(
         said.push(String(body.text));
         reply(options.broadcast ?? { ok: true });
       } else if (path.endsWith('/memes')) reply({ ok: true, memes: options.memes ?? [] });
-      else if (path.endsWith('/menu/events')) setTimeout(() => reply({ ok: true, events: {} }), 50);
-      else reply({ ok: true });
+      else if (path.endsWith('/menu/events')) {
+        const click = options.clicks?.shift();
+        if (click) reply({ ok: true, events: { [click]: 'main' } });
+        else setTimeout(() => reply({ ok: true, events: {} }), 50);
+      } else reply({ ok: true });
     });
   });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
@@ -200,6 +211,26 @@ test('看屏幕：表情包池为空就不配图', async () => {
     assert.equal('image' in (last(bodies) ?? {}), false);
     assert.doesNotMatch(last(visionPrompts) ?? '', /表情包/);
   });
+});
+
+test('右键菜单：耗时的动作不堵后面的点击（看屏幕还没看完，日记那项就先处理了）', async () => {
+  // 让看屏幕的模型磨蹭 3 秒：比 until 的等待上限（2 秒）长，旧代码上第二项等不到
+  Object.assign(env, { visionDelayMs: 3_000, visionDone: 0 });
+  const clicks: string[] = [];
+  try {
+    await withFeatures({ clicks }, async (_features, said) => {
+      clicks.push('看看我在干嘛', '宠物日记');
+      // 「宠物日记」先说「等我写写今天的日记～」；这时看屏幕还在等模型，不许被它堵住
+      await until(() => said.includes('等我写写今天的日记～'));
+      assert.equal(env.visionDone, 0);
+      // 看屏幕自己慢慢做完（要等满 3 秒的模型磨蹭，比 until 的上限长，单独等）
+      for (let i = 0; i < 250 && !said.includes('主人在写代码呀'); i += 1)
+        await new Promise((done) => setTimeout(done, 20));
+      assert.ok(said.includes('主人在写代码呀'));
+    });
+  } finally {
+    Object.assign(env, { visionDelayMs: 0, visionDone: 0 });
+  }
 });
 
 test('碎碎念这一拍：到点看屏幕就占这一拍（这一拍以来碰过键鼠就算），刚说完话碎碎念让一让', async () => {
