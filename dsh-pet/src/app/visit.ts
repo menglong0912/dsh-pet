@@ -9,7 +9,7 @@
  *   POST /v1/knock { owner, pet }    敲门：挂着等主人在右键菜单里点「让进 / 不让进」，最多 KNOCK_WAIT_MS
  *   POST /v1/chat  { token, text }   客人说一句，回 { reply }（这边的宠物回的那句）
  *   POST /v1/ping  { token }         客人每 PING_MS 报一次还在，回 { events }：这边攒下要告诉客人的事
- *                                    （这边宠物主动说的话、主人摸了它一下、一起玩什么）；被请回家后回 reason: sent-home
+ *                                    （这边宠物主动说的话、主人摸了它一下、一起玩什么、请它吃什么）；被请回家后回 reason: sent-home
  *   POST /v1/leave { token, text }   客人告辞（text 是告别的话，可空）
  *
  * 安全（对方发来的一律不可信）：
@@ -250,8 +250,9 @@ export interface Visitor {
 
 export type KnockFailure = 'busy' | 'too-soon' | 'declined' | 'no-answer';
 
-/** 这边要告诉客人的事（客人报平安时捎过去）：这边宠物主动说了句话 / 主人摸了客人一下 / 一起玩什么 */
-export type HostEvent = { type: 'line'; text: string } | { type: 'poke' } | { type: 'play'; what: string };
+/** 这边要告诉客人的事（客人报平安时捎过去）：这边宠物主动说了句话 / 主人摸了客人一下 / 一起玩什么 / 请它吃什么 */
+export type HostEvent =
+  { type: 'line'; text: string } | { type: 'poke' } | { type: 'play'; what: string } | { type: 'gift'; what: string };
 /** 一次最多捎几件事（攒多了丢最早的） */
 const EVENTS_MAX = 8;
 export type KnockAnswer = { ok: true; token: string } | { ok: false; reason: KnockFailure };
@@ -522,6 +523,7 @@ export function parseEvents(raw: unknown): HostEvent[] {
     if (event?.type === 'line' && text) events.push({ type: 'line', text });
     const what = cleanText(event?.what, NAME_MAX);
     if (event?.type === 'play' && what) events.push({ type: 'play', what });
+    if (event?.type === 'gift' && what) events.push({ type: 'gift', what });
   }
   return events;
 }

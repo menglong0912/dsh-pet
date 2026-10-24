@@ -187,6 +187,7 @@ async function boot(): Promise<void> {
       configPaths: configPathsFor(packageRoot, home),
       appConfig,
       diaryDir: join(home, 'dsh-pet', 'diary'),
+      snackPath: join(home, 'dsh-pet', 'snacks.json'),
       petBase: `${origin}/dsh-pet-7340`,
       log,
     });

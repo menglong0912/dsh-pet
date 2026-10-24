@@ -41,7 +41,7 @@ const daySchema = z.object({
     z.object({
       at: z.number(),
       // pomodoro：番茄钟已去掉、不再记，留着是为了旧日子的记录照样读得出来
-      kind: z.enum(['return', 'pomodoro', 'sit', 'water', 'off-work', 'claude', 'screen', 'visit']),
+      kind: z.enum(['return', 'pomodoro', 'sit', 'water', 'off-work', 'claude', 'screen', 'visit', 'snack']),
       text: z.string(),
     }),
   ),

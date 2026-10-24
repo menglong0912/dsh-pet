@@ -60,6 +60,7 @@ export const GUEST_ASK = {
   answer: '回它刚才那句。',
   poke: '它家主人刚伸手摸了摸你，说一句。',
   play: (what: string) => `你们正一起${what}，说一句。`,
+  treat: (what: string) => `它请你吃${what}，说一句。`,
   farewell: '该回家了，跟它道个别。',
 };
 

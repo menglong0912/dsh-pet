@@ -10,6 +10,7 @@
  *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口、visit-talk.ts 管怎么聊）：设置里开了才发信标、开接待端口；
  *     出门时自家宠物变半透明、把别人家的聊天转播回来，客人来了在自家宠物旁边开个小窗（能摸、能一起玩）；
  *     两边接着前文聊、主人家也会起话题；串门的台词只按人设生成，不带「主人此刻」；
+ *     开着串门时，用餐时间宠物也分到一份零食（snacks.ts，晚上偶尔有宵夜），家里来客时请它吃；
  *   - 右键菜单根上注册「看看我在干嘛 / 宠物日记」与串门的项（「串门」子菜单列附近的邻居，
  *     有人敲门时的应答项、送客 / 回家项），并长轮询点击。
  *
@@ -35,6 +36,8 @@ import { ClaudeSessions } from './claude-hooks';
 import { dateLabel, Diary, diaryDate } from './diary';
 import type { ClaudeHookPayload } from './claude-hooks';
 import { HealthReminders, OffWorkReminder } from './reminders';
+import { findSnack, SnackPouch } from './snacks';
+import type { Snack } from './snacks';
 import type { HealthEvent } from './reminders';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
@@ -70,7 +73,7 @@ const MENU_LOOK = '看看我在干嘛';
 const MENU_DIARY = '宠物日记';
 /** 「串门」子菜单：label 带这个前缀加「/」的项，helper 收成根菜单上的一个子菜单（shared/menu 的 buildAppMenuNodes） */
 const MENU_VISIT_GROUP = '串门';
-/** 插件每个 owner 最多 20 项：根上固定 2 项，邻居最多列这么多（家里有客时换成送客 + 一起玩的 9 项） */
+/** 插件每个 owner 最多 20 项：根上固定 2 项，邻居最多列这么多（家里有客时换成送客 + 一起玩 + 请吃零食，至多 16 项） */
 const MENU_NEIGHBORS_MAX = 15;
 /** 做客时转播回自家的气泡显示多久（窗口同时调亮这么久） */
 const RELAY_MS = 8_000;
@@ -104,6 +107,8 @@ interface Trip {
   rounds: number;
   /** 回过几次对方捎来的事（GUEST_ANSWERS 封顶） */
   answers: number;
+  /** 在对方家吃到的零食（回家记日记） */
+  treats: string[];
   /** 说话按趟串行：上一句的回话到了再说下一句 */
   queue: Promise<void>;
   /** 连着几次报平安没送到 */
@@ -188,6 +193,8 @@ export interface FeatureDeps {
   appConfig: () => AppConfig;
   /** 宠物日记目录（$DSH_HOME/dsh-pet/diary） */
   diaryDir: string;
+  /** 零食袋文件（$DSH_HOME/dsh-pet/snacks.json） */
+  snackPath: string;
   /** 插件路由前缀的完整地址，如 http://127.0.0.1:53624/dsh-pet-7340 */
   petBase: string;
   log: (message: string) => void;
@@ -200,6 +207,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   const health = new HealthReminders(() => deps.appConfig());
   const offWork = new OffWorkReminder(() => deps.appConfig().offWork);
   const diary = new Diary(deps.diaryDir, Date.now(), log);
+  const pouch = new SnackPouch(deps.snackPath, log);
   /** 这一天（日记口径）已经查过要不要补写日记：一天只查一次，补写失败也不每拍重试 */
   let diaryCheckedFor: string | null = null;
   let disposed = false;
@@ -537,6 +545,18 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     if (offWorkLeft !== null) {
       diary.note(now, 'off-work', offWorkLeft > 0 ? '提醒主人快下班了' : '过了下班时间主人还在电脑前，提醒主人下班');
       void announceOffWork(offWorkLeft);
+    }
+    // 零食只用来请来串门的客人吃：开着串门才攒；出门在外时悄悄收进袋子，不为这个叫它回家
+    const served = config.visit.enabled ? pouch.tick(now, snap?.present ?? false) : null;
+    if (served) {
+      const { meal, snack } = served;
+      diary.note(now, 'snack', `${meal}时间分到一份${snack.label}，收进了零食袋`);
+      if (!trip) {
+        void speak(
+          `到${meal}时间了，你也分到一份${snack.label}，收进零食袋，留着请来串门的小伙伴吃。跟主人说一声。`,
+          `${meal}时间～我分到一份${snack.label}，留着请客人吃～`,
+        );
+      }
     }
     // 新的一天主人回到电脑前：补写前一天的日记
     if (snap?.present && diaryCheckedFor !== diaryDate(now)) {
@@ -905,6 +925,17 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
   }
 
+  /** 请客人吃零食：从零食袋里拿一份，客人窗口吃起来，客人家那边说一句、记进它的日记 */
+  function treatGuest(snack: Snack): void {
+    const current = hosting;
+    if (!current || !pouch.take(snack.label)) return;
+    const { owner, pet } = current.visitor;
+    current.window.play(snack.anim);
+    current.lines.push(`（请 ${pet} 吃了${snack.label}）`);
+    visitHost?.tell({ type: 'gift', what: snack.label });
+    diary.note(Date.now(), 'visit', `请 ${owner} 家的 ${pet} 吃了${snack.label}`);
+  }
+
   function sendGuestHome(): void {
     const visitor = visitHost?.sendHome();
     if (visitor) seeGuestOff(visitor, '那我先回家啦～', `${visitor.pet} 回家啦～`);
@@ -946,6 +977,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     } else if (guest) {
       actions.set(`请 ${guest.pet} 回家`, sendGuestHome);
       for (const thing of PLAY_THINGS) actions.set(`和 ${guest.pet} 一起玩/${thing.label}`, () => playTogether(thing));
+      for (const snack of pouch.kinds()) actions.set(`请 ${guest.pet} 吃/${snack.label}`, () => treatGuest(snack));
     } else if (trip) {
       actions.set(`从 ${trip.host.owner} 家回来`, () => comeHome('called'));
     } else if (enabled && visiting && knockingOn === null) {
@@ -1011,6 +1043,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       lastLineAt: Date.now(),
       rounds: 0,
       answers: 0,
+      treats: [],
       queue: Promise.resolve(),
       failures: 0,
       pinging: false,
@@ -1077,7 +1110,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return next;
   }
 
-  /** 主人家捎来的事：它家宠物起的话题记下、转播；话题、摸一下、一起玩都回一句（一趟最多回 GUEST_ANSWERS 次） */
+  /** 主人家捎来的事：它家宠物起的话题记下、转播；话题、摸一下、一起玩、请吃零食都回一句（一趟最多回 GUEST_ANSWERS 次） */
   function onHostEvent(current: Trip, event: HostEvent): void {
     const { owner, pet } = current.host;
     let ask: string;
@@ -1093,6 +1126,13 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       current.lines.push(`（一起${thing.label}）`);
       relay(`（在 ${owner} 家和 ${pet} 一起${thing.label}）`);
       ask = GUEST_ASK.play(thing.label);
+    } else if (event.type === 'gift') {
+      const snack = findSnack(event.what);
+      if (!snack) return;
+      current.lines.push(`（${pet} 请你吃了${snack.label}）`);
+      current.treats.push(snack.label);
+      relay(`（在 ${owner} 家吃到了${snack.label}）`);
+      ask = GUEST_ASK.treat(snack.label);
     } else {
       ask = GUEST_ASK.poke;
     }
@@ -1187,7 +1227,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
     const chats = current.lines.filter((line) => line.startsWith('你：')).length;
     const ending = reason === 'sent-home' ? '，被它家主人请回来了' : reason === 'lost' ? '，后来连不上就回来了' : '';
-    diary.note(Date.now(), 'visit', `去 ${owner} 家串门，和它家的宠物 ${pet} 聊了 ${chats} 句${ending}`);
+    const treats = current.treats.length > 0 ? `，吃到了${current.treats.join('、')}` : '';
+    diary.note(Date.now(), 'visit', `去 ${owner} 家串门，和它家的宠物 ${pet} 聊了 ${chats} 句${treats}${ending}`);
     void refreshStatus(Date.now());
     void refreshMenu();
     const back = `我从 ${owner} 家回来啦～`;

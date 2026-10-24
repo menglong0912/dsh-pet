@@ -100,6 +100,7 @@ async function withFeatures(
     configPaths: configPathsFor(packageRoot, home),
     appConfig: () => config,
     diaryDir: join(home, 'diary'),
+    snackPath: join(home, 'snacks.json'),
     petBase: `http://127.0.0.1:${(server.address() as AddressInfo).port}/dsh-pet-7340`,
     log: () => undefined,
   });

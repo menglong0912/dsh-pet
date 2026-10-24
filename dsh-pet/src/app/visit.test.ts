@@ -258,11 +258,18 @@ test('events from the other side are checked like everything else it sends', () 
       { type: 'poke', extra: 1 },
       { type: 'play', what: '吃西瓜吃西瓜吃西瓜吃西瓜吃西瓜' },
       { type: 'play' },
+      { type: 'gift', what: '糖葫芦' },
+      { type: 'gift', what: 42 },
       { type: 'dance' },
       null,
       'line',
     ]),
-    [{ type: 'line', text: '你好 呀' }, { type: 'poke' }, { type: 'play', what: '吃西瓜吃西瓜吃西瓜吃西瓜' }],
+    [
+      { type: 'line', text: '你好 呀' },
+      { type: 'poke' },
+      { type: 'play', what: '吃西瓜吃西瓜吃西瓜吃西瓜' },
+      { type: 'gift', what: '糖葫芦' },
+    ],
   );
   assert.equal(parseEvents(Array.from({ length: 20 }, () => ({ type: 'poke' }))).length, 8);
 });
