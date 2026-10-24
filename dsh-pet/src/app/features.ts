@@ -861,7 +861,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         electron,
         `${new URL(deps.petBase).origin}/app/guest`,
         `${visitor.owner} 家的 ${visitor.pet}`,
-        homePet.box(),
+        homePet.box,
         () => pokeGuest(current),
       ),
       since: now,

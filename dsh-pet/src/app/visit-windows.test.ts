@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { guestBounds, guestSide, petBoxFrom, petHitRect, pinkPixels } from './visit-windows.ts';
+import {
+  followGuest,
+  guestBounds,
+  guestPage,
+  GUEST_BUBBLE_OVERLAP_RATIO,
+  guestSide,
+  petBoxFrom,
+  petHitRect,
+  pinkPixels,
+} from './visit-windows.ts';
+import { BUBBLE_OVERLAP_RATIO } from '../shared/fonts.ts';
 
 const workArea = { x: 0, y: 25, width: 1440, height: 1200 };
 /** 500 宽的宠物：舞台 500 × 281.25，脚底垫高 = 舞台高 × 30/360 */
@@ -51,6 +61,54 @@ test('the guest knows which side of the home pet it stands on, and only its body
   assert.ok(hit.y > left.y + 96, '不含气泡空间');
   const feet = left.y + 96 + ((350 * 9) / 16) * (330 / 360);
   assert.ok(Math.abs(hit.y + hit.height - feet) <= 1, '到脚底为止');
+});
+
+test('客人气泡贴着头顶：底边伸进舞台的比例扣掉脚底垫高，气泡自己不接点击', () => {
+  // 自家宠物的气泡伸进的是宠物盒（BUBBLE_OVERLAP_RATIO），舞台在盒里下移了脚底垫高（9/16 × 30/360）
+  assert.ok(
+    Math.abs(GUEST_BUBBLE_OVERLAP_RATIO - (BUBBLE_OVERLAP_RATIO - (9 / 16) * (30 / 360))) < 1e-9,
+    `比例约 0.0611，实际 ${GUEST_BUBBLE_OVERLAP_RATIO}`,
+  );
+  assert.ok(guestPage.includes(`margin-bottom:calc(-100vw * ${GUEST_BUBBLE_OVERLAP_RATIO})`));
+  const rule = /#bubble\{([^}]*)\}/.exec(guestPage);
+  assert.ok(rule, 'guestPage 里找不到 #bubble 规则');
+  assert.match(rule[1], /position:relative/);
+  assert.match(rule[1], /pointer-events:none/);
+});
+
+test('followGuest：宠物平移，客人跟着平移；位置没变就不动', () => {
+  const current = guestBounds(home, workArea);
+  assert.equal(followGuest(current, 'left', home, workArea), null, '没挪动');
+  const moved = followGuest(current, 'left', { ...home, left: 1100 }, workArea);
+  assert.ok(moved, '要挪');
+  assert.equal(moved.side, 'left');
+  assert.equal(moved.bounds.x - current.x, 100);
+  // 竖着挪也跟
+  const up = followGuest(current, 'left', { ...home, top: 300 }, workArea);
+  assert.ok(up && Math.abs(up.bounds.y - current.y + 100) <= 1);
+});
+
+test('followGuest：左边放不下才换到右边，回到中间后也不来回跳', () => {
+  const mid = guestBounds(home, workArea); // 自家宠物在 1000，客人站左边
+  assert.equal(followGuest(mid, 'left', home, workArea)?.side ?? 'left', 'left', '放得下就不换边');
+  // 宠物被拖到最左边：客人换到右边
+  const atLeftEdge = { ...home, left: 0 };
+  const moved = followGuest(mid, 'left', atLeftEdge, workArea);
+  assert.ok(moved && moved.side === 'right');
+  // 宠物回到屏幕中间（两边都放得下）：客人留在右边，不弹回左边
+  const center = { ...home, left: 500 };
+  const stays = followGuest(moved.bounds, 'right', center, workArea);
+  assert.ok(stays && stays.side === 'right');
+  assert.ok(stays.bounds.x + stays.bounds.width / 2 > center.left + center.size / 2, '仍在宠物右边');
+});
+
+test('followGuest：宠物去了另一块屏，客人跟过去', () => {
+  const otherScreen = { x: 1440, y: 25, width: 1440, height: 1200 };
+  const current = guestBounds(home, workArea);
+  const moved = followGuest(current, 'left', { ...home, left: 2000 }, otherScreen);
+  assert.ok(moved, '要挪');
+  assert.ok(moved.bounds.x >= otherScreen.x, '落在另一块屏里');
+  assert.ok(moved.bounds.x + moved.bounds.width <= otherScreen.x + otherScreen.width);
 });
 
 /** RGBA → 色相（度）；灰色返回 null */

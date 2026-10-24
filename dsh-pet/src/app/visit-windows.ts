@@ -15,6 +15,7 @@
  * 那里有窗口坐标、余量、宠物尺寸与脚底垫高。
  */
 import { CANVAS_H, FEET_Y } from '../shared/constants';
+import { BUBBLE_OVERLAP_RATIO } from '../shared/fonts';
 
 export interface Rect {
   x: number;
@@ -27,6 +28,7 @@ export interface Rect {
 export interface WindowLike {
   isDestroyed(): boolean;
   getBounds(): Rect;
+  setBounds(rect: Rect): void;
   setOpacity(opacity: number): void;
   setIgnoreMouseEvents(ignore: boolean): void;
   setAlwaysOnTop(flag: boolean, level: 'floating'): void;
@@ -72,8 +74,17 @@ const BUBBLE_ROOM = 96;
 const TAG_ROOM = 26;
 /** 看光标在不在客人身上的间隔 */
 const HOVER_MS = 100;
+/** 跟着自家宠物走的间隔 */
+const FOLLOW_MS = 50;
 /** 脚底在舞台高度上的位置 */
 const FEET_RATIO = FEET_Y / CANVAS_H;
+/** 舞台底部脚下的透明边占舞台高的比例（脚底垫高） */
+const FEET_PAD_RATIO = (CANVAS_H - FEET_Y) / CANVAS_H;
+/**
+ * 客人气泡底边伸进舞台的比例：自家宠物的气泡伸进的是「宠物盒」（BUBBLE_OVERLAP_RATIO × 宠物宽），
+ * 但舞台在宠物盒里往下错开了一段脚底垫高（舞台高 × 30/360），要扣掉这一段才是伸进舞台的深度。
+ */
+export const GUEST_BUBBLE_OVERLAP_RATIO = BUBBLE_OVERLAP_RATIO - (9 / 16) * FEET_PAD_RATIO;
 
 /** 自家宠物的窗口：helper 建的那几个（页面是 runtime/electron-helper/index.html） */
 function homeWindows(electron: WindowElectron): WindowLike[] {
@@ -151,7 +162,7 @@ export function pinkPixels(data: Uint8ClampedArray): void {
  * 客人窗口的位置与大小：站在自家宠物左边（左边放不下站右边），脚底对齐，客人小一号；
  * 不知道自家宠物在哪就放到这块屏的左下角。
  */
-export function guestBounds(home: PetBox | null, workArea: Rect): Rect {
+export function guestBounds(home: PetBox | null, workArea: Rect, prefer?: 'left' | 'right'): Rect {
   const width = Math.round(Math.min(400, Math.max(200, (home?.size ?? 300) * GUEST_SCALE)));
   const videoHeight = (width * 9) / 16;
   const height = Math.round(videoHeight) + BUBBLE_ROOM + TAG_ROOM;
@@ -163,7 +174,11 @@ export function guestBounds(home: PetBox | null, workArea: Rect): Rect {
   // 两只宠物中心隔开半只自家宠物多一点：身体不挨着，两边的气泡也不打架
   const apart = home.size / 2 + width * 0.35;
   const left = center - apart - width / 2;
-  const x = left >= workArea.x ? left : center + apart - width / 2;
+  const right = center + apart - width / 2;
+  // 优先 prefer 那一边，放不下才换；不传 prefer 时先试左边（原有行为）
+  const leftFits = left >= workArea.x;
+  const rightFits = right + width <= workArea.x + workArea.width;
+  const x = prefer === 'right' && rightFits ? right : leftFits ? left : right;
   // 客人的脚：窗口顶 + 气泡空间 + 舞台里脚底的位置
   const y = feet - BUBBLE_ROOM - videoHeight * FEET_RATIO;
   return { x: Math.round(clampX(x)), y: Math.round(clampY(y)), width, height };
@@ -172,6 +187,30 @@ export function guestBounds(home: PetBox | null, workArea: Rect): Rect {
 /** 客人站在自家宠物哪一边（不知道自家宠物在哪时当左边） */
 export function guestSide(bounds: Rect, home: PetBox | null): 'left' | 'right' {
   return home && bounds.x + bounds.width / 2 > home.left + home.size / 2 ? 'right' : 'left';
+}
+
+/**
+ * 客人跟着自家宠物走一拍：按 guestBounds 的规则算目标位置，优先留在当前这一边；
+ * 和现在位置相差不到 1px（也没换边）时返回 null，表示不用动。
+ */
+export function followGuest(
+  current: Rect,
+  side: 'left' | 'right',
+  home: PetBox | null,
+  workArea: Rect,
+): { bounds: Rect; side: 'left' | 'right' } | null {
+  const bounds = guestBounds(home, workArea, side);
+  const nextSide = guestSide(bounds, home);
+  if (
+    nextSide === side &&
+    Math.abs(bounds.x - current.x) < 1 &&
+    Math.abs(bounds.y - current.y) < 1 &&
+    bounds.width === current.width &&
+    bounds.height === current.height
+  ) {
+    return null;
+  }
+  return { bounds, side: nextSide };
 }
 
 /** 客人窗口里宠物身体那一块（屏幕坐标）：光标在这里时窗口才接点击，别处照样穿透 */
@@ -203,21 +242,22 @@ export interface GuestWindow {
  * 开客人窗口
  * @param pageUrl 本机服务的 /app/guest
  * @param tag 名牌（「小王家的 小鱼」）
- * @param home 自家宠物现在的位置（watchHomePet）
+ * @param home 取自家宠物现在的位置（watchHomePet 的 box）；客人跟着它走
  * @param onPoke 主人点了客人一下
  */
 export function openGuestWindow(
   electron: WindowElectron,
   pageUrl: string,
   tag: string,
-  home: PetBox | null,
+  home: () => PetBox | null,
   onPoke: () => void,
 ): GuestWindow {
-  const point = home
-    ? { x: home.left + home.size / 2, y: home.top + home.size / 4 }
+  const homeNow = home();
+  const point = homeNow
+    ? { x: homeNow.left + homeNow.size / 2, y: homeNow.top + homeNow.size / 4 }
     : electron.screen.getCursorScreenPoint();
-  const bounds = guestBounds(home, electron.screen.getDisplayNearestPoint(point).workArea);
-  const side = guestSide(bounds, home);
+  let bounds = guestBounds(homeNow, electron.screen.getDisplayNearestPoint(point).workArea);
+  let side = guestSide(bounds, homeNow);
   const win = new electron.BrowserWindow({
     ...bounds,
     show: false,
@@ -263,7 +303,7 @@ export function openGuestWindow(
     .catch(() => win.destroy());
   // 窗口没有 preload、不开 IPC：主进程每 HOVER_MS 看一眼光标——在客人身上就让窗口接点击，
   // 再顺手问页面这段时间被点了几下（页面自己先播被摸的反应动画）
-  const hit = petHitRect(bounds);
+  let hit = petHitRect(bounds);
   let clickable = false;
   const hover = setInterval(() => {
     if (win.isDestroyed()) {
@@ -286,16 +326,41 @@ export function openGuestWindow(
         .catch(() => undefined);
     }
   }, HOVER_MS);
+  // 跟着自家宠物走：每拍取一次 home()，位置变了就挪窗口、重算命中区；没收到位置（null）就不动。
+  // workArea 取自家宠物中心所在的那块屏：宠物被拖到另一块屏时，客人跟过去。
+  const follow = setInterval(() => {
+    if (win.isDestroyed()) {
+      clearInterval(follow);
+      return;
+    }
+    const box = home();
+    if (!box) return;
+    const workArea = electron.screen.getDisplayNearestPoint({
+      x: box.left + box.size / 2,
+      y: box.top + box.size / 2,
+    }).workArea;
+    const next = followGuest(bounds, side, box, workArea);
+    if (!next) return;
+    const turned = next.side !== side;
+    bounds = next.bounds;
+    side = next.side;
+    hit = petHitRect(bounds);
+    win.setBounds(bounds);
+    if (turned) run(`guest.face(${JSON.stringify(side === 'left' ? 'right' : 'left')})`);
+  }, FOLLOW_MS);
   // 参数一律 JSON.stringify 成字面量：对方发来的名字和话只当字符串数据，页面里用 textContent 显示
   run(`guest.arrive(${JSON.stringify(tag)}, ${JSON.stringify(side === 'left' ? 'right' : 'left')})`);
   return {
-    side,
+    get side() {
+      return side;
+    },
     say: (text) => run(`guest.say(${JSON.stringify(text)})`),
     wave: () => run('guest.wave()'),
     play: (anim) => run(`guest.play(${JSON.stringify(anim)})`),
     close(afterMs) {
       setTimeout(() => {
         clearInterval(hover);
+        clearInterval(follow);
         if (!win.isDestroyed()) win.destroy();
       }, afterMs);
     },
@@ -309,7 +374,9 @@ export const guestPage = `<!doctype html>
 @font-face{font-family:"ShangshouSoftCandy";src:url("/dsh-pet-7340/font/${encodeURIComponent('上首软糖体')}.ttf") format("truetype");font-display:swap}
 html,body{margin:0;height:100%;background:transparent;overflow:hidden;user-select:none;cursor:default}
 body{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;font-family:"ShangshouSoftCandy","PingFang SC",sans-serif}
-#bubble{max-width:88%;box-sizing:border-box;padding:7px 12px;margin-bottom:-4px;background:#fff;color:#22313f;border:2px solid #4a5b6c;border-radius:14px;font-size:14px;line-height:1.45;word-break:break-all;opacity:0;transition:opacity .25s}
+/* 气泡底边伸进舞台 BUBBLE_OVERLAP_RATIO 那么深（和自家宠物的气泡一个口径）；盖在画布上但不接点击，
+   光标在身体命中区里点到气泡时仍算摸到客人 */
+#bubble{position:relative;z-index:1;pointer-events:none;max-width:88%;box-sizing:border-box;padding:7px 12px;margin-bottom:calc(-100vw * ${GUEST_BUBBLE_OVERLAP_RATIO});background:#fff;color:#22313f;border:2px solid #4a5b6c;border-radius:14px;font-size:14px;line-height:1.45;word-break:break-all;opacity:0;transition:opacity .25s}
 #bubble.on{opacity:1}
 #src{display:none}
 #pet{width:100%;aspect-ratio:16/9;display:block;cursor:pointer}
@@ -365,8 +432,11 @@ canvas.addEventListener('click', () => {
 window.guest = {
   arrive(tag, facing) {
     document.getElementById('tag').textContent = tag;
-    canvas.classList.toggle('right', facing === 'right');
+    guest.face(facing);
     play('点击回应-元气挥手', false);
+  },
+  face(facing) {
+    canvas.classList.toggle('right', facing === 'right');
   },
   say(text) {
     bubble.textContent = String(text);
