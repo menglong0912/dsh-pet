@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { petSettingsHandler } from './app-routes.ts';
+import { appNeighborsHandler, petSettingsHandler } from './app-routes.ts';
+import type { AppFeatures } from './features.ts';
 
 /** 起一个 HTTP 服务，跑完 fn 关掉 */
 async function serve(
@@ -79,4 +80,75 @@ test('pet settings are read from and saved through the plugin config route, neve
       },
     );
   });
+});
+
+test('app neighbors route serves the book, applies each action, and guards identity resets', async () => {
+  const record = {
+    id: 'a'.repeat(32),
+    owner: '小李',
+    pet: '阿花',
+    friend: true,
+    hosted: 2,
+    visited: 1,
+    firstMet: 0,
+    lastMet: 3_000,
+    summary: '聊了放风筝',
+  };
+  const calls: string[] = [];
+  let resettingAllowed = true;
+  const fake = {
+    neighbors: {
+      identityId: () => 'b'.repeat(32),
+      list: () => [record],
+      setFriend: (id: string, friend: boolean) => calls.push(`friend ${id} ${friend}`),
+      forget: (id: string) => calls.push(`forget ${id}`),
+      clear: () => calls.push('clear'),
+      resetIdentity: () => {
+        if (!resettingAllowed) return false;
+        calls.push('reset');
+        return true;
+      },
+    },
+  };
+  let current: unknown = fake;
+  const handler = appNeighborsHandler(() => current as AppFeatures | null);
+  await serve(
+    (req, res) => void handler(req, res),
+    async (base) => {
+      // GET：身份 id 只回前 8 位，邻居簿原样列出
+      const read = await fetch(base);
+      assert.equal(read.status, 200);
+      assert.deepEqual(await read.json(), { id: 'b'.repeat(8), neighbors: [record] });
+
+      const post = (body: string) =>
+        fetch(base, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      for (const [body, expected] of [
+        [`{"action":"friend","id":"${'a'.repeat(32)}","friend":false}`, `friend ${'a'.repeat(32)} false`],
+        [`{"action":"forget","id":"${'a'.repeat(32)}"}`, `forget ${'a'.repeat(32)}`],
+        ['{"action":"clear"}', 'clear'],
+        ['{"action":"reset-identity"}', 'reset'],
+      ] as const) {
+        assert.equal((await post(body)).status, 200);
+        assert.equal(calls[calls.length - 1], expected);
+      }
+
+      // 非法参数：不落到邻居簿上
+      const before = calls.length;
+      for (const bad of ['{}', '{"action":"nope"}', `{"action":"friend","id":"short"}`, '{"action":"forget"}', '[1]']) {
+        assert.equal((await post(bad)).status, 400, bad);
+      }
+      assert.equal(calls.length, before);
+      assert.equal((await fetch(base, { method: 'PUT', body: '{}' })).status, 405);
+
+      // 串门进行中不让重置身份
+      resettingAllowed = false;
+      const busy = await post('{"action":"reset-identity"}');
+      assert.equal(busy.status, 409);
+      assert.match(((await busy.json()) as { error: string }).error, /串门进行中/);
+
+      // 功能还没起来（app ready 之前）：503
+      current = null;
+      assert.equal((await fetch(base)).status, 503);
+    },
+  );
 });

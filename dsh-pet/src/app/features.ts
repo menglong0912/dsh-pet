@@ -38,12 +38,13 @@ import { HealthReminders, OffWorkReminder } from './reminders';
 import { findSnack, SnackPouch } from './snacks';
 import type { Snack } from './snacks';
 import type { HealthEvent } from './reminders';
-import { NeighborBook } from './neighbors';
+import { NeighborBook, shouldAutoAdmit } from './neighbors';
+import type { NeighborRecord } from './neighbors';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
 import { cleanText, knockOn, LINE_MAX, NAME_MAX, Neighborhood, PING_MS, tripRequest, VisitHost } from './visit';
 import type { HostEvent, HostHandlers, KnockAnswer, KnockFailure, Neighbor, TripReply, Visitor } from './visit';
-import { loadVisitIdentity } from './visit-identity';
+import { loadVisitIdentity, resetVisitIdentity } from './visit-identity';
 import {
   findPlayThing,
   GUEST_ANSWERS,
@@ -192,6 +193,17 @@ export interface AppFeatures {
    * 到点该看屏幕就用看屏幕代替这句；应用正在 / 刚刚说话就让一让——两种气泡不互相顶掉、不同时抢模型。
    */
   takeWhisperTurn(petId: string): boolean;
+  /** 邻居簿与串门身份（设置页「邻居」一节用，见 app-routes.ts 的 appNeighborsHandler） */
+  neighbors: {
+    /** 本机身份 id（GET 时只回前 8 位） */
+    identityId(): string;
+    list(): NeighborRecord[];
+    setFriend(id: string, friend: boolean): void;
+    forget(id: string): void;
+    clear(): void;
+    /** 重置串门身份：串门进行中（家里有客、自己在外、正在敲门）时不重置、返回 false（接口回 409） */
+    resetIdentity(): boolean;
+  };
   dispose(): void;
 }
 
@@ -239,8 +251,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let lastSpokeAt = 0;
   /** 插件上次来问碎碎念这一拍的时间：判断自动碎碎念在不在跑 */
   let lastWhisperTurnAt = 0;
-  /** 串门身份（每台电脑一对密钥，重启不变）：信标 id、敲门签名、应答签名都用它 */
-  const visitIdentity = loadVisitIdentity(deps.identityPath, (message) => log(`串门：${message}`));
+  /** 串门身份（每台电脑一对密钥，重启不变）：信标 id、敲门签名、应答签名都用它；设置页可以重置成新的一对 */
+  let visitIdentity = loadVisitIdentity(deps.identityPath, (message) => log(`串门：${message}`));
   /** 串门网络：信标（总开关开着、接待或出门开了任一项时有）与接待端口（允许别人来时有） */
   let neighborhood: Neighborhood | null = null;
   let visitHost: VisitHost | null = null;
@@ -840,7 +852,19 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     canHost: () => trip === null && knockingOn === null,
     knocked(visitor) {
       log(`串门：${visitor.owner}（${visitor.address}）家的 ${visitor.pet} 来敲门`);
-      void say(`${visitor.owner} 家的 ${visitor.pet} 来敲门啦，右键点「让 ${visitor.pet} 进来」请它进门～`);
+      // 熟人 + 开了「直接请进」 + 主人在电脑前：不用主人点头（VisitHost.knock 调这里之前就挂好了 pending，同步让进是安全的）
+      if (shouldAutoAdmit(neighbors, visitor, deps.appConfig().visit.autoAdmitFriends, tracker.snapshot()?.present)) {
+        void say(`熟人 ${visitor.owner} 家的 ${visitor.pet} 来啦，直接请它进来～`);
+        letIn(true);
+        void refreshMenu();
+        return;
+      }
+      // 没验证过身份、昵称却和某个熟人一样：多半是抄来的名字，说清楚让主人自己拿主意
+      if (!visitor.id && neighbors.list().some((record) => record.friend && record.owner === visitor.owner)) {
+        void say(`自称是 ${visitor.owner} 家的 ${visitor.pet}，可我没认出来，要让它进来吗？`);
+      } else {
+        void say(`${visitor.owner} 家的 ${visitor.pet} 来敲门啦，右键点「让 ${visitor.pet} 进来」请它进门～`);
+      }
       void refreshMenu();
     },
     knockEnded(visitor, reason) {
@@ -1015,8 +1039,15 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       actions.set(`请 ${guest.pet} 回家`, sendGuestHome);
       for (const thing of PLAY_THINGS) actions.set(`和 ${guest.pet} 一起玩/${thing.label}`, () => playTogether(thing));
       for (const snack of pouch.kinds()) actions.set(`请 ${guest.pet} 吃/${snack.label}`, () => treatGuest(snack));
+      // 只对验证过身份的客人提供熟人开关：陌生人没身份可标，冒名的也不能被拉成熟人
+      const guestId = guest.id;
+      if (guestId) actions.set(friendLabel(neighbors, guestId, guest.owner), () => toggleFriend(neighbors, guestId));
     } else if (trip) {
       actions.set(`从 ${trip.host.owner} 家回来`, () => comeHome('called'));
+      const hostId = trip.host.id;
+      // 只对验证过身份的主人家提供熟人开关（trip.verified：见 startTrip）
+      if (trip.verified)
+        actions.set(friendLabel(neighbors, hostId, trip.host.owner), () => toggleFriend(neighbors, hostId));
     } else if (enabled && visiting && knockingOn === null) {
       const neighbors = (neighborhood?.list() ?? []).slice(0, MENU_NEIGHBORS_MAX);
       for (const neighbor of neighbors) {
@@ -1382,6 +1413,27 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     whisper: () => petRequest('POST', '/whisper'),
     lookAtScreen,
     takeWhisperTurn,
+    neighbors: {
+      identityId: () => visitIdentity.id,
+      list: () => neighbors.list(),
+      setFriend: (id, friend) => neighbors.setFriend(id, friend),
+      forget: (id) => neighbors.forget(id),
+      clear: () => neighbors.clear(),
+      resetIdentity() {
+        if (hosting || trip || knockingOn) return false;
+        resetVisitIdentity(deps.identityPath);
+        visitIdentity = loadVisitIdentity(deps.identityPath, (message) => log(`串门：${message}`));
+        // 关掉信标和接待，下一拍 syncVisit 用新身份重开；别的电脑要重新认这台电脑了
+        if (neighborhood) {
+          neighborhood.stop();
+          neighborhood = null;
+          log('串门：信标关了（要换新身份重开）');
+        }
+        if (visitHost) void closeHost();
+        log('串门：换了新的串门身份');
+        return true;
+      },
+    },
     dispose() {
       disposed = true;
       if (tickTimer !== null) clearTimeout(tickTimer);
@@ -1400,6 +1452,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 /** 这次见面聊过的句数（「（一起吃西瓜）」这类一起做过的事不算） */
 function spokenCount(lines: readonly string[]): number {
   return lines.filter((line) => !line.startsWith('（')).length;
+}
+
+/** 熟人开关的菜单文案（X 是对方主人的昵称） */
+function friendLabel(book: NeighborBook, id: string, owner: string): string {
+  return book.get(id)?.friend === true ? `${owner} 不再是熟人` : `把 ${owner} 设为熟人`;
+}
+
+/** 点一下菜单项：是熟人的取消，不是的设为 */
+function toggleFriend(book: NeighborBook, id: string): void {
+  book.setFriend(id, book.get(id)?.friend !== true);
 }
 
 function knockFailText(owner: string, reason: KnockFailure | 'unreachable'): string {

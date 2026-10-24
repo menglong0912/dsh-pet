@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NeighborBook, memoryLine, NEIGHBORS_MAX } from './neighbors.ts';
+import { NeighborBook, memoryLine, NEIGHBORS_MAX, shouldAutoAdmit } from './neighbors.ts';
 
 function withPath(fn: (path: string, warns: string[]) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-pet-neighbors-'));
@@ -145,4 +145,22 @@ test('memoryLine describes the last meeting', () => {
     memoryLine({ ...base, lastMet: 0, summary: '聊了放风筝' }, 2 * 86_400_000),
     '你们之前见过 3 次，上次是 2 天前，上次聊了：「聊了放风筝」。',
   );
+});
+
+test('shouldAutoAdmit only fires for a verified friend with the switch on and the owner present', () => {
+  withPath((path) => {
+    const book = new NeighborBook(path, () => undefined);
+    const id = 'a'.repeat(32);
+    book.met(id, { owner: '小李', pet: '阿花' }, 'hosted', 1_000);
+    const stranger: { owner: string; pet: string; id?: string } = { owner: '小李', pet: '阿花' };
+    const verified = { ...stranger, id };
+    // 三者缺一不可：没验证过身份的当陌生人，主人不在场 / 没开开关 / 不是熟人都不自动开门
+    assert.equal(shouldAutoAdmit(book, stranger, true, true), false);
+    assert.equal(shouldAutoAdmit(book, verified, false, true), false);
+    assert.equal(shouldAutoAdmit(book, verified, true, false), false);
+    assert.equal(shouldAutoAdmit(book, verified, true, undefined), false);
+    assert.equal(shouldAutoAdmit(book, verified, true, true), false);
+    book.setFriend(id, true);
+    assert.equal(shouldAutoAdmit(book, verified, true, true), true);
+  });
 });

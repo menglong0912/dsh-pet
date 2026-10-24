@@ -181,3 +181,19 @@ export function memoryLine(record: NeighborRecord | undefined, now: number): str
   const when = `你们之前见过 ${met} 次，上次是 ${agoText(now - record.lastMet)}前`;
   return record.summary ? `${when}，上次聊了：「${record.summary}」。` : `${when}。`;
 }
+
+/**
+ * 熟人来敲门要不要直接请进（features.ts 的 hostHandlers.knocked 用）：
+ * 验证过身份（有 id）、确实是熟人、开了「熟人来敲门直接请进」、主人此刻在电脑前，四者同时满足才自动开门——
+ * 没验证过的一律当陌生人等主人点头；没人看着，就不让两只宠物对着空屏幕调模型。
+ * @param present 主人此刻在电脑前（tracker.snapshot()?.present）
+ */
+export function shouldAutoAdmit(
+  book: { get(id: string): NeighborRecord | undefined },
+  visitor: { id?: string },
+  autoAdmitFriends: boolean,
+  present: boolean | undefined,
+): boolean {
+  if (!visitor.id || !autoAdmitFriends || present !== true) return false;
+  return book.get(visitor.id)?.friend === true;
+}

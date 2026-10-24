@@ -53,8 +53,18 @@ const schema = z
         nickname: z.string().max(12),
         /** 出门做客待多久（分钟） */
         stayMin: z.number().min(1).max(60),
+        /** 熟人来敲门直接请进，不用主人点头；比 stayMin 晚加，同样缺了按默认补 */
+        autoAdmitFriends: z.boolean().default(false),
       })
-      .default({ enabled: false, hosting: true, visiting: true, chat: true, nickname: '', stayMin: 10 }),
+      .default({
+        enabled: false,
+        hosting: true,
+        visiting: true,
+        chat: true,
+        nickname: '',
+        stayMin: 10,
+        autoAdmitFriends: false,
+      }),
   })
   .strict();
 
@@ -88,7 +98,15 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
   water: { enabled: true, everyMin: 60 },
   offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
-  visit: { enabled: false, hosting: true, visiting: true, chat: true, nickname: '', stayMin: 10 },
+  visit: {
+    enabled: false,
+    hosting: true,
+    visiting: true,
+    chat: true,
+    nickname: '',
+    stayMin: 10,
+    autoAdmitFriends: false,
+  },
 };
 
 /**

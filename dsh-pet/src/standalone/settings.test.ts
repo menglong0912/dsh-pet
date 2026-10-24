@@ -102,8 +102,12 @@ test('settings browser script strips fragment, keeps key write-only and explicit
     document: { getElementById: element },
     fetch: async (url: string, options: { method: string; body?: string; headers: Record<string, string> }) => {
       requests.push({ url, options });
-      // CLI 没有「陪伴与提醒」「宠物」两节：app-settings / pet-settings 是 404，页面既不显示也不保存它们
-      if (url === '/standalone-ai/app-settings' || url === '/standalone-ai/pet-settings') {
+      // CLI 没有「陪伴与提醒」「宠物」「邻居」几节：app-settings / pet-settings / app-neighbors 是 404，页面既不显示也不保存它们
+      if (
+        url === '/standalone-ai/app-settings' ||
+        url === '/standalone-ai/pet-settings' ||
+        url === '/standalone-ai/app-neighbors'
+      ) {
         return { ok: false, status: 404, json: async () => ({}) };
       }
       return {
@@ -138,15 +142,23 @@ test('settings browser script strips fragment, keeps key write-only and explicit
   assert.equal(JSON.parse(saves()[2].options.body ?? '{}').clearApiKey, true);
   assert.equal(JSON.parse(saves()[2].options.body ?? '{}').enabled, false);
   assert.equal(element('apiKey').disabled, false);
-  // 只碰本机设置接口（AI 设置 + 应用的两节），且都带令牌；CLI 下应用的两节只探测一次、不保存
+  // 只碰本机设置接口（AI 设置 + 应用的几节），且都带令牌；CLI 下应用的几节只探测一次、不保存
   assert.ok(
     requests.every(
       ({ url, options }) =>
-        ['/standalone-ai/settings', '/standalone-ai/app-settings', '/standalone-ai/pet-settings'].includes(url) &&
-        options.headers['X-DSH-Pet-Token'] === 'process-capability',
+        [
+          '/standalone-ai/settings',
+          '/standalone-ai/app-settings',
+          '/standalone-ai/pet-settings',
+          '/standalone-ai/app-neighbors',
+        ].includes(url) && options.headers['X-DSH-Pet-Token'] === 'process-capability',
     ),
   );
-  for (const section of ['/standalone-ai/app-settings', '/standalone-ai/pet-settings']) {
+  for (const section of [
+    '/standalone-ai/app-settings',
+    '/standalone-ai/pet-settings',
+    '/standalone-ai/app-neighbors',
+  ]) {
     assert.deepEqual(
       requests.filter(({ url }) => url === section).map(({ options }) => options.method),
       ['GET'],
@@ -192,7 +204,15 @@ test('settings browser script shows and saves the app section when the app serve
     sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
     water: { enabled: true, everyMin: 60 },
     offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
-    visit: { enabled: false, hosting: true, visiting: true, chat: true, nickname: '', stayMin: 10 },
+    visit: {
+      enabled: false,
+      hosting: true,
+      visiting: true,
+      chat: true,
+      nickname: '',
+      stayMin: 10,
+      autoAdmitFriends: false,
+    },
   };
   runInNewContext(settingsScript, {
     URLSearchParams,
@@ -201,6 +221,8 @@ test('settings browser script shows and saves the app section when the app serve
     document: { getElementById: element },
     fetch: async (url: string, options: { method: string; body?: string }) => {
       requests.push({ url, options });
+      // 「邻居」一节另有专门测试；这里只当它不存在（不显示）
+      if (url === '/standalone-ai/app-neighbors') return { ok: false, status: 404, json: async () => ({}) };
       return { ok: true, json: async () => (url === '/standalone-ai/app-settings' ? app : { hasKey: false }) };
     },
   });
@@ -239,7 +261,15 @@ test('settings browser script shows and saves the app section when the app serve
     screen: { enabled: true, intervalMin: 30 },
     water: { enabled: false, everyMin: 60 },
     offWork: { enabled: true, time: '17:30', weekdaysOnly: true, leadMin: 15 },
-    visit: { enabled: true, hosting: false, visiting: true, chat: false, nickname: '小王', stayMin: 20 },
+    visit: {
+      enabled: true,
+      hosting: false,
+      visiting: true,
+      chat: false,
+      nickname: '小王',
+      stayMin: 20,
+      autoAdmitFriends: false,
+    },
   });
 });
 
@@ -304,7 +334,9 @@ test('settings browser script edits the first desktop pet and shows one automati
     fetch: async (url: string, options: { method: string; body?: string }) => {
       requests.push({ url, options });
       if (url === '/standalone-ai/pet-settings') return { ok: true, json: async () => ({ config, file }) };
-      if (url === '/standalone-ai/app-settings') return { ok: false, status: 404, json: async () => ({}) };
+      if (url === '/standalone-ai/app-settings' || url === '/standalone-ai/app-neighbors') {
+        return { ok: false, status: 404, json: async () => ({}) };
+      }
       return { ok: true, json: async () => ({ hasKey: true, enabled: true, automaticWhispers: true }) };
     },
   });
@@ -349,4 +381,132 @@ test('settings browser script edits the first desktop pet and shows one automati
   await element('settings').listeners.submit({ preventDefault() {} });
   assert.equal(posts('/standalone-ai/pet-settings')[1].pets[1].size, 600);
   assert.match(String(element('status').textContent), /桌宠正在重启/);
+});
+
+test('settings browser script renders the neighbors section and fires immediate per-row actions', async () => {
+  const { runInNewContext } = await import('node:vm');
+  type Element = Record<string, unknown> & {
+    value: string;
+    checked: boolean;
+    hidden: boolean;
+    textContent: string;
+    children: unknown[];
+    listeners: Record<string, (event?: unknown) => Promise<void> | void>;
+    addEventListener: (name: string, fn: () => void) => void;
+    appendChild: (child: unknown) => void;
+    remove: () => void;
+  };
+  const elements = new Map<string, Element>();
+  const element = (id: string): Element => {
+    if (!elements.has(id)) {
+      const stub: Element = {
+        value: '',
+        checked: false,
+        disabled: false,
+        hidden: id.endsWith('-settings'),
+        textContent: '',
+        children: [],
+        className: '',
+        dataset: {},
+        type: '',
+        listeners: {},
+        addEventListener(name, fn) {
+          stub.listeners[name] = fn;
+        },
+        reportValidity: () => true,
+        appendChild(child) {
+          stub.children.push(child);
+        },
+        remove: () => undefined,
+      };
+      elements.set(id, stub);
+    }
+    return elements.get(id)!;
+  };
+  const made: Element[] = [];
+  const document = {
+    getElementById: element,
+    createElement: () => {
+      const fresh = element(`made-${made.length}`);
+      made.push(fresh);
+      return fresh;
+    },
+    createTextNode: (text: string) => ({ text }),
+  };
+  const records = [
+    {
+      id: 'a'.repeat(32),
+      owner: '小李',
+      pet: '阿花',
+      friend: true,
+      hosted: 2,
+      visited: 1,
+      firstMet: 0,
+      lastMet: Date.parse('2026-10-24T10:00:00+08:00'),
+      summary: '',
+    },
+    {
+      id: 'b'.repeat(32),
+      owner: '老王',
+      pet: '旺财',
+      friend: false,
+      hosted: 0,
+      visited: 1,
+      firstMet: 0,
+      lastMet: 1_000,
+      summary: '',
+    },
+  ];
+  const requests: Array<{ url: string; options: { method: string; body?: string } }> = [];
+  let confirmAnswer = false;
+  runInNewContext(settingsScript, {
+    URLSearchParams,
+    location: { hash: '#token=process-capability', pathname: '/standalone-ai/' },
+    history: { replaceState: () => undefined },
+    document,
+    confirm: () => confirmAnswer,
+    fetch: async (url: string, options: { method: string; body?: string }) => {
+      requests.push({ url, options });
+      if (url === '/standalone-ai/app-neighbors') {
+        return {
+          ok: true,
+          json: async () => (options.method === 'GET' ? { id: 'abcd1234', neighbors: records } : { ok: true }),
+        };
+      }
+      if (url === '/standalone-ai/settings') return { ok: true, json: async () => ({ hasKey: false }) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(element('neighbors-settings').hidden, false);
+  assert.equal(element('identityId').textContent, 'abcd1234');
+  const rows = element('neighbor-list').children;
+  assert.equal(rows.length, 2);
+  // 行文案：昵称 · 宠物名 · 来过 n 次 / 去过 n 次 · 上次见面（时间格式不卡）
+  const child = (el: Element, n: number): Element => el.children[n] as Element;
+  assert.match(child(rows[0] as Element, 0).textContent, /小李 · 阿花 · 来过 2 次 \/ 去过 1 次 · 上次见面 \d/);
+  const posts = () =>
+    requests
+      .filter((r) => r.url === '/standalone-ai/app-neighbors' && r.options.method === 'POST')
+      .map((r) => JSON.parse(r.options.body ?? '{}'));
+  // 熟人勾选框与「忘掉」：立即生效，不跟整页保存走
+  const box = child(rows[1] as Element, 1);
+  assert.equal(child(box, 0).checked, false);
+  child(box, 0).checked = true;
+  child(box, 0).listeners.change();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(posts()[0], { action: 'friend', id: 'b'.repeat(32), friend: true });
+  child(rows[0] as Element, 2).listeners.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(posts()[1], { action: 'forget', id: 'a'.repeat(32) });
+  // 「全部忘掉」「重置身份」先 confirm；点了取消就不发请求
+  element('neighborsClear').listeners.click();
+  assert.equal(posts().length, 2);
+  confirmAnswer = true;
+  element('neighborsClear').listeners.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(posts()[2], { action: 'clear' });
+  element('identityReset').listeners.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(posts()[3], { action: 'reset-identity' });
 });

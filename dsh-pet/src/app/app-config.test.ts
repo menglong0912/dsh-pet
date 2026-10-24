@@ -96,6 +96,7 @@ test('an older file without offWork / visit still loads, keeping its own values 
       chat: true,
       nickname: '',
       stayMin: 10,
+      autoAdmitFriends: false,
     });
     assert.deepEqual(warnings, []);
     const visit = { ...DEFAULT_APP_CONFIG.visit, enabled: true };
@@ -115,6 +116,28 @@ test('an older file without offWork / visit still loads, keeping its own values 
     utimesSync(path, new Date(), new Date(Date.now() + 1000));
     assert.deepEqual(config().offWork, { enabled: true, time: '17:30', weekdaysOnly: false, leadMin: 10 });
     assert.deepEqual(warnings, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an older visit section without autoAdmitFriends still loads, filling the default (off)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pet-app-config-'));
+  const path = join(dir, 'app-config.json');
+  const warnings: string[] = [];
+  try {
+    const older = {
+      ...DEFAULT_APP_CONFIG,
+      visit: { enabled: true, hosting: true, visiting: true, chat: true, nickname: '小李', stayMin: 10 },
+    };
+    writeFileSync(path, JSON.stringify(older));
+    const config = createAppConfig(path, (m) => warnings.push(m));
+    // 只补 autoAdmitFriends，其余自己设的值不动；补的是 false，升级后不会自动给熟人开门
+    assert.deepEqual(config().visit, { ...older.visit, autoAdmitFriends: false });
+    assert.deepEqual(warnings, []);
+    assert.throws(() =>
+      saveAppConfig(path, { ...DEFAULT_APP_CONFIG, visit: { ...older.visit, autoAdmitFriends: 'yes' } }),
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

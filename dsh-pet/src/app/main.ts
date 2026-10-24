@@ -44,7 +44,7 @@ import { settingsHandler, testHandler } from '../standalone/server';
 import { settingsPage, settingsScript, settingsStyle } from '../standalone/settings-page';
 import type { StandaloneAiService } from '../standalone/ai-provider';
 import { createAppConfig } from './app-config';
-import { appSettingsHandler, createAppRoutes, petSettingsHandler } from './app-routes';
+import { appNeighborsHandler, appSettingsHandler, createAppRoutes, petSettingsHandler } from './app-routes';
 import { removeDiscovery, writeDiscovery } from './discovery';
 import { MENU_OWNER, startAppFeatures } from './features';
 import type { AppFeatures, FeatureElectron } from './features';
@@ -124,6 +124,7 @@ async function boot(): Promise<void> {
     ai,
     appRoutes: createAppRoutes(() => features, log),
     appSettings: appSettingsHandler(appConfigPath, appConfig),
+    appNeighbors: appNeighborsHandler(() => features),
     petSettings: petSettingsHandler(
       () => `http://127.0.0.1:${port}/dsh-pet-7340/config`,
       configPathsFor(packageRoot, dshHomeDir()).userFile,
@@ -252,6 +253,8 @@ interface RouterDeps {
   appRoutes: (req: IncomingMessage, res: ServerResponse, pathname: string) => boolean;
   /** 设置页「陪伴与提醒」一节（/standalone-ai/app-settings，与配置页同一套令牌校验） */
   appSettings: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+  /** 设置页「邻居」一节（/standalone-ai/app-neighbors，同上） */
+  appNeighbors: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   /** 设置页「宠物」一节（/standalone-ai/pet-settings，同上；转给插件的 /config） */
   petSettings: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 }
@@ -300,6 +303,7 @@ function startRouter(
       url.pathname === '/standalone-ai/settings' ||
       url.pathname === '/standalone-ai/test' ||
       url.pathname === '/standalone-ai/app-settings' ||
+      url.pathname === '/standalone-ai/app-neighbors' ||
       url.pathname === '/standalone-ai/pet-settings'
     ) {
       if (!deps.security.authorize(req, res)) return;
@@ -308,9 +312,11 @@ function startRouter(
           ? tester
           : url.pathname === '/standalone-ai/app-settings'
             ? deps.appSettings
-            : url.pathname === '/standalone-ai/pet-settings'
-              ? deps.petSettings
-              : settings;
+            : url.pathname === '/standalone-ai/app-neighbors'
+              ? deps.appNeighbors
+              : url.pathname === '/standalone-ai/pet-settings'
+                ? deps.petSettings
+                : settings;
       void handler(req, res).catch((error: unknown) => {
         log(`配置页接口失败 ${url.pathname}: ${error instanceof Error ? error.message : String(error)}`);
         if (!res.headersSent) rejectRequest(res, 500, '配置页暂时无法处理请求');

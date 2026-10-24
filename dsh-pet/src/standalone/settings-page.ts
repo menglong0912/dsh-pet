@@ -72,9 +72,18 @@ export const settingsPage = `<!doctype html>
 <p id="visiting-note" class="hint">右键「串门」里列出附近的邻居，点了去敲门；附近还没有别的桌宠时显示「附近还没有邻居」。</p>
 <label class="check"><input id="visitChat" type="checkbox" aria-describedby="chat-note">串门时用模型聊天</label>
 <p id="chat-note" class="hint">两只宠物各用自己的人设和模型聊几句；关掉后只说固定的招呼和道别，不调用模型。</p>
+<label class="check"><input id="visitAutoAdmit" type="checkbox" aria-describedby="autoadmit-note">熟人来敲门直接请进</label>
+<p id="autoadmit-note" class="hint">在「邻居」里标成熟人的邻居来敲门时不再等主人点头，直接请进来；只在主人在电脑前时才自动，其余照旧等主人右键应门。</p>
 <div class="pair"><div><label for="visitNickname">邻居看到的昵称</label><input id="visitNickname" type="text" maxlength="12" placeholder="留空用电脑登录名" spellcheck="false"></div>
 <div><label for="visitStayMin">出门做客待多久（分钟）</label><input id="visitStayMin" type="number" min="1" max="60" step="1" value="10"></div></div>
 </div>
+</fieldset>
+<fieldset id="neighbors-settings" hidden><legend>邻居</legend>
+<p class="hint">来玩过的邻居记在本机（最多 50 位，超过丢最久没见的）。这一节的操作点了立即生效，不用按保存。记录只存本机，不出网。</p>
+<div id="neighbor-list"></div>
+<div class="pair"><div><button id="neighborsClear" type="button">全部忘掉</button></div>
+<div><button id="identityReset" type="button">重置我的串门身份</button></div></div>
+<p class="hint" id="identity-note">本机的串门身份是 <code id="identityId"></code>…。重置后大家都不认得这台电脑了，要重新串门、重新标熟人；串门进行中不能重置。局域网里有人做中间人时防不住冒充，别把这个身份当唯一凭据。</p>
 </fieldset>
 <footer><p id="privacy">所有配置与密钥仅保存在当前机器。<br>关闭 AI 后，桌宠仍可正常显示、移动与互动。</p><button id="save" type="submit" disabled>保存到本机</button></footer>
 <p id="status" role="status" aria-live="polite">正在读取本机设置…</p>
@@ -86,6 +95,7 @@ export const settingsStyle = `
 main{max-width:720px;margin:48px auto;padding:0 24px 32px}header{padding:0 12px 28px}.fish{display:block;font:700 29px/1.3 Georgia,serif;color:var(--blue);letter-spacing:2px;margin-bottom:24px}.local{font-size:13px;color:var(--muted);margin:0 0 10px}h1{font-size:32px;line-height:1.3;letter-spacing:-1px;margin:0 0 16px;font-weight:700}.intro{margin:0;color:var(--muted)}
 form{background:var(--paper);border:1px solid var(--line);border-radius:16px 16px 6px 6px;padding:28px 32px 20px}fieldset{padding:0 0 28px;margin:0 0 24px;border:0;border-bottom:1px solid var(--line);min-width:0}legend{font-size:19px;font-weight:700;margin-bottom:18px;padding:0}label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}input:not([type=checkbox]),select,textarea{display:block;width:100%;min-height:44px;border:1px solid #a5bdcb;border-radius:6px;background:#fff;color:var(--ink);padding:9px 12px;font:inherit;font-size:15px}input::placeholder,textarea::placeholder{color:#6a7e8b}textarea{resize:vertical;line-height:1.6}code{font-size:12px;word-break:break-all}input[type=checkbox]{accent-color:var(--blue);width:18px;height:18px;flex-shrink:0;margin:0}.check{display:flex;align-items:center;gap:10px;min-height:32px;cursor:pointer}.enabled{margin-top:24px}.clear{font-weight:400;color:var(--muted);font-size:13px}.hint{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}.key-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}.key-heading label{margin:0 0 6px}.key-heading .hint{margin:0 0 6px}.notice{font-size:13px;color:#704b13;background:#fff7e7;border-left:3px solid #c18e36;margin:12px 0 16px;padding:12px 14px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}.sub{margin:10px 0 0 8px;padding-left:20px;border-left:2px solid var(--line)}footer{display:flex;align-items:center;justify-content:space-between;gap:18px}footer p{font-size:12px;color:var(--muted);margin:0}button{border:0;border-radius:7px;min-height:44px;padding:10px 20px;background:var(--blue);color:#fff;font:600 15px/1.5 inherit;white-space:nowrap;cursor:pointer}button:hover{background:#0b4e73}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #3a94c4;outline-offset:3px}#status{font-size:13px;min-height:24px;margin:18px 0 0;color:var(--blue)}#status[data-error=true]{color:#a13b30}
 .test-row{display:flex;align-items:center;gap:14px;margin:20px 0 6px;flex-wrap:wrap}#test-btn{background:#fff;color:var(--blue);border:1.5px solid var(--blue);min-height:38px;padding:6px 18px;font-size:14px;border-radius:6px;cursor:pointer;font-weight:600}#test-btn:hover{background:#edf5fa}#test-btn:disabled{opacity:.6;cursor:wait}.test-result{font-size:13px;line-height:1.5;min-height:22px;flex:1 1 200px}.test-success{color:#1a7f37;font-weight:600}.test-error{color:#cf222e}.reply-preview{display:block;color:var(--muted);font-weight:normal;font-size:12px;margin-top:4px;word-break:break-all}
+#neighbor-list:empty::after{content:'还没有记下过邻居，开着串门和别人来往过就会出现在这里。';display:block;font-size:12px;color:var(--muted);margin-top:8px}.neighbor-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 0;border-bottom:1px dashed var(--line)}.neighbor-row>span{flex:1;min-width:200px;font-size:14px}.neighbor-row .check{margin:0;font-weight:400;font-size:13px}.neighbor-row button{background:#fff;color:var(--blue);border:1px solid var(--blue);min-height:34px;padding:4px 14px;font-size:13px}.neighbor-row button:hover{background:#edf5fa}
 @media(max-width:560px){main{margin:24px auto;padding:0 14px 24px}header{padding:0 8px 24px}h1{font-size:28px}form{padding:24px 20px 16px}.pair{grid-template-columns:1fr;gap:0}footer{align-items:stretch;flex-direction:column}button{width:100%}.fish{margin-bottom:18px}}
 `;
 
@@ -122,7 +132,7 @@ export const settingsScript = `
   // 「陪伴与提醒」「局域网串门」只有独立应用有（/standalone-ai/app-settings）；CLI 里是 404，这两节保持隐藏
   const appSections = [get('app-settings'), get('visit-settings')];
   // 串门的细节开关挂在总开关下面：总开关关着时置灰（值照常保存，再打开时还是原来的选择）
-  const visitDetails = ['visitHosting', 'visitVisiting', 'visitChat', 'visitNickname', 'visitStayMin'];
+  const visitDetails = ['visitHosting', 'visitVisiting', 'visitChat', 'visitAutoAdmit', 'visitNickname', 'visitStayMin'];
   function syncVisitDetails() { for (const id of visitDetails) get(id).disabled = !get('visitEnabled').checked; }
   get('visitEnabled').addEventListener('change', syncVisitDetails);
   let appAvailable = false;
@@ -153,10 +163,69 @@ export const settingsScript = `
     get('visitHosting').checked = data.visit.hosting === true;
     get('visitVisiting').checked = data.visit.visiting === true;
     get('visitChat').checked = data.visit.chat === true;
+    get('visitAutoAdmit').checked = data.visit.autoAdmitFriends === true;
     get('visitNickname').value = data.visit.nickname;
     get('visitStayMin').value = String(data.visit.stayMin);
     syncVisitDetails();
   }
+  // 「邻居」一节（/standalone-ai/app-neighbors）：邻居簿与串门身份；这里点的操作立即生效，不跟整页的保存按钮走
+  async function neighborsRequest(method, body) {
+    const response = await fetch('/standalone-ai/app-neighbors', {
+      method, credentials: 'omit', cache: 'no-store', redirect: 'error',
+      headers: { 'X-DSH-Pet-Token': token, ...(body ? {'Content-Type': 'application/json'} : {}) },
+      ...(body ? {body: JSON.stringify(body)} : {})
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error || '邻居操作没成功，请稍后再试。');
+    }
+    return response.json();
+  }
+  // 邻居的昵称是对方电脑发来的文本：显示一律用 textContent 拼节点，不拼进 HTML
+  function renderNeighbors(data) {
+    get('identityId').textContent = data.id;
+    const list = get('neighbor-list');
+    list.textContent = '';
+    for (const record of data.neighbors) {
+      const row = document.createElement('div');
+      row.className = 'neighbor-row';
+      const label = document.createElement('span');
+      label.textContent = record.owner + ' · ' + record.pet + ' · 来过 ' + record.hosted + ' 次 / 去过 ' +
+        record.visited + ' 次 · 上次见面 ' + new Date(record.lastMet).toLocaleString();
+      row.appendChild(label);
+      const friend = document.createElement('label');
+      friend.className = 'check';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = record.friend === true;
+      box.addEventListener('change', () => {
+        void neighborsRequest('POST', {action: 'friend', id: record.id, friend: box.checked}).catch(e => message(e.message, true));
+      });
+      friend.appendChild(box);
+      friend.appendChild(document.createTextNode('熟人'));
+      row.appendChild(friend);
+      const forget = document.createElement('button');
+      forget.type = 'button';
+      forget.textContent = '忘掉';
+      forget.addEventListener('click', () => {
+        void neighborsRequest('POST', {action: 'forget', id: record.id}).then(() => row.remove()).catch(e => message(e.message, true));
+      });
+      row.appendChild(forget);
+      list.appendChild(row);
+    }
+  }
+  function loadNeighbors() {
+    return neighborsRequest('GET').then(data => { if (data) renderNeighbors(data); }).catch(e => message(e.message, true));
+  }
+  get('neighborsClear').addEventListener('click', () => {
+    if (!confirm('忘掉全部邻居？熟人标记也会一起没了。')) return;
+    void neighborsRequest('POST', {action: 'clear'}).then(loadNeighbors).catch(e => message(e.message, true));
+  });
+  get('identityReset').addEventListener('click', () => {
+    if (!confirm('重置串门身份？重置后别的电脑都不认得这台电脑了，要重新串门、重新标熟人。')) return;
+    void neighborsRequest('POST', {action: 'reset-identity'}).then(loadNeighbors).catch(e => message(e.message, true));
+  });
   // 「宠物」一节改插件配置（main-config.jsonc）里的第一只桌面宠物：/standalone-ai/pet-settings 转给插件的 /config，
   // 其余宠物与没在这里的字段原样保留；只有独立应用有，CLI 里是 404
   let petConfig = null;
@@ -304,7 +373,8 @@ export const settingsScript = `
           offWork: { enabled: get('offWorkEnabled').checked, time: get('offWorkTime').value, weekdaysOnly: get('offWorkWeekdaysOnly').checked, leadMin: num('offWorkLeadMin') },
           visit: {
             enabled: get('visitEnabled').checked, hosting: get('visitHosting').checked, visiting: get('visitVisiting').checked,
-            chat: get('visitChat').checked, nickname: get('visitNickname').value.trim(), stayMin: num('visitStayMin')
+            chat: get('visitChat').checked, autoAdmitFriends: get('visitAutoAdmit').checked,
+            nickname: get('visitNickname').value.trim(), stayMin: num('visitStayMin')
           }
         }));
       }
@@ -322,6 +392,8 @@ export const settingsScript = `
   request('GET').then(data => { populate(data); save.disabled = false; message('设置只在本机保存。'); })
     .catch(error => message(error.message, true));
   appRequest('GET').then(data => { if (data) { populateApp(data); for (const section of appSections) section.hidden = false; appAvailable = true; } })
+    .catch(error => message(error.message, true));
+  neighborsRequest('GET').then(data => { if (data) { renderNeighbors(data); get('neighbors-settings').hidden = false; } })
     .catch(error => message(error.message, true));
   petRequest('GET').then(data => { if (data && populatePet(data)) get('pet-settings').hidden = false; })
     .catch(error => message(error.message, true));

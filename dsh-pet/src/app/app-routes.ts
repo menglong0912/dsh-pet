@@ -11,6 +11,7 @@
  * 端口每次启动随机，写在 `$DSH_HOME/dsh-pet/app.json`（见 discovery.ts）。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { z } from 'zod';
 import { saveAppConfig } from './app-config';
 import type { AppConfig } from './app-config';
 import type { AppFeatures } from './features';
@@ -18,6 +19,15 @@ import { guestPage } from './visit-windows';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SAY_CHARS = 200;
+
+/** 「邻居」一节 POST 的参数（id 与邻居簿里身份 id 同一口径） */
+const NEIGHBOR_ID = z.string().min(8).max(64);
+const neighborActionSchema = z.union([
+  z.object({ action: z.literal('friend'), id: NEIGHBOR_ID, friend: z.boolean() }),
+  z.object({ action: z.literal('forget'), id: NEIGHBOR_ID }),
+  z.object({ action: z.literal('clear') }),
+  z.object({ action: z.literal('reset-identity') }),
+]);
 
 /**
  * @param features 功能编排（app ready 之前为 null：此时一律 503）
@@ -113,6 +123,45 @@ export function appSettingsHandler(
       return send(res, 400, { error: '陪伴与提醒的设置不在允许范围内' });
     }
     send(res, 200, next);
+  };
+}
+
+/**
+ * 设置页「邻居」一节的读写（`/standalone-ai/app-neighbors`）：邻居簿（见面记录与熟人标记）与串门身份。
+ * 同 app-settings，挂在配置页那组令牌校验的路由下；只有独立应用注册这条路由，CLI 里是 404，
+ * 设置页据此不显示这一节。邻居数据是对方发来的昵称 / 宠物名，进页面前已在邻居簿里过 cleanName。
+ */
+export function appNeighborsHandler(
+  features: () => AppFeatures | null,
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  return async (req, res) => {
+    const current = features();
+    if (!current) return send(res, 503, { error: '桌宠还在启动' });
+    if (req.method === 'GET') {
+      // 身份 id 只回前 8 位：够认出「还是这台电脑」，也够当回执显示
+      return send(res, 200, { id: current.neighbors.identityId().slice(0, 8), neighbors: current.neighbors.list() });
+    }
+    if (req.method !== 'POST') return send(res, 405, { error: '仅支持 GET 或 POST' });
+    const body = await readJson(req);
+    const action = neighborActionSchema.safeParse(body);
+    if (!action.success) return send(res, 400, { error: '邻居操作的参数不对' });
+    switch (action.data.action) {
+      case 'friend':
+        current.neighbors.setFriend(action.data.id, action.data.friend);
+        break;
+      case 'forget':
+        current.neighbors.forget(action.data.id);
+        break;
+      case 'clear':
+        current.neighbors.clear();
+        break;
+      case 'reset-identity':
+        // 串门进行中不让换身份：换了，在外做客的宠物和家里的客人就都对不上号了
+        if (!current.neighbors.resetIdentity())
+          return send(res, 409, { error: '串门进行中，等宠物回家、送走客人再重置' });
+        break;
+    }
+    send(res, 200, { ok: true });
   };
 }
 
