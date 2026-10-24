@@ -32,6 +32,16 @@ export function configuredModel(
   return provider && model ? { provider, model } : undefined;
 }
 
+/** 生成时要先试的配置模型：独立模式（standalone）只有设置页配的那一个模型，配置里 DSH 时代留下的
+ *  whisperModel / chatModel 不再先试（试了只会失败一次再回落到当前模型）→ undefined；DSH 内同 configuredModel。 */
+export function preferredModel(
+  conf: Record<string, unknown> | undefined,
+  key: 'whisperModel' | 'chatModel',
+  standalone: boolean,
+): ModelRef | undefined {
+  return standalone ? undefined : configuredModel(conf, key);
+}
+
 /** 当前对话的模型（agentDefaultModel.currentSelection）；未配置 / 抛错 → undefined */
 export function currentModel(ctx: { agentDefaultModel?: { currentSelection(): ModelRef } }): ModelRef | undefined {
   try {

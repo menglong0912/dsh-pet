@@ -102,8 +102,10 @@ test('settings browser script strips fragment, keeps key write-only and explicit
     document: { getElementById: element },
     fetch: async (url: string, options: { method: string; body?: string; headers: Record<string, string> }) => {
       requests.push({ url, options });
-      // CLI 没有「陪伴与提醒」一节：app-settings 是 404，页面既不显示也不保存它
-      if (url === '/standalone-ai/app-settings') return { ok: false, status: 404, json: async () => ({}) };
+      // CLI 没有「陪伴与提醒」「宠物」两节：app-settings / pet-settings 是 404，页面既不显示也不保存它们
+      if (url === '/standalone-ai/app-settings' || url === '/standalone-ai/pet-settings') {
+        return { ok: false, status: 404, json: async () => ({}) };
+      }
       return {
         ok: true,
         json: async () => ({
@@ -136,18 +138,20 @@ test('settings browser script strips fragment, keeps key write-only and explicit
   assert.equal(JSON.parse(saves()[2].options.body ?? '{}').clearApiKey, true);
   assert.equal(JSON.parse(saves()[2].options.body ?? '{}').enabled, false);
   assert.equal(element('apiKey').disabled, false);
-  // 只碰本机设置接口（AI 设置 + 应用那一节），且都带令牌；CLI 下应用那一节只探测一次、不保存
+  // 只碰本机设置接口（AI 设置 + 应用的两节），且都带令牌；CLI 下应用的两节只探测一次、不保存
   assert.ok(
     requests.every(
       ({ url, options }) =>
-        ['/standalone-ai/settings', '/standalone-ai/app-settings'].includes(url) &&
+        ['/standalone-ai/settings', '/standalone-ai/app-settings', '/standalone-ai/pet-settings'].includes(url) &&
         options.headers['X-DSH-Pet-Token'] === 'process-capability',
     ),
   );
-  assert.deepEqual(
-    requests.filter(({ url }) => url === '/standalone-ai/app-settings').map(({ options }) => options.method),
-    ['GET'],
-  );
+  for (const section of ['/standalone-ai/app-settings', '/standalone-ai/pet-settings']) {
+    assert.deepEqual(
+      requests.filter(({ url }) => url === section).map(({ options }) => options.method),
+      ['GET'],
+    );
+  }
 });
 
 test('settings browser script shows and saves the app section when the app serves it', async () => {
@@ -237,4 +241,112 @@ test('settings browser script shows and saves the app section when the app serve
     offWork: { enabled: true, time: '17:30', weekdaysOnly: true, leadMin: 15 },
     visit: { enabled: true, hosting: false, visiting: true, chat: false, nickname: '小王', stayMin: 20 },
   });
+});
+
+test('settings browser script edits the first desktop pet and shows one automatic-whisper switch', async () => {
+  const { runInNewContext } = await import('node:vm');
+  type Element = Record<string, unknown> & {
+    value: string;
+    checked: boolean;
+    hidden: boolean;
+    textContent: string;
+    listeners: Record<string, (event?: unknown) => Promise<void> | void>;
+  };
+  const elements = new Map<string, Element>();
+  const element = (id: string): Element => {
+    if (!elements.has(id))
+      elements.set(id, {
+        value: '',
+        checked: false,
+        disabled: false,
+        hidden: id.endsWith('-settings'),
+        textContent: '',
+        dataset: {},
+        listeners: {},
+        addEventListener(name: string, fn: () => void) {
+          (this as Element).listeners[name] = fn;
+        },
+        reportValidity: () => true,
+      });
+    return elements.get(id)!;
+  };
+  const position = { corner: 'top-left', marginX: 24, marginY: 100 };
+  const webPet = { id: 'web1', name: '网页', size: 300, display: 'web', balanceEnabled: false, position };
+  const config = {
+    main: {
+      whisperPrompt: '默认人设',
+      whisperImageEnabled: true,
+      chatImageEnabled: false,
+      chatMemoryRounds: 5,
+      pets: [
+        webPet,
+        {
+          id: 'main',
+          name: '吃白饭的',
+          size: 500,
+          display: 'desktop',
+          balanceEnabled: false,
+          whisperEnabled: false,
+          workStatusEnabled: true,
+          fixedEnabled: false,
+          position,
+        },
+      ],
+    },
+  };
+  const file = '/data/dsh-pet/main-config.jsonc';
+  const requests: Array<{ url: string; options: { method: string; body?: string } }> = [];
+  runInNewContext(settingsScript, {
+    URLSearchParams,
+    location: { hash: '#token=process-capability', pathname: '/standalone-ai/' },
+    history: { replaceState: () => undefined },
+    document: { getElementById: element },
+    fetch: async (url: string, options: { method: string; body?: string }) => {
+      requests.push({ url, options });
+      if (url === '/standalone-ai/pet-settings') return { ok: true, json: async () => ({ config, file }) };
+      if (url === '/standalone-ai/app-settings') return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: true, json: async () => ({ hasKey: true, enabled: true, automaticWhispers: true }) };
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(element('pet-settings').hidden, false);
+  // 改的是第一只桌面宠物，不是列表里的第一只
+  assert.equal(element('petName').value, '吃白饭的');
+  assert.equal(element('petSize').value, '500');
+  assert.equal(element('petPersona').value, '', '没有自己的人设：框里留空，灰字是默认人设');
+  assert.equal(element('petPersona').placeholder, '默认人设');
+  assert.equal(element('chatMemoryRounds').value, '5');
+  assert.equal(element('petConfigFile').textContent, file);
+  // 设置里开着自动碎碎念，但这只宠物的 whisperEnabled 关着：合起来就是没开
+  assert.equal(element('automaticWhispers').checked, false);
+
+  element('automaticWhispers').checked = true;
+  element('petPersona').value = '傲娇的小女仆';
+  element('petFixed').checked = true;
+  element('chatMemoryRounds').value = '8';
+  await element('settings').listeners.submit({ preventDefault() {} });
+  const posts = (url: string) =>
+    requests.filter((r) => r.url === url && r.options.method === 'POST').map((r) => JSON.parse(r.options.body ?? '{}'));
+  assert.equal(posts('/standalone-ai/settings')[0].automaticWhispers, true);
+  assert.deepEqual(posts('/standalone-ai/pet-settings')[0], {
+    pets: [
+      webPet,
+      {
+        ...config.main.pets[1],
+        whisperPrompt: '傲娇的小女仆',
+        fixedEnabled: true,
+        // 打开自动碎碎念时顺带把这只宠物的碎碎念打开
+        whisperEnabled: true,
+      },
+    ],
+    whisperImageEnabled: true,
+    chatImageEnabled: false,
+    chatMemoryRounds: 8,
+  });
+  assert.equal(element('status').textContent, '已保存到本机。');
+
+  element('petSize').value = '600';
+  await element('settings').listeners.submit({ preventDefault() {} });
+  assert.equal(posts('/standalone-ai/pet-settings')[1].pets[1].size, 600);
+  assert.match(String(element('status').textContent), /桌宠正在重启/);
 });

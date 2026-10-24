@@ -116,6 +116,43 @@ export function appSettingsHandler(
   };
 }
 
+/**
+ * 设置页「宠物」一节的读写（`/standalone-ai/pet-settings`）：转给插件自己的 GET / PUT /dsh-pet-7340/config，
+ * 不另写一套校验与合并——插件那边只改请求体带了的字段，main-config.jsonc 里手改的其余内容原样保留。
+ * 设置页是网页，而插件路由拒绝带 Origin 的请求（防本机网页乱调），所以由这里先过令牌校验、再在本进程里代发。
+ * 同 app-settings，只有独立应用注册；CLI 里是 404，设置页据此不显示这一节。
+ * @param configUrl 插件配置接口的完整地址（端口启动后才知道，所以每次现取）
+ * @param userFile main-config.jsonc 的路径（设置页提示「更多选项改这个文件」）
+ */
+export function petSettingsHandler(
+  configUrl: () => string,
+  userFile: string,
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  return async (req, res) => {
+    if (req.method !== 'GET' && req.method !== 'POST') return send(res, 405, { error: '仅支持 GET 或 POST' });
+    if (
+      req.method === 'POST' &&
+      req.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json'
+    ) {
+      return send(res, 415, { error: '请使用 JSON 保存设置' });
+    }
+    const body = req.method === 'POST' ? await readJson(req) : undefined;
+    if (req.method === 'POST' && !body) return send(res, 400, { error: '宠物设置格式不对' });
+    const response = await fetch(configUrl(), {
+      method: req.method === 'POST' ? 'PUT' : 'GET',
+      ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (response.status === 409) return send(res, 409, { error: `宠物配置文件解析不了，先修好再保存：${userFile}` });
+    if (!response.ok) {
+      return send(res, req.method === 'POST' ? 400 : 502, {
+        error: req.method === 'POST' ? '宠物设置不在允许范围内' : '宠物设置读取失败',
+      });
+    }
+    send(res, 200, { config: (await response.json()) as unknown, file: userFile });
+  };
+}
+
 /** 读 JSON 对象体；空体按 {}；超限 / 非对象 → undefined */
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
   // 事件式读取（与 standalone/server.ts 同法）：tsconfig 的 lib 不认 Readable 的 async iterator

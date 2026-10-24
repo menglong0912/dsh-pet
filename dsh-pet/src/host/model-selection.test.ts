@@ -13,7 +13,14 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { configuredModel, currentModel, modelCandidates, modelLabel, type ModelRef } from './model-selection.ts';
+import {
+  configuredModel,
+  currentModel,
+  modelCandidates,
+  modelLabel,
+  preferredModel,
+  type ModelRef,
+} from './model-selection.ts';
 
 /** 造一个宿主 ctx：currentSelection 返回给定选择（undefined = 未配置，'throw' = 抛错） */
 function ctxOf(sel: ModelRef | undefined | 'throw'): { agentDefaultModel: { currentSelection(): ModelRef } } {
@@ -26,6 +33,17 @@ function ctxOf(sel: ModelRef | undefined | 'throw'): { agentDefaultModel: { curr
     },
   };
 }
+
+describe('preferredModel —— 独立模式不先试配置里的模型', () => {
+  const conf = { whisperModel: { provider: 'deepseek', model: 'deepseek-chat' } };
+  test('DSH 内：同 configuredModel，配置的模型优先', () => {
+    assert.deepEqual(preferredModel(conf, 'whisperModel', false), { provider: 'deepseek', model: 'deepseek-chat' });
+  });
+  test('独立模式：只有设置页那一个模型，DSH 时代留下的 whisperModel / chatModel 一律不看', () => {
+    assert.equal(preferredModel(conf, 'whisperModel', true), undefined);
+    assert.equal(preferredModel({ chatModel: conf.whisperModel }, 'chatModel', true), undefined);
+  });
+});
 
 describe('configuredModel —— 条目配置里的 whisperModel / chatModel', () => {
   test('两个字段都非空 → 该选择', () => {

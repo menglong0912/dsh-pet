@@ -26,6 +26,24 @@ export const settingsPage = `<!doctype html>
 <div><label for="maxTokens">单次输出上限（tokens）</label><input id="maxTokens" type="number" min="128" max="4096" step="1" value="1024" required></div></div>
 <p class="hint">间隔至少 60 秒，默认 300 秒。输出上限越小，单次回复越简短。</p>
 </fieldset>
+<fieldset id="pet-settings" hidden><legend>宠物</legend>
+<div class="pair"><div><label for="petName">名字</label><input id="petName" type="text" maxlength="24" required spellcheck="false"></div>
+<div><label for="petSize">大小（宽度 px）</label><input id="petSize" type="number" min="100" max="1500" step="1" value="500" required></div></div>
+<p class="hint">改名字或大小后桌宠会重启一下，之后请从右键重新打开设置。</p>
+<label for="petPersona">人设</label><textarea id="petPersona" rows="4" maxlength="2000" aria-describedby="persona-note"></textarea>
+<p id="persona-note" class="hint">碎碎念、对话、看屏幕吐槽、串门都按它说话。留空就用默认人设（框里的灰字）。</p>
+<label class="check"><input id="petWorkStatus" type="checkbox" aria-describedby="workstatus-note">头顶状态</label>
+<p id="workstatus-note" class="hint">头顶显示「Claude 等你确认」「在 X 家做客」这类状态，并换成对应的动作。</p>
+<label class="check"><input id="petBalance" type="checkbox" aria-describedby="balance-note">余额动画</label>
+<p id="balance-note" class="hint">定时查余额、按档位换动作（独立模式的余额是随机数）；右键「查看余额」不受这个开关影响。</p>
+<label class="check"><input id="petFixed" type="checkbox" aria-describedby="fixed-note">待在原地</label>
+<p id="fixed-note" class="hint">不再自己转身、走开，只在原地待机和做小动作。</p>
+<label class="check"><input id="whisperImageEnabled" type="checkbox">碎碎念、看屏幕吐槽时配表情包</label>
+<label class="check"><input id="chatImageEnabled" type="checkbox">对话时配表情包</label>
+<label for="chatMemoryRounds">对话记住最近几轮</label><input id="chatMemoryRounds" type="number" min="0" max="50" step="1" value="5" aria-describedby="memory-note">
+<p id="memory-note" class="hint">一问一答算一轮，带进每次对话；越多越费 token，0 = 不记。</p>
+<p class="hint">多只宠物时这里改的是第一只桌面宠物。物理手感、字体、表情包、贴哪个角等更多选项在 <code id="petConfigFile"></code> 里，改完右键「重载配置」。</p>
+</fieldset>
 <fieldset id="app-settings" hidden><legend>陪伴与提醒</legend>
 <label class="check"><input id="screenEnabled" type="checkbox" aria-describedby="screen-note">定时看屏幕吐槽</label>
 <p id="screen-note" class="hint">只在上面的接口是本机地址（127.0.0.1 / localhost）时生效，截图只发给本机模型；离开电脑或一分钟没碰键鼠时不看。开着自动碎碎念时，到点的那一句碎碎念换成看屏幕，两者不会互相顶掉。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
@@ -66,7 +84,7 @@ export const settingsStyle = `
 :root{color-scheme:light;--ink:#203b4b;--muted:#526a78;--blue:#12618b;--line:#cbdce5;--paper:#fff;--water:#edf5fa}
 *{box-sizing:border-box}body{margin:0;background:var(--water);color:var(--ink);font:16px/1.6 "Microsoft YaHei UI","PingFang SC",sans-serif}
 main{max-width:720px;margin:48px auto;padding:0 24px 32px}header{padding:0 12px 28px}.fish{display:block;font:700 29px/1.3 Georgia,serif;color:var(--blue);letter-spacing:2px;margin-bottom:24px}.local{font-size:13px;color:var(--muted);margin:0 0 10px}h1{font-size:32px;line-height:1.3;letter-spacing:-1px;margin:0 0 16px;font-weight:700}.intro{margin:0;color:var(--muted)}
-form{background:var(--paper);border:1px solid var(--line);border-radius:16px 16px 6px 6px;padding:28px 32px 20px}fieldset{padding:0 0 28px;margin:0 0 24px;border:0;border-bottom:1px solid var(--line);min-width:0}legend{font-size:19px;font-weight:700;margin-bottom:18px;padding:0}label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}input:not([type=checkbox]),select{display:block;width:100%;min-height:44px;border:1px solid #a5bdcb;border-radius:6px;background:#fff;color:var(--ink);padding:9px 12px;font:inherit;font-size:15px}input::placeholder{color:#6a7e8b}input[type=checkbox]{accent-color:var(--blue);width:18px;height:18px;flex-shrink:0;margin:0}.check{display:flex;align-items:center;gap:10px;min-height:32px;cursor:pointer}.enabled{margin-top:24px}.clear{font-weight:400;color:var(--muted);font-size:13px}.hint{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}.key-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}.key-heading label{margin:0 0 6px}.key-heading .hint{margin:0 0 6px}.notice{font-size:13px;color:#704b13;background:#fff7e7;border-left:3px solid #c18e36;margin:12px 0 16px;padding:12px 14px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}.sub{margin:10px 0 0 8px;padding-left:20px;border-left:2px solid var(--line)}footer{display:flex;align-items:center;justify-content:space-between;gap:18px}footer p{font-size:12px;color:var(--muted);margin:0}button{border:0;border-radius:7px;min-height:44px;padding:10px 20px;background:var(--blue);color:#fff;font:600 15px/1.5 inherit;white-space:nowrap;cursor:pointer}button:hover{background:#0b4e73}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #3a94c4;outline-offset:3px}#status{font-size:13px;min-height:24px;margin:18px 0 0;color:var(--blue)}#status[data-error=true]{color:#a13b30}
+form{background:var(--paper);border:1px solid var(--line);border-radius:16px 16px 6px 6px;padding:28px 32px 20px}fieldset{padding:0 0 28px;margin:0 0 24px;border:0;border-bottom:1px solid var(--line);min-width:0}legend{font-size:19px;font-weight:700;margin-bottom:18px;padding:0}label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}input:not([type=checkbox]),select,textarea{display:block;width:100%;min-height:44px;border:1px solid #a5bdcb;border-radius:6px;background:#fff;color:var(--ink);padding:9px 12px;font:inherit;font-size:15px}input::placeholder,textarea::placeholder{color:#6a7e8b}textarea{resize:vertical;line-height:1.6}code{font-size:12px;word-break:break-all}input[type=checkbox]{accent-color:var(--blue);width:18px;height:18px;flex-shrink:0;margin:0}.check{display:flex;align-items:center;gap:10px;min-height:32px;cursor:pointer}.enabled{margin-top:24px}.clear{font-weight:400;color:var(--muted);font-size:13px}.hint{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}.key-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}.key-heading label{margin:0 0 6px}.key-heading .hint{margin:0 0 6px}.notice{font-size:13px;color:#704b13;background:#fff7e7;border-left:3px solid #c18e36;margin:12px 0 16px;padding:12px 14px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}.sub{margin:10px 0 0 8px;padding-left:20px;border-left:2px solid var(--line)}footer{display:flex;align-items:center;justify-content:space-between;gap:18px}footer p{font-size:12px;color:var(--muted);margin:0}button{border:0;border-radius:7px;min-height:44px;padding:10px 20px;background:var(--blue);color:#fff;font:600 15px/1.5 inherit;white-space:nowrap;cursor:pointer}button:hover{background:#0b4e73}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #3a94c4;outline-offset:3px}#status{font-size:13px;min-height:24px;margin:18px 0 0;color:var(--blue)}#status[data-error=true]{color:#a13b30}
 .test-row{display:flex;align-items:center;gap:14px;margin:20px 0 6px;flex-wrap:wrap}#test-btn{background:#fff;color:var(--blue);border:1.5px solid var(--blue);min-height:38px;padding:6px 18px;font-size:14px;border-radius:6px;cursor:pointer;font-weight:600}#test-btn:hover{background:#edf5fa}#test-btn:disabled{opacity:.6;cursor:wait}.test-result{font-size:13px;line-height:1.5;min-height:22px;flex:1 1 200px}.test-success{color:#1a7f37;font-weight:600}.test-error{color:#cf222e}.reply-preview{display:block;color:var(--muted);font-weight:normal;font-size:12px;margin-top:4px;word-break:break-all}
 @media(max-width:560px){main{margin:24px auto;padding:0 14px 24px}header{padding:0 8px 24px}h1{font-size:28px}form{padding:24px 20px 16px}.pair{grid-template-columns:1fr;gap:0}footer{align-items:stretch;flex-direction:column}button{width:100%}.fish{margin-bottom:18px}}
 `;
@@ -96,6 +114,11 @@ export const settingsScript = `
     }
     return response.json();
   }
+  // 自动碎碎念只有一个开关：独立模式要设置里开着、且宠物配置里这只宠物的 whisperEnabled 也开着才会说；
+  // 两边合起来显示，保存时开着就顺带把这只宠物的 whisperEnabled 打开（见下面「宠物」一节）
+  let aiWhispers = false;
+  let petWhispers = true;
+  function syncWhispers() { get('automaticWhispers').checked = aiWhispers && petWhispers; }
   // 「陪伴与提醒」「局域网串门」只有独立应用有（/standalone-ai/app-settings）；CLI 里是 404，这两节保持隐藏
   const appSections = [get('app-settings'), get('visit-settings')];
   // 串门的细节开关挂在总开关下面：总开关关着时置灰（值照常保存，再打开时还是原来的选择）
@@ -134,12 +157,68 @@ export const settingsScript = `
     get('visitStayMin').value = String(data.visit.stayMin);
     syncVisitDetails();
   }
+  // 「宠物」一节改插件配置（main-config.jsonc）里的第一只桌面宠物：/standalone-ai/pet-settings 转给插件的 /config，
+  // 其余宠物与没在这里的字段原样保留；只有独立应用有，CLI 里是 404
+  let petConfig = null;
+  async function petRequest(method, body) {
+    const response = await fetch('/standalone-ai/pet-settings', {
+      method, credentials: 'omit', cache: 'no-store', redirect: 'error',
+      headers: { 'X-DSH-Pet-Token': token, ...(body ? {'Content-Type': 'application/json'} : {}) },
+      ...(body ? {body: JSON.stringify(body)} : {})
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error || (body ? '宠物设置未保存，请检查名字和数值范围。' : '宠物设置读取失败。'));
+    }
+    return response.json();
+  }
+  function targetPet(config) {
+    const pets = config && config.main && Array.isArray(config.main.pets) ? config.main.pets : [];
+    return pets.find(pet => pet.display === 'desktop' || pet.display === 'both') || pets[0] || null;
+  }
+  function populatePet(data) {
+    const pet = targetPet(data.config);
+    if (!pet) return false;
+    petConfig = data.config;
+    get('petName').value = pet.name || pet.id;
+    get('petSize').value = String(pet.size);
+    get('petPersona').value = pet.whisperPrompt || '';
+    get('petPersona').placeholder = petConfig.main.whisperPrompt || '';
+    get('petWorkStatus').checked = pet.workStatusEnabled === true;
+    get('petBalance').checked = pet.balanceEnabled === true;
+    get('petFixed').checked = pet.fixedEnabled === true;
+    get('whisperImageEnabled').checked = petConfig.main.whisperImageEnabled === true;
+    get('chatImageEnabled').checked = petConfig.main.chatImageEnabled === true;
+    get('chatMemoryRounds').value = String(petConfig.main.chatMemoryRounds);
+    get('petConfigFile').textContent = data.file;
+    petWhispers = pet.whisperEnabled === true;
+    syncWhispers();
+    return true;
+  }
+  function petBody() {
+    const target = targetPet(petConfig);
+    return {
+      pets: petConfig.main.pets.map(pet => pet !== target ? pet : {
+        ...pet,
+        name: get('petName').value.trim(), size: num('petSize'), whisperPrompt: get('petPersona').value,
+        workStatusEnabled: get('petWorkStatus').checked, balanceEnabled: get('petBalance').checked,
+        fixedEnabled: get('petFixed').checked,
+        // 关掉时不动它：设置里的开关已经拦住了自动碎碎念
+        whisperEnabled: get('automaticWhispers').checked || pet.whisperEnabled === true
+      }),
+      whisperImageEnabled: get('whisperImageEnabled').checked, chatImageEnabled: get('chatImageEnabled').checked,
+      chatMemoryRounds: num('chatMemoryRounds')
+    };
+  }
   const num = id => Number(get(id).value);
   function populate(data) {
     for (const id of ['protocol','baseUrl','model','whisperIntervalSec','maxTokens']) {
       if (data[id] !== undefined) get(id).value = String(data[id]);
     }
-    for (const id of ['enabled','automaticWhispers','disableThinking']) get(id).checked = data[id] === true;
+    for (const id of ['enabled','disableThinking']) get(id).checked = data[id] === true;
+    aiWhispers = data.automaticWhispers === true;
+    syncWhispers();
     get('key-state').textContent = data.hasKey ? '已保存 · 不回显' : '尚未设置';
     get('apiKey').value = '';
     get('clearApiKey').checked = false;
@@ -209,6 +288,9 @@ export const settingsScript = `
       disableThinking: get('disableThinking').checked,
       whisperIntervalSec: Number(get('whisperIntervalSec').value), maxTokens: Number(get('maxTokens').value)
     };
+    // 宠物这一节按点保存这一刻的表单算好：下面存完 AI 设置会重新显示碎碎念开关
+    const petInput = petConfig ? petBody() : null;
+    const petBefore = petConfig ? targetPet(petConfig) : null;
     get('apiKey').value = '';
     try {
       populate(await request('POST', input));
@@ -226,7 +308,13 @@ export const settingsScript = `
           }
         }));
       }
-      message('已保存到本机。');
+      let relaunching = false;
+      if (petInput) {
+        const after = petInput.pets.find(pet => pet.id === petBefore.id);
+        relaunching = after.name !== petBefore.name || after.size !== petBefore.size;
+        populatePet(await petRequest('POST', petInput));
+      }
+      message(relaunching ? '已保存到本机。桌宠正在重启，之后请从右键重新打开设置。' : '已保存到本机。');
     } catch (error) { message(error.message, true); }
     finally { save.disabled = false; }
   });
@@ -234,6 +322,8 @@ export const settingsScript = `
   request('GET').then(data => { populate(data); save.disabled = false; message('设置只在本机保存。'); })
     .catch(error => message(error.message, true));
   appRequest('GET').then(data => { if (data) { populateApp(data); for (const section of appSections) section.hidden = false; appAvailable = true; } })
+    .catch(error => message(error.message, true));
+  petRequest('GET').then(data => { if (data && populatePet(data)) get('pet-settings').hidden = false; })
     .catch(error => message(error.message, true));
 })();
 `;

@@ -105,7 +105,7 @@ import { listBalanceProviders, queryBalance, registerBalanceProvider } from './b
 import { generateWhisper } from './whisper';
 import { automaticWhisperSchedule } from './whisper-policy';
 import { generateChat, type ChatMemoryMessage } from './chat';
-import { configuredModel } from './model-selection';
+import { preferredModel } from './model-selection';
 import { limitPool, pickMeme, readMemePool } from './memes';
 import {
   decideBroadcast,
@@ -819,8 +819,13 @@ export function apply(ctx: any): void {
       found.conf.whisperImageEnabled === true
         ? pickMeme(readMemePool(found.conf.memes, memeDirsFor(found.entry)))
         : undefined;
-    // 模型：条目配置的 whisperModel 优先（留空 = 不指定）；生成侧失败会回落到当前对话的模型重试一次
-    const result = await generateWhisper(ctx, system, meme, configuredModel(found.conf, 'whisperModel'));
+    // 模型：条目配置的 whisperModel 优先（留空 = 不指定；独立模式不看）；生成侧失败会回落到当前对话的模型重试一次
+    const result = await generateWhisper(
+      ctx,
+      system,
+      meme,
+      preferredModel(found.conf, 'whisperModel', ctx.standaloneAi !== undefined),
+    );
     if (!result.ok) {
       // 失败**不写 S**（与改造前一致：静默跳过 + console.warn，不伪造文案、不弹错误气泡）
       console.warn(
@@ -874,8 +879,15 @@ export function apply(ctx: any): void {
       // rounds = 0（用户关掉历史）→ 空历史；否则截尾部 rounds 轮（1 轮 = 1 问 1 答）。
       // 不能写 slice(-rounds * 2)：-0 在 JS 里 === 0，slice(-0) 返回整个数组而不是空。
       const list = sliceMemoryRounds(entry.messages, rounds);
-      // 模型：条目配置的 chatModel 优先（留空 = 不指定）；生成侧失败会回落到当前对话的模型重试一次
-      const generated = await generateChat(ctx, system, list, text, pool, configuredModel(found.conf, 'chatModel'));
+      // 模型：条目配置的 chatModel 优先（留空 = 不指定；独立模式不看）；生成侧失败会回落到当前对话的模型重试一次
+      const generated = await generateChat(
+        ctx,
+        system,
+        list,
+        text,
+        pool,
+        preferredModel(found.conf, 'chatModel', ctx.standaloneAi !== undefined),
+      );
       if (!generated.ok) return generated;
       const now = Date.now();
       entry.messages.push({ role: 'user', content: text, ts: now });
