@@ -38,8 +38,8 @@ import { HealthReminders, OffWorkReminder } from './reminders';
 import { findSnack, SnackPouch } from './snacks';
 import type { Snack } from './snacks';
 import type { HealthEvent } from './reminders';
-import { NeighborBook, shouldAutoAdmit } from './neighbors';
-import type { NeighborRecord } from './neighbors';
+import { NeighborBook, orderNeighbors, shouldAutoAdmit } from './neighbors';
+import type { LastGuest, NeighborRecord } from './neighbors';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
 import { cleanText, knockOn, LINE_MAX, NAME_MAX, Neighborhood, PING_MS, tripRequest, VisitHost } from './visit';
@@ -77,7 +77,7 @@ const MENU_LOOK = '看看我在干嘛';
 const MENU_DIARY = '宠物日记';
 /** 「串门」子菜单：label 带这个前缀加「/」的项，helper 收成根菜单上的一个子菜单（shared/menu 的 buildAppMenuNodes） */
 const MENU_VISIT_GROUP = '串门';
-/** 插件每个 owner 最多 20 项：根上固定 2 项，邻居最多列这么多（家里有客时换成送客 + 一起玩 + 请吃零食，至多 16 项） */
+/** 插件每个 owner 最多 20 项：根上固定 2 项，邻居最多列这么多（回访项也算在内；家里有客时换成送客 + 一起玩 + 请吃零食，至多 16 项） */
 const MENU_NEIGHBORS_MAX = 15;
 /** 做客时转播回自家的气泡显示多久（窗口同时调亮这么久） */
 const RELAY_MS = 8_000;
@@ -267,6 +267,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let trip: Trip | null = null;
   /** 来自家做客的客人 */
   let hosting: Hosting | null = null;
+  /** 最近一位来家里做过客的客人（只记验证过身份的）：走了 2 小时内「串门」子菜单里放一项「回访」 */
+  let lastGuest: LastGuest | null = null;
   /** 转播结束后把自家宠物调回半透明的定时器 */
   let relayTimer: ReturnType<typeof setTimeout> | null = null;
   /** 下一条转播最早什么时候能顶掉上一条（RELAY_MIN_MS） */
@@ -1017,7 +1019,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       'visit',
       `${visitor.owner} 家的宠物 ${visitor.pet} 来串门，待了 ${durationText(Date.now() - (current?.since ?? Date.now()))}`,
     );
-    if (visitor.id) saveMemo(visitor.id, visitor.owner, visitor.pet, current?.lines ?? []);
+    if (visitor.id) {
+      saveMemo(visitor.id, visitor.owner, visitor.pet, current?.lines ?? []);
+      lastGuest = { id: visitor.id, at: Date.now() };
+    }
     void say(line);
     void refreshMenu();
   }
@@ -1049,14 +1054,23 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       if (trip.verified)
         actions.set(friendLabel(neighbors, hostId, trip.host.owner), () => toggleFriend(neighbors, hostId));
     } else if (enabled && visiting && knockingOn === null) {
-      const neighbors = (neighborhood?.list() ?? []).slice(0, MENU_NEIGHBORS_MAX);
-      for (const neighbor of neighbors) {
-        let label = `${MENU_VISIT_GROUP}/去 ${neighbor.owner} 家`;
-        for (let n = 2; actions.has(label); n += 1) label = `${MENU_VISIT_GROUP}/去 ${neighbor.owner} 家（${n}）`;
+      const ordered = orderNeighbors(neighborhood?.list() ?? [], neighbors, lastGuest, Date.now());
+      // 回访项也算在 MENU_NEIGHBORS_MAX 里：放了回访，列表就少列一位
+      const nearby = ordered.list.slice(0, MENU_NEIGHBORS_MAX - (ordered.revisit ? 1 : 0));
+      if (ordered.revisit) {
+        const revisit = ordered.revisit;
+        actions.set(`${MENU_VISIT_GROUP}/回访 ${revisit.owner} 家`, () => goVisit(revisit.id));
+      }
+      for (const neighbor of nearby) {
+        // 熟人加个后缀，一眼能认出来
+        const suffix = neighbors.get(neighbor.id)?.friend === true ? '（熟人）' : '';
+        let label = `${MENU_VISIT_GROUP}/去 ${neighbor.owner} 家${suffix}`;
+        for (let n = 2; actions.has(label); n += 1)
+          label = `${MENU_VISIT_GROUP}/去 ${neighbor.owner} 家${suffix}（${n}）`;
         actions.set(label, () => goVisit(neighbor.id));
       }
       // 没有邻居也留个入口：不然开了串门，右键里一点痕迹都没有
-      if (neighbors.length === 0) {
+      if (nearby.length === 0 && !ordered.revisit) {
         actions.set(`${MENU_VISIT_GROUP}/附近还没有邻居`, () =>
           say('附近还没发现开着串门的桌宠～同一网络里的同事也打开串门就能看到啦'),
         );

@@ -163,6 +163,54 @@ export class NeighborBook {
   }
 }
 
+/** 客人走后这么久内，「串门」子菜单最上面放一项「回访 X 家」 */
+export const REVISIT_MS = 2 * 3_600_000;
+
+/** orderNeighbors 里用到的邻居形状（信标邻居 Neighbor 的子集，测试好造） */
+export interface NeighborLike {
+  id: string;
+  owner: string;
+}
+
+/** 最近一位来家里做过客的客人（只记验证过身份的：见 features.ts 的 seeGuestOff） */
+export interface LastGuest {
+  id: string;
+  /** 它走的时间 */
+  at: number;
+}
+
+/**
+ * 「串门」子菜单的排序与回访项（features.ts 接线）：
+ * 熟人在前（内部也按 lastMet 倒序）、见过面的按 lastMet 倒序、陌生邻居按昵称排序；
+ * 走了还没超过 REVISIT_MS 的那位客人，只要它还在邻居列表（信标）里，就作为回访项放在最上面（没验证过身份的压根不会记成 lastGuest），下面的列表里不再重复出现它。
+ */
+export function orderNeighbors<T extends NeighborLike>(
+  neighbors: T[],
+  book: { get(id: string): NeighborRecord | undefined },
+  lastGuest: LastGuest | null,
+  now: number,
+): { revisit: T | null; list: T[] } {
+  const record = (neighbor: T) => book.get(neighbor.id);
+  const byLastMet = (a: T, b: T) => (record(b)?.lastMet ?? 0) - (record(a)?.lastMet ?? 0);
+  const revisit =
+    lastGuest && now - lastGuest.at <= REVISIT_MS
+      ? (neighbors.find((neighbor) => neighbor.id === lastGuest.id) ?? null)
+      : null;
+  // 已经作为回访项的那位不再进列表：同一家不能在子菜单里出现两项
+  const rest = revisit ? neighbors.filter((neighbor) => neighbor.id !== revisit.id) : neighbors;
+  const friends = rest.filter((neighbor) => record(neighbor)?.friend === true).sort(byLastMet);
+  const met = rest
+    .filter((neighbor) => {
+      const saved = record(neighbor);
+      return saved !== undefined && saved.friend !== true;
+    })
+    .sort(byLastMet);
+  const strangers = rest
+    .filter((neighbor) => record(neighbor) === undefined)
+    .sort((a, b) => a.owner.localeCompare(b.owner));
+  return { revisit, list: [...friends, ...met, ...strangers] };
+}
+
 /**
  * 距今文案：隔 1 天以上按「N 天」（durationText 只到小时，别处在用，不改它）。
  */

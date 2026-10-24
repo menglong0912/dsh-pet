@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NeighborBook, memoryLine, NEIGHBORS_MAX, shouldAutoAdmit } from './neighbors.ts';
+import { NeighborBook, memoryLine, NEIGHBORS_MAX, orderNeighbors, REVISIT_MS, shouldAutoAdmit } from './neighbors.ts';
 
 function withPath(fn: (path: string, warns: string[]) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-pet-neighbors-'));
@@ -162,5 +162,56 @@ test('shouldAutoAdmit only fires for a verified friend with the switch on and th
     assert.equal(shouldAutoAdmit(book, verified, true, true), false);
     book.setFriend(id, true);
     assert.equal(shouldAutoAdmit(book, verified, true, true), true);
+  });
+});
+
+test('orderNeighbors puts friends first, then the met by lastMet, then strangers by nickname', () => {
+  withPath((path) => {
+    const book = new NeighborBook(path, () => undefined);
+    book.met('a'.repeat(32), { owner: '早见', pet: '一' }, 'hosted', 1_000);
+    book.met('b'.repeat(32), { owner: '晚见', pet: '二' }, 'hosted', 5_000);
+    book.met('c'.repeat(32), { owner: '熟人见', pet: '三' }, 'hosted', 3_000);
+    book.setFriend('c'.repeat(32), true);
+    // 「生张」「生李」没见过面（不在邻居簿里）
+    const neighbors = ['b'.repeat(32), 'd'.repeat(32), 'a'.repeat(32), 'e'.repeat(32), 'c'.repeat(32)].map((id, n) => ({
+      id,
+      owner: ['晚见', '生李', '早见', '生张', '熟人见'][n]!,
+      pet: '宠',
+    }));
+    assert.deepEqual(
+      orderNeighbors(neighbors, book, null, 10_000).list.map((neighbor) => neighbor.owner),
+      ['熟人见', '晚见', '早见', '生张', '生李'],
+    );
+  });
+});
+
+test('orderNeighbors offers a revisit entry only within 2 hours, while the guest is still nearby and verified', () => {
+  withPath((path) => {
+    const book = new NeighborBook(path, () => undefined);
+    const id = 'a'.repeat(32);
+    book.met(id, { owner: '小李', pet: '阿花' }, 'hosted', 1_000);
+    const neighbors = [
+      { id, owner: '小李', pet: '阿花' },
+      { id: 'b'.repeat(32), owner: '老王', pet: '旺财' }, // 没见过面的陌生邻居
+    ];
+    const leftAt = 10_000;
+    // 走了还没到 2 小时：出回访项，列表里不再有它（同一家不出现两项）
+    const within = orderNeighbors(neighbors, book, { id, at: leftAt }, leftAt + REVISIT_MS);
+    assert.equal(within.revisit?.owner, '小李');
+    assert.deepEqual(
+      within.list.map((neighbor) => neighbor.owner),
+      ['老王'],
+    );
+    // 过了 2 小时：不出回访项，它回到列表里
+    const after = orderNeighbors(neighbors, book, { id, at: leftAt }, leftAt + REVISIT_MS + 1);
+    assert.equal(after.revisit, null);
+    assert.deepEqual(
+      after.list.map((neighbor) => neighbor.owner),
+      ['小李', '老王'],
+    );
+    // 客人不在邻居列表（信标没了）里：不出
+    assert.equal(orderNeighbors([], book, { id, at: leftAt }, leftAt + 1).revisit, null);
+    // 没验证过身份的客人压根不会记成 lastGuest（seeGuestOff 只记 visitor.id 有值的）：不出
+    assert.equal(orderNeighbors(neighbors, book, null, leftAt + 1).revisit, null);
   });
 });
