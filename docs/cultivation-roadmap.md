@@ -259,6 +259,15 @@
 
 **真机**（主会话做）：装好后菜单里有「修炼/炼气一层 · N%」；`cultivation.json` 随时间涨；把存档改成快圆满，看「可以突破了」和「修炼/突破」。
 
+**X2 落地情况**（2026-10-24 已提交，真机验证过）：
+
+- `say(text, { image?, anim? })`、`speak(instruction, fallback, options?)`、`sayLine(text, options?)`：`anim` 默认 true，会联动一段说话动画。**带 `anim` 的气泡会把正在播的动画顶掉**（真机上突破动画就是这样被打断的），所以 X3 / X4 演出时的台词气泡一律 `anim: false`。
+- `playExtra(name)`：按 §2.3 的 url 形态播新素材（不带 `facing`；对战要面朝对手，X3 要给它加 `facing` 和 `rate`）。
+- `cultivationOn()` 懒建档，开关关着返回 null；修炼菜单项由 `cultivationActions()` 生成，组前缀是 `修炼/`。
+- 破境丹只在 Claude 那轮活干满 30 秒（`speech?.kind === 'done'`）时有机会掉。
+- 测试里要拨时间用 `t.mock.timers.enable({ apis: ['Date'] })`（只接管 Date，拍子照走真的），不要真等。注入随机数用序列，不要用常量。
+- 跑测试一律外包超时（比如 `perl -e 'alarm 600; exec @ARGV' npm test`），同步死循环 `--test-timeout` 打断不了。
+
 ### X3 演出与心魔试炼
 
 **目标**：右键「修炼/心魔试炼」，自家宠物旁边出现一个暗色的「心魔」，两边按引擎事件依次出招、挨打、闪避，头顶有气血条，打完说一句赛后感言、拿奖励。
