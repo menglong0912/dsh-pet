@@ -1,7 +1,8 @@
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSocket } from 'node:dgram';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { NetworkInterfaceInfo } from 'node:os';
 import {
   broadcastAddresses,
@@ -17,6 +18,8 @@ import {
   VisitHost,
 } from './visit.ts';
 import type { Beacon, HostHandlers, Visitor } from './visit.ts';
+import { generateVisitIdentity, knockMessage, welcomeMessage } from './visit-identity.ts';
+import type { VisitIdentity } from './visit-identity.ts';
 
 const me = { owner: '小王', pet: '小鱼' };
 
@@ -136,10 +139,11 @@ test('a neighborhood lists other pets it hears from, ignores itself and junk, fo
 
 /** 起一个只听 127.0.0.1 的接待端，handlers 可按测试覆盖；fn 结束后关掉 */
 async function withHost(
-  overrides: Partial<HostHandlers> & { knockWaitMs?: number; now?: () => number },
-  fn: (host: VisitHost, port: number, calls: string[]) => Promise<void>,
+  overrides: Partial<HostHandlers> & { knockWaitMs?: number; now?: () => number; identity?: VisitIdentity | null },
+  fn: (host: VisitHost, port: number, calls: string[], logs: string[]) => Promise<void>,
 ): Promise<void> {
   const calls: string[] = [];
+  const logs: string[] = [];
   const handlers: HostHandlers = {
     canHost: () => true,
     knocked: (visitor) => calls.push(`knocked ${visitor.owner}/${visitor.pet}@${visitor.address}`),
@@ -152,25 +156,30 @@ async function withHost(
     ...overrides,
   };
   const host = new VisitHost(handlers, {
-    log: () => undefined,
+    log: (message) => logs.push(message),
     knockWaitMs: overrides.knockWaitMs,
     now: overrides.now,
+    identity: overrides.identity,
   });
   const port = await host.listen('127.0.0.1');
   try {
-    await fn(host, port, calls);
+    await fn(host, port, calls, logs);
   } finally {
     await host.close();
   }
 }
 
-/** 敲门，并在对方「主人」收到敲门后按 accept 答复 */
-function knockAndAnswer(host: VisitHost, port: number, accept: boolean) {
-  const answering = new Promise<Visitor | null>((resolve) => {
+/** 等接待端挂上敲门后按 accept 答复，返回那位 */
+function answerWhen(host: VisitHost, accept: boolean): Promise<Visitor | null> {
+  return new Promise((resolve) => {
     const wait = () => (host.knocking() ? resolve(host.answer(accept)) : setTimeout(wait, 5));
     wait();
   });
-  return Promise.all([knockOn({ address: '127.0.0.1', port }, me), answering]);
+}
+
+/** 敲门，并在对方「主人」收到敲门后按 accept 答复 */
+function knockAndAnswer(host: VisitHost, port: number, accept: boolean) {
+  return Promise.all([knockOn({ address: '127.0.0.1', port }, me), answerWhen(host, accept)]);
 }
 
 test('a visit: knock, get let in, chat, then leave; a second knock meanwhile is busy', async () => {
@@ -351,4 +360,196 @@ test('requests from web pages, oversized or malformed bodies and nameless knocks
     assert.equal((await raw(port, JSON.stringify({ owner: '\u0000', pet: '小鱼' }))).status, 400);
     assert.deepEqual(calls, []);
   });
+});
+
+// ---------- 敲门签名与应答签名 ----------
+
+/** 手拼一个签过名的敲门请求体（默认按 127.0.0.1、当前时间、要发出去的名字签，配得上的 hostId） */
+function signedKnock(
+  port: number,
+  guest: VisitIdentity,
+  host: VisitIdentity,
+  tweaks: { id?: string; ts?: number; owner?: string; signOwner?: string; address?: string } = {},
+): string {
+  const owner = tweaks.owner ?? me.owner;
+  const ts = tweaks.ts ?? Date.now();
+  const sig = guest.sign(
+    knockMessage({
+      hostId: host.id,
+      address: tweaks.address ?? '127.0.0.1',
+      port,
+      ts,
+      owner: tweaks.signOwner ?? owner,
+      pet: me.pet,
+    }),
+  );
+  return JSON.stringify({ owner, pet: me.pet, id: tweaks.id ?? guest.id, pub: guest.pub, ts: String(ts), sig });
+}
+
+/** 敲一道签了名的门并放进来，返回进来的那位与应答；任何一步断了抛错 */
+async function rawKnockIn(
+  host: VisitHost,
+  port: number,
+  body: string,
+): Promise<{ visitor: Visitor | null; answer: unknown }> {
+  const answering = answerWhen(host, true);
+  const result = await raw(port, body);
+  return { visitor: await answering, answer: JSON.parse(result.body) };
+}
+
+test('a signed knock checks out; anything off is just a stranger the owner can still let in', async () => {
+  const hostIdentity = generateVisitIdentity();
+  const guestIdentity = generateVisitIdentity();
+
+  // 四件套都对：客人以自己的身份进门，客人那边也应答验证通过
+  await withHost({ identity: hostIdentity }, async (host, port) => {
+    const answering = answerWhen(host, true);
+    const answer = await knockOn({ address: '127.0.0.1', port }, me, guestIdentity, hostIdentity.id);
+    const visitor = await answering;
+    assert.equal(answer.ok && answer.verified, true);
+    assert.equal(visitor?.id, guestIdentity.id);
+    assert.equal(host.guest()?.id, guestIdentity.id);
+  });
+
+  // 旧版本：不带签名四件套——当陌生人，照旧能人工让进
+  await withHost({ identity: hostIdentity }, async (host, port, _calls, logs) => {
+    const { visitor, answer } = await rawKnockIn(host, port, JSON.stringify(me));
+    assert.equal((answer as { ok: boolean }).ok, true);
+    assert.equal(visitor?.id, undefined);
+    assert.equal(host.guest(), visitor);
+    assert.ok(
+      logs.some((line) => line.includes('当陌生人')),
+      '日志里记下原因',
+    );
+  });
+
+  // id 和公钥对不上
+  await withHost({ identity: hostIdentity }, async (host, port) => {
+    const { visitor } = await rawKnockIn(
+      host,
+      port,
+      signedKnock(port, guestIdentity, hostIdentity, { id: '0'.repeat(32) }),
+    );
+    assert.equal(visitor?.id, undefined);
+  });
+
+  // 时间戳超过 120 秒（签名也按那个时间签的，骗不过）
+  await withHost({ identity: hostIdentity }, async (host, port) => {
+    const { visitor } = await rawKnockIn(
+      host,
+      port,
+      signedKnock(port, guestIdentity, hostIdentity, { ts: Date.now() - 200_000 }),
+    );
+    assert.equal(visitor?.id, undefined);
+  });
+
+  // 签名里的地址和本机地址不同（模拟抄来的信标把请求转发给了别家）
+  await withHost({ identity: hostIdentity }, async (host, port) => {
+    const { visitor } = await rawKnockIn(
+      host,
+      port,
+      signedKnock(port, guestIdentity, hostIdentity, { address: '127.0.0.2' }),
+    );
+    assert.equal(visitor?.id, undefined);
+  });
+
+  // 篡改了 owner：签的是「小王」，发出去的是「小李」
+  await withHost({ identity: hostIdentity }, async (host, port) => {
+    const { visitor } = await rawKnockIn(
+      host,
+      port,
+      signedKnock(port, guestIdentity, hostIdentity, { owner: '小李', signOwner: '小王' }),
+    );
+    assert.equal(visitor?.id, undefined);
+  });
+});
+
+test('the same signed knock cannot be replayed within the window', async () => {
+  const hostIdentity = generateVisitIdentity();
+  const guestIdentity = generateVisitIdentity();
+  const ts = Date.now();
+  let clock = ts;
+  await withHost({ identity: hostIdentity, now: () => clock }, async (host, port) => {
+    const body = signedKnock(port, guestIdentity, hostIdentity, { ts });
+    const firstAnswering = answerWhen(host, true);
+    const first = JSON.parse((await raw(port, body)).body) as { ok: boolean; token: string };
+    assert.equal(first.ok, true);
+    assert.equal((await firstAnswering)?.id, guestIdentity.id);
+    await tripRequest({ address: '127.0.0.1', port }, '/v1/leave', { token: first.token, text: '' });
+    // 过了同地址冷却（30 秒），ts 还在 120 秒窗口里：原样再发一遍
+    clock += 31_000;
+    const secondAnswering = answerWhen(host, true);
+    const second = JSON.parse((await raw(port, body)).body) as { ok: boolean };
+    assert.equal(second.ok, true);
+    assert.equal((await secondAnswering)?.id, undefined, '重放的当陌生人');
+  });
+});
+
+test('the guest only trusts a welcome signed for the address it dialed', async () => {
+  const hostIdentity = generateVisitIdentity();
+  const guestIdentity = generateVisitIdentity();
+  // 旧主人家（没身份）：不带应答签名，照常进门，但不算认出这家人
+  await withHost({}, async (host, port) => {
+    const answering = answerWhen(host, true);
+    const answer = await knockOn({ address: '127.0.0.1', port }, me, guestIdentity, hostIdentity.id);
+    assert.equal(answer.ok, true);
+    assert.equal(answer.verified, false);
+    assert.equal((await answering)?.id, undefined);
+  });
+  // 应答签名里的地址不是自己拨的（真主人家在别处）：不认
+  // 应答里 id 冒充熟人（抄来的），pub 和 sig 用自己的钥匙，签名内容、地址都对：也得识破
+  const answerWith = (
+    make: (token: string, port: number) => { id: string; pub: string; sig: string },
+  ): Promise<{ port: number; close: () => Promise<void> }> => {
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        const port = (server.address() as AddressInfo).port;
+        const token = 'ab'.repeat(16);
+        const payload = JSON.stringify({ ok: true, token, ...make(token, port) });
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': payload.length });
+        res.end(payload);
+      });
+    });
+    return new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () =>
+        resolve({
+          port: (server.address() as AddressInfo).port,
+          close: () =>
+            new Promise<void>((done) => {
+              server.closeAllConnections();
+              server.close(() => done());
+            }),
+        }),
+      );
+    });
+  };
+  const cases = [
+    // 地址不符
+    (token: string) => ({
+      id: hostIdentity.id,
+      pub: hostIdentity.pub,
+      sig: hostIdentity.sign(welcomeMessage({ guestId: guestIdentity.id, address: '127.0.0.2', port: 41234, token })),
+    }),
+    // 冒充熟人：id 填真主人家的，钥匙用自己的
+    (token: string, port: number) => {
+      const attacker = generateVisitIdentity();
+      return {
+        id: hostIdentity.id,
+        pub: attacker.pub,
+        sig: attacker.sign(welcomeMessage({ guestId: guestIdentity.id, address: '127.0.0.1', port, token })),
+      };
+    },
+  ];
+  for (const make of cases) {
+    const { port, close } = await answerWith(make);
+    try {
+      const answer = await knockOn({ address: '127.0.0.1', port }, me, guestIdentity, hostIdentity.id);
+      assert.equal(answer.ok, true);
+      assert.equal(answer.verified, false);
+    } finally {
+      await close();
+    }
+  }
 });

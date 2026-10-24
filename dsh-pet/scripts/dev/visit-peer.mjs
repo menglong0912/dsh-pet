@@ -8,8 +8,12 @@
  *       进门后每 5 秒报一次平安，收到的事（它家宠物说话、摸一下、一起玩、请吃零食）都打印出来。
  *
  * 用法（参照 dev/mock-server.mjs；strip-types 与 test-register 的说明见 scripts/test-ts-resolver.mjs）：
- *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask]
- *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N]
+ *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--identity <路径>|none]
+ *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]
+ *
+ * --identity 给了路径才落盘（脚本与真 app 互相验明正身、日志里看 verified 用）；缺省在内存里生成，不写文件；
+ *   --identity none 模拟旧版本，不签名。visit 模式签名需要主人家的 id（来自信标）：脚本连脚本自测时
+ *   从 host 模式打印的「身份」里抄过来，用 --host-id 带上；不带 --host-id 就不签名（当旧版本客人）。
  *
  * host 的标准输入命令：line <话> / poke / play <项> / gift <项> / home（请客人回家）；ask 模式下 y / n 答复敲门。
  * visit 的标准输入命令：say <话> / leave（告辞，后面可以带告别的话）。
@@ -22,6 +26,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { BEACON_PORT, PING_MS, VisitHost, encodeBeacon, knockOn, tripRequest } from '../../src/app/visit.ts';
+import { generateVisitIdentity, loadVisitIdentity } from '../../src/app/visit-identity.ts';
 
 const OWNER_DEFAULT = '测试邻居';
 const PET_DEFAULT = '小测';
@@ -36,13 +41,13 @@ const print = (message) => console.log(`[visit-peer] ${message}`);
 const errorText = (error) => (error instanceof Error ? error.message : String(error));
 
 const USAGE = `用法：
-  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask]
-  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N]`;
+  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--identity <路径>|none]
+  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]`;
 
 function parseArgs(argv) {
   const [mode, ...rest] = argv;
   if (mode !== 'host' && mode !== 'visit') return null;
-  const options = { mode, owner: OWNER_DEFAULT, pet: PET_DEFAULT, accept: 'auto', port: 0 };
+  const options = { mode, owner: OWNER_DEFAULT, pet: PET_DEFAULT, accept: 'auto', port: 0, hostId: '', identity: '' };
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i];
     const value = rest[i + 1];
@@ -58,6 +63,12 @@ function parseArgs(argv) {
     } else if (flag === '--port' && /^\d+$/.test(value ?? '') && Number(value) >= 1 && Number(value) <= 65535) {
       options.port = Number(value);
       i += 1;
+    } else if (flag === '--host-id' && /^[0-9a-f]{32}$/.test(value ?? '')) {
+      options.hostId = value;
+      i += 1;
+    } else if (flag === '--identity' && value) {
+      options.identity = value;
+      i += 1;
     } else {
       return null;
     }
@@ -65,14 +76,30 @@ function parseArgs(argv) {
   return options;
 }
 
+/** 本脚本的串门身份：--identity none 模拟旧版本（不签名）；给了路径才落盘，不给就在内存里生成一对（不留文件） */
+function identityOf(options) {
+  if (options.identity === 'none') return null;
+  if (options.identity) {
+    const identity = loadVisitIdentity(options.identity, (message) => print(`串门：${message}`));
+    print(`身份 ${identity.id}（${options.identity}）`);
+    return identity;
+  }
+  const identity = generateVisitIdentity();
+  print(`身份 ${identity.id}（内存里，不写文件；要跨进程不变就用 --identity <路径>）`);
+  return identity;
+}
+
 // ---------- host 模式 ----------
 
 async function runHost(options) {
+  const identity = identityOf(options);
   const host = new VisitHost(
     {
       canHost: () => true,
       knocked(visitor) {
-        print(`${visitor.owner}（${visitor.address}）家的 ${visitor.pet} 来敲门`);
+        print(
+          `${visitor.owner}（${visitor.address}）家的 ${visitor.pet} 来敲门${visitor.id ? `，verified（${visitor.id}）` : '，没验证上（当陌生人）'}`,
+        );
         if (options.accept === 'auto') setTimeout(() => host.answer(true), 1_000);
         else print('等标准输入：y 让进 / n 不让进');
       },
@@ -87,7 +114,7 @@ async function runHost(options) {
         print(`${visitor.pet} ${reason === 'leave' ? `告辞：${text || '（没说话）'}` : '太久没动静，当它走了'}`);
       },
     },
-    { log: print },
+    { log: (message) => print(message), identity },
   );
   const port = await host.listen('127.0.0.1');
   print(`接待开了，端口 ${port}`);
@@ -96,7 +123,12 @@ async function runHost(options) {
   // 信标只发不收：真 app 在 BEACON_PORT 上听；那边没开串门也没关系，UDP 发出去就不管了
   const beacon = createSocket({ type: 'udp4' });
   beacon.on('error', () => {});
-  const payload = encodeBeacon({ id: randomUUID(), owner: options.owner, pet: options.pet, port });
+  const payload = encodeBeacon({
+    id: identity ? identity.id : randomUUID(),
+    owner: options.owner,
+    pet: options.pet,
+    port,
+  });
   const sendBeacon = () => beacon.send(payload, BEACON_PORT, '127.0.0.1', () => {});
   sendBeacon();
   setInterval(sendBeacon, BEACON_MS);
@@ -181,6 +213,7 @@ function printEvent(event) {
 const HOME_REASONS = { 'sent-home': '被请回家了', 'not-visiting': '那边已经不当我是客人了' };
 
 async function runVisit(options) {
+  const identity = identityOf(options);
   let port = options.port;
   if (!port) {
     port = hostPortFromLog();
@@ -190,9 +223,15 @@ async function runVisit(options) {
     }
     print(`从 app.log 读到接待端口 ${port}`);
   }
+  if (identity && !options.hostId) print('没给 --host-id：当旧版本客人，不签名');
   const host = { address: '127.0.0.1', port };
   print(`敲 ${host.address}:${port} 的门（${options.owner} 家的 ${options.pet}）……`);
-  const answer = await knockOn(host, { owner: options.owner, pet: options.pet }).catch((error) => {
+  const answer = await knockOn(
+    host,
+    { owner: options.owner, pet: options.pet },
+    identity,
+    options.hostId || null,
+  ).catch((error) => {
     print(`敲门失败：${errorText(error)}`);
     process.exit(1);
   });
@@ -201,7 +240,9 @@ async function runVisit(options) {
     process.exit(1);
   }
   const token = answer.token;
-  print('进门啦；say <话> 说话，leave 告辞');
+  print(
+    `进门啦（${answer.verified ? 'verified：主人家的签名对上了' : '没认出主人家（旧对端或签名不对）'}）；say <话> 说话，leave 告辞`,
+  );
 
   // 每 5 秒报一次平安，打印主人家捎来的事；连着 3 次送不到（跟真 app 一样）就当失联，回家
   let pingFailures = 0;

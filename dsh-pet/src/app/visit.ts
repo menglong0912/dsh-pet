@@ -3,10 +3,11 @@
  * 不碰 Electron、不调模型；窗口与说话在 `features.ts` 里接线。
  *
  * 发现：允许别人来做客的桌宠每 BEACON_MS 往本机每块局域网网卡的广播地址发一条 UDP 信标（端口 BEACON_PORT），
- *   只带本次运行的随机 id、主人昵称、宠物名与接待端口；收到别人的信标就记成邻居，NEIGHBOR_TTL_MS 没再收到就忘掉。
+ *   只带身份 id（每台电脑固定一对密钥，见 visit-identity.ts）、主人昵称、宠物名与接待端口；收到别人的信标就记成邻居，NEIGHBOR_TTL_MS 没再收到就忘掉。
  *   不接待客人时只听不发：别人看不到自己，自己照样能出门。
  * 接待：另开一个只处理串门协议的 HTTP 监听——127.0.0.1 上那个本机服务的接口一个也不放到局域网上：
- *   POST /v1/knock { owner, pet }    敲门：挂着等主人在右键菜单里点「让进 / 不让进」，最多 KNOCK_WAIT_MS
+ *   POST /v1/knock { owner, pet, id?, pub?, ts?, sig? }    敲门：挂着等主人在右键菜单里点「让进 / 不让进」，最多 KNOCK_WAIT_MS
+ *                                    （带身份的客人另加签名四件套；应答也带上主人家的 id / pub / sig，见 visit-identity.ts）
  *   POST /v1/chat  { token, text }   客人说一句，回 { reply }（这边的宠物回的那句）
  *   POST /v1/ping  { token }         客人每 PING_MS 报一次还在，回 { events }：这边攒下要告诉客人的事
  *                                    （这边宠物主动说的话、主人摸了它一下、一起玩什么、请它吃什么）；被请回家后回 reason: sent-home
@@ -29,6 +30,8 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { z } from 'zod';
+import { idOfPub, knockMessage, verifyWithPub, welcomeMessage } from './visit-identity';
+import type { VisitIdentity } from './visit-identity';
 
 /** 信标端口（7340 是插件路由前缀里的那个数） */
 export const BEACON_PORT = 47340;
@@ -47,6 +50,11 @@ const MAX_BEACON_BYTES = 512;
 export const NAME_MAX = 12;
 /** 一句台词的长度上限 */
 export const LINE_MAX = 60;
+/** 敲门签名里的时间戳允许和本机差多少（重放也是这个窗口） */
+const KNOCK_TS_SKEW_MS = 120_000;
+/** 防重放缓存里一条 (id, ts) 记多久、最多存几条 */
+const REPLAY_MS = 120_000;
+const REPLAY_MAX = 256;
 
 // 控制字符、零宽字符与双向文本控制符：换行会撑坏气泡，双向控制符能把显示顺序倒过来骗人
 // eslint-disable-next-line no-control-regex
@@ -67,7 +75,7 @@ export function cleanName(value: unknown): string {
 // ---------- 发现 ----------
 
 export interface Beacon {
-  /** 本次运行的随机 id（认出自己发的信标） */
+  /** 串门身份 id（认出自己发的信标） */
   id: string;
   owner: string;
   pet: string;
@@ -143,7 +151,7 @@ export function isLanAddress(raw: string | undefined): boolean {
 }
 
 export interface NeighborhoodOptions {
-  /** 本次运行的随机 id（认出自己发的信标） */
+  /** 串门身份 id（认出自己发的信标） */
   id: string;
   /**
    * 自己的信标内容（每次发时现取：昵称、宠物名改了下一条就是新的）；
@@ -246,6 +254,8 @@ export interface Visitor {
   owner: string;
   pet: string;
   address: string;
+  /** 敲门签名验证通过时的客人身份 id（visit-identity.ts）；没验证上（旧版本、签名不对）就没有 */
+  id?: string;
 }
 
 export type KnockFailure = 'busy' | 'too-soon' | 'declined' | 'no-answer';
@@ -255,7 +265,6 @@ export type HostEvent =
   { type: 'line'; text: string } | { type: 'poke' } | { type: 'play'; what: string } | { type: 'gift'; what: string };
 /** 一次最多捎几件事（攒多了丢最早的） */
 const EVENTS_MAX = 8;
-export type KnockAnswer = { ok: true; token: string } | { ok: false; reason: KnockFailure };
 
 export interface HostHandlers {
   /** 现在能不能接待（自己的宠物出门在外、正在敲别人家的门时不行） */
@@ -285,6 +294,8 @@ interface PendingKnock {
 
 export interface HostOptions {
   log: (message: string) => void;
+  /** 本机身份：有它才验客人的敲门签名、才给进门应答签名（旧对端 / 没身份时都当陌生人） */
+  identity?: VisitIdentity | null;
   now?: () => number;
   knockWaitMs?: number;
   lostAfterMs?: number;
@@ -298,6 +309,10 @@ export class VisitHost {
   private sentHomeToken: string | null = null;
   private lostTimer: ReturnType<typeof setInterval> | null = null;
   private readonly knockedAt = new Map<string, number>();
+  /** 见过的 (客人 id, ts)：防有人把抄来的敲门请求原样再发一遍 */
+  private readonly knocksSeen = new Map<string, number>();
+  /** 接待监听的端口（验签名、给应答签名都要拼进内容） */
+  private listenPort = 0;
   private readonly handlers: HostHandlers;
   private readonly options: HostOptions;
 
@@ -330,8 +345,9 @@ export class VisitHost {
       });
     });
     this.server = server;
+    this.listenPort = (server.address() as AddressInfo).port;
     this.lostTimer = setInterval(() => this.checkLost(), PING_MS);
-    return (server.address() as AddressInfo).port;
+    return this.listenPort;
   }
 
   async close(): Promise<void> {
@@ -390,7 +406,11 @@ export class VisitHost {
     const body = await readJson(req);
     if (body === undefined) return send(res, 400, { ok: false, reason: 'bad-request' });
     const path = new URL(req.url ?? '/', 'http://visit').pathname;
-    if (path === '/v1/knock') return this.knock(address, body, res);
+    if (path === '/v1/knock') {
+      // 验签名要用「本机收到这个连接的地址」：客人按它拨的地址签，两边得是同一个
+      const local = (req.socket.localAddress ?? '').replace(/^::ffff:/, '');
+      return this.knock(address, local, body, res);
+    }
 
     const session = this.session;
     if (!session || body.token !== session.token || address !== session.visitor.address) {
@@ -419,7 +439,12 @@ export class VisitHost {
     }
   }
 
-  private async knock(address: string, body: Record<string, unknown>, res: ServerResponse): Promise<void> {
+  private async knock(
+    address: string,
+    local: string,
+    body: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> {
     const owner = cleanName(body.owner);
     const pet = cleanName(body.pet);
     if (!owner || !pet) return send(res, 400, { ok: false, reason: 'bad-request' });
@@ -430,6 +455,8 @@ export class VisitHost {
     this.knockedAt.set(address, now);
 
     const visitor: Visitor = { owner, pet, address };
+    const verifiedId = this.verifyGuest(body, owner, pet, local, now);
+    if (verifiedId) visitor.id = verifiedId;
     const answer = await new Promise<boolean | 'no-answer' | 'gone'>((resolve) => {
       const pending: PendingKnock = {
         visitor,
@@ -455,7 +482,59 @@ export class VisitHost {
     const token = randomBytes(16).toString('hex');
     this.session = { visitor, token, lastSeen: this.now(), outbox: [] };
     this.sentHomeToken = null;
+    // 给验明正身的客人签应答：客人拿它认下这家人（T4 记邻居、T7 捎话都以这个为准）
+    const identity = this.options.identity;
+    const guestId = visitor.id;
+    if (identity && guestId) {
+      const sig = identity.sign(welcomeMessage({ guestId, address: local, port: this.listenPort, token }));
+      return send(res, 200, { ok: true, token, id: identity.id, pub: identity.pub, sig });
+    }
     send(res, 200, { ok: true, token });
+  }
+
+  /**
+   * 验客人的敲门签名。任何一步不过都**不拒绝**，只当陌生人（visitor 不带 id，照旧等主人点头），
+   * 原因记进日志；全部通过返回客人的身份 id。
+   */
+  private verifyGuest(
+    body: Record<string, unknown>,
+    owner: string,
+    pet: string,
+    local: string,
+    now: number,
+  ): string | null {
+    const stranger = (reason: string): null => {
+      this.options.log(`串门：客人身份没验证上（${reason}），当陌生人`);
+      return null;
+    };
+    const { id, pub, ts, sig } = body;
+    if (
+      typeof id !== 'string' ||
+      typeof pub !== 'string' ||
+      typeof ts !== 'string' ||
+      typeof sig !== 'string' ||
+      id.length > 32 ||
+      pub.length > 100 ||
+      sig.length > 100 ||
+      !/^\d{1,16}$/.test(ts)
+    ) {
+      return stranger('字段不对');
+    }
+    const pubId = idOfPub(pub);
+    if (!pubId || pubId !== id) return stranger('公钥对不上 id');
+    const at = Number(ts);
+    if (Math.abs(now - at) > KNOCK_TS_SKEW_MS) return stranger('时间戳太旧');
+    // 防重放：同一个 (id, ts) 只认第一次。先记再验签名：签名错的也不许换一张签名重试同一个 ts
+    for (const [seen, seenAt] of this.knocksSeen) if (now - seenAt > REPLAY_MS) this.knocksSeen.delete(seen);
+    const replayKey = `${id}/${ts}`;
+    if (this.knocksSeen.has(replayKey)) return stranger('重放');
+    this.knocksSeen.set(replayKey, now);
+    while (this.knocksSeen.size > REPLAY_MAX) this.knocksSeen.delete(this.knocksSeen.keys().next().value as string);
+    const identity = this.options.identity;
+    if (!identity) return stranger('本机没有身份');
+    const message = knockMessage({ hostId: identity.id, address: local, port: this.listenPort, ts: at, owner, pet });
+    if (!verifyWithPub(pub, message, sig)) return stranger('签名不对');
+    return id;
   }
 
   private checkLost(): void {
@@ -498,11 +577,48 @@ async function post(
 
 const KNOCK_FAILURES: readonly string[] = ['busy', 'too-soon', 'declined', 'no-answer'];
 
-/** 敲门：挂着等对方主人答复；连不上时抛错 */
-export async function knockOn(host: HostAddress, me: { owner: string; pet: string }): Promise<KnockAnswer> {
-  const result = await post(host, '/v1/knock', me, KNOCK_WAIT_MS + 10_000);
+export type KnockAnswer = { ok: true; token: string; verified: boolean } | { ok: false; reason: KnockFailure };
+
+/**
+ * 敲门：挂着等对方主人答复；连不上时抛错。
+ * 带上自家身份（和信标里的主人家的 id）时给敲门签名，并验应答里主人家的签名：
+ * 对上了 verified = true；旧对端不带签名时照常进门，只是 verified = false。
+ */
+export async function knockOn(
+  host: HostAddress,
+  me: { owner: string; pet: string },
+  identity?: VisitIdentity | null,
+  hostId?: string | null,
+): Promise<KnockAnswer> {
+  const body: Record<string, unknown> = { ...me };
+  if (identity && hostId) {
+    const ts = Date.now();
+    body.id = identity.id;
+    body.pub = identity.pub;
+    body.ts = String(ts);
+    body.sig = identity.sign(
+      knockMessage({ hostId, address: host.address, port: host.port, ts, owner: me.owner, pet: me.pet }),
+    );
+  }
+  const result = await post(host, '/v1/knock', body, KNOCK_WAIT_MS + 10_000);
   if (result.ok === true && typeof result.token === 'string' && /^[0-9a-f]{32}$/.test(result.token)) {
-    return { ok: true, token: result.token };
+    const { token } = result;
+    // 应答签名也按「客人拨的地址」拼：假信标把请求转发给别家，这里的地址就对不上。
+    // 公钥还得真是信标里那个 id 的：id 是明文广播的，谁都能往应答里填，pub 和签名可以是自己的钥匙
+    const welcome =
+      identity &&
+      hostId &&
+      result.id === hostId &&
+      typeof result.pub === 'string' &&
+      typeof result.sig === 'string' &&
+      idOfPub(result.pub) === hostId
+        ? verifyWithPub(
+            result.pub,
+            welcomeMessage({ guestId: identity.id, address: host.address, port: host.port, token }),
+            result.sig,
+          )
+        : false;
+    return { ok: true, token, verified: welcome };
   }
   const reason =
     typeof result.reason === 'string' && KNOCK_FAILURES.includes(result.reason) ? result.reason : 'no-answer';

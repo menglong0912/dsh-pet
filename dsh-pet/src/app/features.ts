@@ -21,7 +21,6 @@
  * 看屏幕没有兜底句：看不了就明确说看不了（手动触发时）或安静跳过（自动触发时）。
  */
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 
@@ -43,6 +42,7 @@ import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
 import { cleanText, knockOn, LINE_MAX, NAME_MAX, Neighborhood, PING_MS, tripRequest, VisitHost } from './visit';
 import type { HostEvent, HostHandlers, KnockAnswer, KnockFailure, Neighbor, TripReply, Visitor } from './visit';
+import { loadVisitIdentity } from './visit-identity';
 import {
   findPlayThing,
   GUEST_ANSWERS,
@@ -98,6 +98,8 @@ interface Meme {
 interface Trip {
   host: Neighbor;
   token: string;
+  /** 进门时验上了主人家的身份（旧对端不带签名时 false：只当串了个门，不当熟人） */
+  verified: boolean;
   since: number;
   /** 聊过的话（「你：…」「小鱼：…」「（一起吃西瓜）」），接着聊、回家讲见闻用 */
   lines: string[];
@@ -195,6 +197,8 @@ export interface FeatureDeps {
   diaryDir: string;
   /** 零食袋文件（$DSH_HOME/dsh-pet/snacks.json） */
   snackPath: string;
+  /** 串门身份文件（$DSH_HOME/dsh-pet/visit-identity.json） */
+  identityPath: string;
   /** 插件路由前缀的完整地址，如 http://127.0.0.1:53624/dsh-pet-7340 */
   petBase: string;
   log: (message: string) => void;
@@ -224,8 +228,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let lastSpokeAt = 0;
   /** 插件上次来问碎碎念这一拍的时间：判断自动碎碎念在不在跑 */
   let lastWhisperTurnAt = 0;
-  /** 本次运行的串门信标 id（认出自己发的信标） */
-  const visitId = randomUUID();
+  /** 串门身份（每台电脑一对密钥，重启不变）：信标 id、敲门签名、应答签名都用它 */
+  const visitIdentity = loadVisitIdentity(deps.identityPath, (message) => log(`串门：${message}`));
   /** 串门网络：信标（总开关开着、接待或出门开了任一项时有）与接待端口（允许别人来时有） */
   let neighborhood: Neighborhood | null = null;
   let visitHost: VisitHost | null = null;
@@ -763,7 +767,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   }
 
   async function openHost(): Promise<void> {
-    const host = new VisitHost(hostHandlers, { log });
+    const host = new VisitHost(hostHandlers, { log, identity: visitIdentity });
     try {
       hostPort = await host.listen();
     } catch (error) {
@@ -788,7 +792,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   async function openNeighborhood(): Promise<void> {
     const hood = new Neighborhood({
-      id: visitId,
+      id: visitIdentity.id,
       // 不接待客人时只听不发：别人看不到自己，自己照样能出门
       announce: () => (visitHost ? { owner: nickname(), pet: petName(), port: hostPort } : null),
       log,
@@ -1010,7 +1014,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     void say(`我去 ${neighbor.owner} 家敲门啦～`);
     let answer: KnockAnswer | null;
     try {
-      answer = await knockOn(neighbor, { owner: nickname(), pet: petName() });
+      answer = await knockOn(neighbor, { owner: nickname(), pet: petName() }, visitIdentity, neighbor.id);
     } catch (error) {
       // fetch 只说「fetch failed」，真正的原因（没授权本地网络时是 EHOSTUNREACH）在 cause 里
       const cause = (error as { cause?: unknown }).cause;
@@ -1031,13 +1035,15 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       void tripRequest(neighbor, '/v1/leave', { token: answer.token, text: '' }).catch(() => undefined);
       return;
     }
-    startTrip(neighbor, answer.token);
+    startTrip(neighbor, answer.token, answer.verified);
   }
 
-  function startTrip(host: Neighbor, token: string): void {
+  /** @param verified 进门应答的签名验证过了：这一家确实是对着自己信标里那个 id 的门（T4 记邻居、T7 捎话以此为前提） */
+  function startTrip(host: Neighbor, token: string, verified: boolean): void {
     const current: Trip = {
       host,
       token,
+      verified,
       since: Date.now(),
       lines: [],
       lastLineAt: Date.now(),

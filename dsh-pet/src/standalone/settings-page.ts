@@ -64,7 +64,7 @@ export const settingsPage = `<!doctype html>
 </fieldset>
 <fieldset id="visit-settings" hidden><legend>局域网串门</legend>
 <label class="check"><input id="visitEnabled" type="checkbox" aria-describedby="visit-note">开启局域网串门</label>
-<p id="visit-note" class="hint">总开关：关着时不发信标、不开端口，局域网里什么都不做。开启后，同一局域网里开了串门的 dsh-pet 能互相看到；网络上只传昵称、宠物名和两只宠物说的话，截图、在用的应用、Claude 进度都不会发出去。首次开启时 macOS 会询问是否允许访问本地网络。</p>
+<p id="visit-note" class="hint">总开关：关着时不发信标、不开端口，局域网里什么都不做。开启后，同一局域网里开了串门的 dsh-pet 能互相看到，同一网络里的人也能认出这台电脑；网络上只传昵称、宠物名和两只宠物说的话，截图、在用的应用、Claude 进度都不会发出去。首次开启时 macOS 会询问是否允许访问本地网络。</p>
 <div class="sub">
 <label class="check"><input id="visitHosting" type="checkbox" aria-describedby="hosting-note">允许别人来我家做客</label>
 <p id="hosting-note" class="hint">关掉后别人在局域网里看不到你；开着时每次进门也要你在右键菜单里点「让它进来」。</p>
