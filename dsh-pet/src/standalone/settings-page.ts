@@ -200,7 +200,10 @@ export const settingsScript = `
       box.type = 'checkbox';
       box.checked = record.friend === true;
       box.addEventListener('change', () => {
-        void neighborsRequest('POST', {action: 'friend', id: record.id, friend: box.checked}).catch(e => message(e.message, true));
+        const want = box.checked;
+        // 请求没成功就把勾选框改回去：不然停在改后的样子，和实际存的对不上
+        void neighborsRequest('POST', {action: 'friend', id: record.id, friend: want})
+          .catch(e => { box.checked = !want; message(e.message, true); });
       });
       friend.appendChild(box);
       friend.appendChild(document.createTextNode('熟人'));

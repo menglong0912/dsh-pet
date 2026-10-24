@@ -459,6 +459,7 @@ test('settings browser script renders the neighbors section and fires immediate 
   ];
   const requests: Array<{ url: string; options: { method: string; body?: string } }> = [];
   let confirmAnswer = false;
+  let friendFails = false;
   runInNewContext(settingsScript, {
     URLSearchParams,
     location: { hash: '#token=process-capability', pathname: '/standalone-ai/' },
@@ -468,6 +469,8 @@ test('settings browser script renders the neighbors section and fires immediate 
     fetch: async (url: string, options: { method: string; body?: string }) => {
       requests.push({ url, options });
       if (url === '/standalone-ai/app-neighbors') {
+        if (options.method === 'POST' && friendFails)
+          return { ok: false, status: 500, json: async () => ({ error: '写不进' }) };
         return {
           ok: true,
           json: async () => (options.method === 'GET' ? { id: 'abcd1234', neighbors: records } : { ok: true }),
@@ -496,17 +499,26 @@ test('settings browser script renders the neighbors section and fires immediate 
   child(box, 0).listeners.change();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(posts()[0], { action: 'friend', id: 'b'.repeat(32), friend: true });
+  // 请求失败时勾选框恢复成改之前的样子，和实际存的对得上
+  friendFails = true;
+  child(box, 0).checked = false;
+  child(box, 0).listeners.change();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(posts()[1], { action: 'friend', id: 'b'.repeat(32), friend: false });
+  assert.equal(child(box, 0).checked, true);
+  assert.equal(element('status').textContent, '写不进');
+  friendFails = false;
   child(rows[0] as Element, 2).listeners.click();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(posts()[1], { action: 'forget', id: 'a'.repeat(32) });
+  assert.deepEqual(posts()[2], { action: 'forget', id: 'a'.repeat(32) });
   // 「全部忘掉」「重置身份」先 confirm；点了取消就不发请求
   element('neighborsClear').listeners.click();
-  assert.equal(posts().length, 2);
+  assert.equal(posts().length, 3);
   confirmAnswer = true;
   element('neighborsClear').listeners.click();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(posts()[2], { action: 'clear' });
+  assert.deepEqual(posts()[3], { action: 'clear' });
   element('identityReset').listeners.click();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(posts()[3], { action: 'reset-identity' });
+  assert.deepEqual(posts()[4], { action: 'reset-identity' });
 });
