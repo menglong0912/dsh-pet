@@ -220,6 +220,14 @@
 
 **模型调用**：0。
 
+**X1 落地情况**（2026-10-24 已提交）：
+
+- `new Cultivation(path, warn, rng?, maxTickElapsedMs?)`；后两个只给测试用，接线不传。
+- `tick` 单拍最多计 30 秒（防睡眠 / 合盖后的那一拍虚增），所以接线照现有 `TICK_MS`（5 秒）每拍调用即可。
+- 存档只在状态变了才写；`onSitReminder` 不写盘（心浮气躁本来就不落盘，重启即解除）。
+- 事件：`stage-up`（带新 `stage`）、`full`（刚到圆满，只发一次，重启不会再发）、`breakthrough`（带领悟的 `skill?`）、`rest`（带 `gain`）、`pill`、`drop`（带 `weapon`）。菜单要不要显示「突破」看 `view().full`，不要靠记住 `full` 事件。
+- 其他导出：`stageLabel`、`stageReq`、`isFullStage`、`MAX_STAGE`、`drawDropWeapon`。
+
 ### X2 修炼接线：修为来源、菜单、日记
 
 **目标**：真机上宠物开始修炼：在电脑前就涨修为，境界和百分比在右键菜单里看得到，升级会冒泡、记日记。
