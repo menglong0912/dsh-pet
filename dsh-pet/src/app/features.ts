@@ -7,6 +7,8 @@
  *   - 与插件的自动碎碎念共用一个节拍（takeWhisperTurn）：看屏幕占它的拍，应用说话时它让一让；
  *   - 把 Claude Code 与串门合成为一个外部工作状态（桌宠只有一个外部槽）；
  *   - 把一天里的事记进宠物日记（diary.ts），第二天回到电脑前时补写前一天的日记；
+ *   - 修炼（cultivation.ts）：在电脑前就涨修为，久坐提醒后离开会「调息」，Claude 干完活偶尔炼出破境丹；
+ *     升级冒泡、记日记，右键「修炼」看境界和进度，圆满时点「突破」进下一个大境界；
  *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口、visit-talk.ts 管怎么聊）：设置里开了才发信标、开接待端口；
  *     出门时自家宠物变半透明、把别人家的聊天转播回来，客人来了在自家宠物旁边开个小窗（能摸、能一起玩）；
  *     两边接着前文聊、主人家也会起话题；串门的台词只按人设生成，不带「主人此刻」；
@@ -32,7 +34,10 @@ import type { StandaloneAiService } from '../standalone/ai-provider';
 import { ActivityTracker, describeActivity, durationText } from './activity';
 import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
+import { SKILLS, WEAPONS } from './battle';
 import { ClaudeSessions } from './claude-hooks';
+import { Cultivation, stageLabel } from './cultivation';
+import type { CultivationEvent, CultivationView } from './cultivation';
 import { dateLabel, Diary, diaryDate } from './diary';
 import type { ClaudeHookPayload } from './claude-hooks';
 import { HealthReminders, OffWorkReminder } from './reminders';
@@ -100,6 +105,11 @@ const MENU_LOOK = '看看我在干嘛';
 const MENU_DIARY = '宠物日记';
 /** 「串门」子菜单：label 带这个前缀加「/」的项，helper 收成根菜单上的一个子菜单（shared/menu 的 buildAppMenuNodes） */
 const MENU_VISIT_GROUP = '串门';
+/** 「修炼」子菜单：和「串门」一样按前缀收成子菜单 */
+const MENU_CULTIVATION_GROUP = '修炼';
+/** 平时打坐的间隔：40–60 分钟随机一次（在电脑前、没出门、没在说话时） */
+const MEDITATE_GAP_MIN = 40;
+const MEDITATE_JITTER_MIN = 20;
 /** 插件每个 owner 最多 20 项：根上固定 2 项，邻居最多列这么多（回访项也算在内；家里有客时换成送客 + 一起玩 + 请吃零食，至多 16 项） */
 const MENU_NEIGHBORS_MAX = 15;
 /** 做客时转播回自家的气泡显示多久（窗口同时调亮这么久） */
@@ -237,6 +247,8 @@ export interface AppFeatures {
     /** 重置串门身份：串门进行中（家里有客、自己在外、正在敲门）时不重置、返回 false（接口回 409） */
     resetIdentity(): boolean;
   };
+  /** 修炼的只读视图（设置页「修炼」一节用，X6）；开关关着时 null */
+  cultivation: { view(): CultivationView | null };
   dispose(): void;
 }
 
@@ -253,6 +265,10 @@ export interface FeatureDeps {
   identityPath: string;
   /** 邻居簿文件（$DSH_HOME/dsh-pet/neighbors.json） */
   neighborsPath: string;
+  /** 修炼存档（$DSH_HOME/dsh-pet/cultivation.json）；开关关着时不碰它 */
+  cultivationPath: string;
+  /** 修炼用的随机数（丹药、成长随机项）；只给测试注入固定序列用，平时不传 */
+  cultivationRng?: () => number;
   /** 插件路由前缀的完整地址，如 http://127.0.0.1:53624/dsh-pet-7340 */
   petBase: string;
   log: (message: string) => void;
@@ -338,12 +354,23 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return (await response.json()) as Record<string, unknown>;
   }
 
-  /** @param image 配图：表情包池里的名称（插件按池校验） */
-  async function say(text: string, image?: string): Promise<boolean> {
+  /** 说一句话的选项：配图（表情包池里的名称，插件按池校验）；要不要联动播一段说话动画 */
+  interface SayOptions {
+    image?: string;
+    /** false = 只冒气泡不打断正在播的动画（突破这类演出期间的台词用） */
+    anim?: boolean;
+  }
+
+  async function say(text: string, options: SayOptions = {}): Promise<boolean> {
     // 出门在外时家里有话要说（提醒、看屏幕、Claude……）：先回家再说
     if (trip) await comeHome('called');
+    const image = options.image;
     try {
-      const result = await petRequest('POST', '/broadcast', { text, anim: true, ...(image ? { image } : {}) });
+      const result = await petRequest('POST', '/broadcast', {
+        text,
+        anim: options.anim ?? true,
+        ...(image ? { image } : {}),
+      });
       if (result.ok !== true) log(`说话失败：${JSON.stringify(result)}`);
       else lastSpokeAt = Date.now();
       return result.ok === true;
@@ -431,7 +458,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   }
 
   /** 按指令生成一句并说出来；生成不了就说兜底句 */
-  function speak(instruction: string, fallback: string): Promise<void> {
+  function speak(instruction: string, fallback: string, options: SayOptions = {}): Promise<void> {
     const next = speaking.then(async () => {
       if (disposed) return;
       generating = true;
@@ -441,7 +468,19 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       } finally {
         generating = false;
       }
-      await say(text ?? fallback);
+      await say(text ?? fallback, options);
+    });
+    speaking = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * 排进说话队列说一句固定的话（不调模型）：修炼的升级 / 炼丹这类模板句也走队列，
+   * 不和正在生成或显示的那句互相顶掉（say 不排队：主动点的、要立刻有回应的才直接说）
+   */
+  function sayLine(text: string, options: SayOptions = {}): Promise<void> {
+    const next = speaking.then(async () => {
+      if (!disposed) await say(text, options);
     });
     speaking = next.catch(() => undefined);
     return next;
@@ -553,7 +592,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       if (!text) return { ok: false, reason: 'empty' };
       const meme = await memeFor(text);
       // 宠物被隐藏时插件不让说（pet-not-displayed）：如实报失败，别让调用方以为说出来了
-      if (!(await say(text, meme?.name))) return { ok: false, text, reason: 'say-failed' };
+      if (!(await say(text, { image: meme?.name }))) return { ok: false, text, reason: 'say-failed' };
       diary.note(Date.now(), 'screen', `看了一眼主人的屏幕，说：「${text}」`);
       return { ok: true, text, ...(meme ? { image: meme.name } : {}) };
     } catch (error) {
@@ -600,10 +639,20 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         diary.note(now, 'return', `主人离开电脑 ${durationText(event.awayMs)}后回来了`);
         void speak(`主人离开电脑 ${durationText(event.awayMs)}，刚刚回来。欢迎主人回来。`, '欢迎回来～');
       }
+      // 修炼：主人离开电脑（解除心浮气躁，可能「调息」）
+      if (event.type === 'leave') {
+        const practice = cultivationOn();
+        if (practice) onCultivation(now, practice.onLeave(now));
+      }
     }
     for (const event of health.tick(now, snap)) {
       diary.note(now, event, event === 'sit' ? '提醒主人起来活动一下' : '提醒主人喝水');
       void announceHealth(event);
+      // 修炼：久坐提醒响了（进入「心浮气躁」）
+      if (event === 'sit') {
+        const practice = cultivationOn();
+        if (practice) practice.onSitReminder(now);
+      }
     }
     const offWorkLeft = offWork.tick(now, snap?.present ?? false);
     if (offWorkLeft !== null) {
@@ -627,6 +676,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       diaryCheckedFor = diaryDate(now);
       const date = diary.pending(now);
       if (date) void catchUpDiary(date).catch((error: unknown) => log(`宠物日记：补写失败：${errorText(error)}`));
+    }
+
+    // 修炼：在电脑前就涨修为（事件冒泡、记日记在 onCultivation）；平时在电脑前、没出门、没在说话时偶尔打坐
+    const practice = cultivationOn();
+    if (practice) {
+      onCultivation(now, practice.tick(now, snap?.present ?? false));
+      if (snap?.present && trip === null && now >= meditateAt && !generating && now - lastSpokeAt >= SPOKE_HOLD_MS) {
+        meditateAt = now + meditateGapMs();
+        void playExtra('修炼-打坐');
+      }
     }
 
     // 自动碎碎念在跑时，看屏幕占它让出的那一拍（takeWhisperTurn），不另起一路；没在跑才自己按间隔看
@@ -1467,10 +1526,98 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     );
   }
 
+  // ---------- 修炼 ----------
+
+  /** 修炼（X2）：开关开着才建档；状态、修为来源都在 Cultivation 里，这里只接线 */
+  let cultivation: Cultivation | null = null;
+  /** 下次平时打坐最早什么时候（40–60 分钟一次） */
+  let meditateAt = Date.now() + meditateGapMs();
+
+  /** 开关开着才有修炼；第一次用到时建档（开关关着不建 cultivation.json） */
+  function cultivationOn(): Cultivation | null {
+    if (!deps.appConfig().cultivation.enabled) return null;
+    if (!cultivation)
+      cultivation = new Cultivation(deps.cultivationPath, (m) => log(`修炼：${m}`), deps.cultivationRng);
+    return cultivation;
+  }
+
+  /** 修炼事件：冒泡（排进现有的说话队列）+ 记日记 */
+  function onCultivation(now: number, events: CultivationEvent[]): void {
+    const view = cultivation?.view();
+    for (const event of events) {
+      if (event.kind === 'stage-up') {
+        void sayLine(`修为精进，到${stageLabel(event.stage)}啦～`);
+        diary.note(now, 'cultivate', `修为精进，到了${stageLabel(event.stage)}`);
+      } else if (event.kind === 'full') {
+        void speak('修为刚修满一个大境界（圆满），可以突破了。跟主人说一声。', '可以突破了～');
+        diary.note(now, 'cultivate', '修为圆满，可以突破了');
+      } else if (event.kind === 'breakthrough') {
+        void playExtra('修炼-突破');
+        // anim: false：气泡照出，但不联动说话动画——那会顶掉正在播的突破动画
+        void speak('刚刚突破进了下一个大境界。跟主人说一声。', '突破啦～', { anim: false });
+        diary.note(
+          now,
+          'cultivate',
+          `突破到${view?.label ?? '下一个大境界'}${event.skill ? `，领悟了${SKILLS[event.skill].name}` : ''}`,
+        );
+      } else if (event.kind === 'rest') {
+        void sayLine(`调息回来，修为 +${event.gain}`);
+        diary.note(now, 'cultivate', `调息，修为 +${event.gain}`);
+      } else if (event.kind === 'pill') {
+        void sayLine('炼成一颗破境丹～');
+        diary.note(now, 'cultivate', '炼成一颗破境丹');
+      } else {
+        diary.note(now, 'cultivate', `得到法宝：${WEAPONS[event.weapon].name}`);
+      }
+    }
+  }
+
+  /**
+   * 播一段修炼 / 战斗的新素材（修炼-打坐、修炼-突破 等）。这些素材不注册进动画池
+   * （用户的 main-config.jsonc 会整段替换 animations），一律走 /anim 的 url 形态；
+   * 素材缺了只是那一下没动画，播之前不查文件在不在。
+   * 注意：之后任何带 anim 的气泡（/broadcast 默认联动说话动画）都会把它顶掉——
+   * 要边播边说话就用 anim: false 的气泡（X3 的对战演出都得这样）。
+   */
+  function playExtra(name: string): Promise<void> {
+    return petRequest('POST', '/anim', { url: `${deps.petBase}/thumb/main/${encodeURIComponent(name)}.webm` })
+      .then((result) => {
+        if (result.ok !== true) log(`播放动画失败（${name}）：${JSON.stringify(result)}`);
+      })
+      .catch((error: unknown) => log(`播放动画失败（${name}）：${errorText(error)}`));
+  }
+
+  /** 修炼的右键项（开关开着才有）：信息项带境界和百分比（变了才重新注册）；圆满时多一项「突破」 */
+  function cultivationActions(): Map<string, () => unknown> {
+    const actions = new Map<string, () => unknown>();
+    const practice = cultivationOn();
+    if (!practice) return actions;
+    const view = practice.view();
+    actions.set(`${MENU_CULTIVATION_GROUP}/${view.label} · ${view.percent}%`, () => {
+      const now = practice.view();
+      void say(
+        `我在${now.label}（${now.percent}%），气血 ${now.stats.hp}、灵力 ${now.stats.power}、` +
+          `身法 ${now.stats.agility}、遁速 ${now.stats.speed}，有 ${now.weapons.length} 件法宝～`,
+      );
+    });
+    if (view.full) {
+      actions.set(`${MENU_CULTIVATION_GROUP}/突破`, () => {
+        const now = practice.view();
+        if (!now.full) {
+          void say('还没修到圆满，先不急～');
+          return;
+        }
+        onCultivation(Date.now(), practice.breakthrough(Date.now()));
+        void refreshMenu();
+      });
+    }
+    return actions;
+  }
+
   // ---------- 右键菜单 ----------
 
   function wantedLabels(): string[] {
-    return [MENU_LOOK, MENU_DIARY, ...visitActions().keys()];
+    return [MENU_LOOK, MENU_DIARY, ...cultivationActions().keys(), ...visitActions().keys()];
   }
 
   async function refreshMenu(force = false): Promise<void> {
@@ -1492,7 +1639,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     } else if (label === MENU_DIARY) {
       await openDiary(now);
     } else {
-      const action = visitActions().get(label);
+      const action = cultivationActions().get(label) ?? visitActions().get(label);
       if (action) await action();
       // 菜单弹出后邻居走了
       else if (label.startsWith(`${MENU_VISIT_GROUP}/去 `)) await say('它好像已经不在附近了～');
@@ -1546,6 +1693,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       await refreshStatus(Date.now());
       if (speech?.kind === 'done') {
         diary.note(Date.now(), 'claude', `主人交给 Claude 的活（项目 ${speech.project}）干完了`);
+        // 修炼：一轮活干完了（干满 30 秒才报「done」，口径在 claude-hooks），有机会炼成一颗破境丹
+        const practice = cultivationOn();
+        if (practice) onCultivation(Date.now(), practice.onClaudeDone(Date.now()));
         void speak(
           `主人交给 Claude 的活（项目 ${speech.project}）刚刚干完了。叫主人去看看结果。`,
           `${speech.project} 那边干完活啦，去看看吧～`,
@@ -1579,6 +1729,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         return true;
       },
     },
+    cultivation: { view: () => cultivation?.view() ?? null },
     dispose() {
       disposed = true;
       if (tickTimer !== null) clearTimeout(tickTimer);
@@ -1644,6 +1795,11 @@ function knockFailText(owner: string, reason: KnockFailure | 'unreachable'): str
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 平时打坐的间隔（40–60 分钟随机） */
+function meditateGapMs(): number {
+  return (MEDITATE_GAP_MIN + Math.floor(Math.random() * MEDITATE_JITTER_MIN)) * 60_000;
 }
 
 function errorText(error: unknown): string {

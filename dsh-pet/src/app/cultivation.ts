@@ -176,6 +176,25 @@ export function drawDropWeapon(owned: WeaponId[], rng: () => number): WeaponId |
   return pool[Math.floor(rng() * pool.length)];
 }
 
+/** 灵力 2 / 3 / 4 / 5 各自的权重（合计 12）：见 drawInitialStats */
+const POWER_WEIGHTS = [2, 3, 4, 3];
+
+/**
+ * 第一次建档的初始属性：气血 50、灵力 / 身法 / 遁速各 2–5（合计 11）。
+ * 按权重抽灵力、再在「保证遁速也落在 2–5」的区间里抽身法，一次抽成——不用拒绝重抽
+ * （注入常量随机数的测试会在重抽里死循环）；权重正好让每个 (灵力, 身法) 组合等概率，
+ * 和当初拒绝重抽的分布逐点一致（battle-testkit 的平衡测试依赖这套抽样）。
+ */
+export function drawInitialStats(rng: () => number): CultivationStats {
+  let pickAt = rng() * POWER_WEIGHTS.reduce((sum, weight) => sum + weight, 0);
+  const index = POWER_WEIGHTS.findIndex((weight) => (pickAt -= weight) < 0);
+  const power = 2 + (index === -1 ? POWER_WEIGHTS.length - 1 : index);
+  const agilityMin = Math.max(2, 11 - power - 5);
+  const agilityMax = Math.min(5, 11 - power - 2);
+  const agility = agilityMin + Math.floor(rng() * (agilityMax - agilityMin + 1));
+  return { hp: 50, power, agility, speed: 11 - power - agility };
+}
+
 export class Cultivation {
   private stage = 0;
   private progress = 0;
@@ -224,16 +243,8 @@ export class Cultivation {
       this.today = saved.today;
       this.record = saved.record;
     } else {
-      // 第一次建档：三项各随机 2–5（合计 11）、气血 50、随机一件凡器、没有招式
-      let power: number;
-      let agility: number;
-      let speed: number;
-      do {
-        power = 2 + Math.floor(this.rng() * 4);
-        agility = 2 + Math.floor(this.rng() * 4);
-        speed = 11 - power - agility;
-      } while (speed < 2 || speed > 5);
-      this.stats = { hp: 50, power, agility, speed };
+      // 第一次建档：drawInitialStats 的初始属性、随机一件凡器、没有招式
+      this.stats = drawInitialStats(this.rng);
       const mortal = WEAPON_IDS.filter((id) => WEAPONS[id].grade === '凡器');
       this.weapons = [mortal[Math.floor(this.rng() * mortal.length)]];
       this.skills = [];

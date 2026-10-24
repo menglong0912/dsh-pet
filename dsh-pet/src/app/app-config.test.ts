@@ -172,3 +172,21 @@ test('an older visit section without notes still loads, filling the default (on)
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an older file without cultivation still loads, filling the default (on)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pet-app-config-'));
+  const path = join(dir, 'app-config.json');
+  const warnings: string[] = [];
+  try {
+    const older: Record<string, unknown> = { ...DEFAULT_APP_CONFIG };
+    delete older.cultivation;
+    writeFileSync(path, JSON.stringify(older));
+    const config = createAppConfig(path, (m) => warnings.push(m));
+    // 修炼默认开：升级后照常涨修为
+    assert.deepEqual(config().cultivation, { enabled: true });
+    assert.deepEqual(warnings, []);
+    assert.throws(() => saveAppConfig(path, { ...DEFAULT_APP_CONFIG, cultivation: { enabled: 'yes' } }));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

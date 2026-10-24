@@ -6,17 +6,15 @@
  * 神器 5%，不重复，图鉴集齐为止）。初始三项各随机 2–5（合计 11）、气血 50、随机一件凡器、没有招式。
  */
 import { WEAPONS, WEAPON_IDS, SKILL_IDS, majorBreaks, type Fighter, type WeaponId, type SkillId } from './battle';
+import { drawInitialStats } from './cultivation';
 
 export function fighterAt(stage: number, rng: () => number): Fighter {
-  let power: number;
-  let agility: number;
-  let speed: number;
-  do {
-    power = 2 + Math.floor(rng() * 4);
-    agility = 2 + Math.floor(rng() * 4);
-    speed = 11 - power - agility;
-  } while (speed < 2 || speed > 5);
-  let hp = 50;
+  // 初始属性用正式建档的同一套抽法（一次抽成，不拒绝重抽）
+  const initial = drawInitialStats(rng);
+  let power = initial.power;
+  let agility = initial.agility;
+  let speed = initial.speed;
+  let hp = initial.hp;
   const drawWeapon = (grade: '凡器' | '灵器' | '神器'): WeaponId | undefined => {
     const pool = WEAPON_IDS.filter((id) => WEAPONS[id].grade === grade && !weapons.includes(id));
     return pool.length > 0 ? pool[Math.floor(rng() * pool.length)] : undefined;

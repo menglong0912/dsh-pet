@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,7 @@ import type { StandaloneAiService } from '../standalone/ai-provider.ts';
 import { configPathsFor } from '../standalone/options.ts';
 import { DEFAULT_APP_CONFIG } from './app-config.ts';
 import type { AppConfig } from './app-config.ts';
+import { ANNOUNCE_AFTER_MS } from './claude-hooks.ts';
 import { diaryDate } from './diary.ts';
 import type { DiaryDay } from './diary.ts';
 import { startAppFeatures } from './features.ts';
@@ -63,6 +64,28 @@ const ai = {
   },
 } as unknown as StandaloneAiService;
 
+/** 修炼存档里能用的最小一份（炼气九层修满 = 圆满，等突破） */
+function cultivationSeed(): Record<string, unknown> {
+  return {
+    version: 1,
+    stage: 8,
+    progress: 150,
+    stats: { hp: 104, power: 8, agility: 8, speed: 8 },
+    weapons: ['water-gun'],
+    skills: [],
+    pills: 0,
+    offer: null,
+    today: { date: '2000-01-01', presence: 0, presenceMs: 0, rests: 0, pills: 0, trial: 0, spars: [] },
+    record: { wins: 0, losses: 0 },
+  };
+}
+
+/** withFeatures 顺带记下来的：最近一次注册的菜单 labels、播过的 /anim 请求体 */
+interface FeaturesExtras {
+  menus: string[][];
+  anims: Array<Record<string, unknown>>;
+}
+
 /**
  * 起一套功能编排跑 fn：插件路由由假服务应答（/broadcast 回 broadcast 并记下说的话与整个请求体，
  * /memes 回 memes 池，其余一律成功），应用配置取 config 的当前值（测试里可以改）。
@@ -75,11 +98,23 @@ async function withFeatures(
     memes?: Array<{ name: string; desc: string }>;
     /** 依次吐给 /menu/events 的菜单点击（label 一项；用完照旧回空） */
     clicks?: string[];
+    /** 修炼用注入的随机数（丹药等） */
+    rng?: () => number;
+    /** 启动前写进 cultivation.json 的存档（比如造一个快圆满的） */
+    cultivation?: Record<string, unknown>;
   },
-  fn: (features: AppFeatures, said: string[], bodies: Array<Record<string, unknown>>, home: string) => Promise<void>,
+  fn: (
+    features: AppFeatures,
+    said: string[],
+    bodies: Array<Record<string, unknown>>,
+    home: string,
+    extras: FeaturesExtras,
+  ) => Promise<void>,
 ): Promise<void> {
   const said: string[] = [];
   const bodies: Array<Record<string, unknown>> = [];
+  const menus: string[][] = [];
+  const anims: Array<Record<string, unknown>> = [];
   const server = createServer((req, res) => {
     const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
     const reply = (body: unknown) => {
@@ -89,13 +124,19 @@ async function withFeatures(
     let raw = '';
     req.on('data', (chunk: Buffer) => (raw += chunk.toString('utf8')));
     req.once('end', () => {
+      const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
       if (path.endsWith('/broadcast')) {
-        const body = JSON.parse(raw) as Record<string, unknown>;
         bodies.push(body);
         said.push(String(body.text));
         reply(options.broadcast ?? { ok: true });
       } else if (path.endsWith('/memes')) reply({ ok: true, memes: options.memes ?? [] });
-      else if (path.endsWith('/menu/events')) {
+      else if (path.endsWith('/anim')) {
+        anims.push(body);
+        reply({ ok: true });
+      } else if (path.endsWith('/menu/item')) {
+        if (Array.isArray(body.labels)) menus.push(body.labels as string[]);
+        reply({ ok: true });
+      } else if (path.endsWith('/menu/events')) {
         const click = options.clicks?.shift();
         if (click) reply({ ok: true, events: { [click]: 'main' } });
         else setTimeout(() => reply({ ok: true, events: {} }), 50);
@@ -104,6 +145,7 @@ async function withFeatures(
   });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const home = mkdtempSync(join(tmpdir(), 'dsh-pet-features-'));
+  if (options.cultivation) writeFileSync(join(home, 'cultivation.json'), JSON.stringify(options.cultivation));
   const config = options.config ?? DEFAULT_APP_CONFIG;
   const features = startAppFeatures({
     electron,
@@ -114,11 +156,13 @@ async function withFeatures(
     snackPath: join(home, 'snacks.json'),
     identityPath: join(home, 'visit-identity.json'),
     neighborsPath: join(home, 'neighbors.json'),
+    cultivationPath: join(home, 'cultivation.json'),
+    cultivationRng: options.rng,
     petBase: `http://127.0.0.1:${(server.address() as AddressInfo).port}/dsh-pet-7340`,
     log: () => undefined,
   });
   try {
-    await fn(features, said, bodies, home);
+    await fn(features, said, bodies, home, { menus, anims });
   } finally {
     features.dispose();
     // 等挂着的菜单长轮询回来、看到 disposed 再关服务，免得它进入失败重试的 5 秒等待
@@ -280,4 +324,82 @@ test('碎碎念这一拍：看屏幕没到点、应用也没在说话时照常�
     assert.equal(features.takeWhisperTurn('main'), false);
     assert.deepEqual(said, []);
   });
+});
+
+/** 读修炼存档（后面几个修炼的测试用） */
+function cultivationSave(home: string): Record<string, unknown> | null {
+  const path = join(home, 'cultivation.json');
+  return existsSync(path) ? (JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>) : null;
+}
+
+test('修炼：开关关着不建档，也没有修炼的菜单项', async () => {
+  const config = structuredClone(DEFAULT_APP_CONFIG);
+  config.cultivation.enabled = false;
+  await withFeatures({ config }, async (features, _said, _bodies, home, { menus }) => {
+    await until(() => features.activity()?.present === true);
+    await new Promise((done) => setTimeout(done, 300)); // 多跑几拍：不许中途偷偷建档
+    assert.equal(cultivationSave(home), null);
+    assert.equal(features.cultivation.view(), null);
+    assert.ok(menus.every((labels) => labels.every((label) => !label.startsWith('修炼/'))));
+  });
+});
+
+test('修炼：开着就建档，菜单里有「修炼」信息项', async () => {
+  await withFeatures({}, async (features, _said, _bodies, home, { menus }) => {
+    await until(() => features.activity()?.present === true);
+    // 建了档（在电脑前的修为怎么攒、怎么封顶，数值口径见 cultivation.test.ts；这里只看接线）
+    await until(() => cultivationSave(home) !== null);
+    const save = cultivationSave(home)!;
+    assert.equal(save.version, 1);
+    assert.equal(save.stage, 0);
+    const view = features.cultivation.view();
+    assert.equal(view?.label, '炼气一层');
+    assert.ok(menus.some((labels) => labels.some((label) => /^修炼\/炼气一层 · \d+%$/.test(label))));
+  });
+});
+
+test('修炼：Claude 干完一轮 ≥ 30 秒的活能拿到丹（注入的随机数），冒泡记日记', async (t) => {
+  // 建档先消耗三个随机数（灵力、身法、法宝），第 4 个是丹的概率（0.05 < 0.2，必成）
+  const draws = [0.5, 0.5, 0.5, 0.05];
+  await withFeatures({ rng: () => draws.shift() ?? 0.5 }, async (features, said, bodies, home) => {
+    await until(() => features.activity()?.present === true);
+    // 不真等 31 秒：只接管 Date（setTimeout 照常走真的，采样的拍子不受影响），
+    // 把时钟拨过「干满 30 秒才算一轮活干完」的口径（claude-hooks 的 ANNOUNCE_AFTER_MS）
+    const realNow = Date.now();
+    try {
+      t.mock.timers.enable({ apis: ['Date'] });
+      t.mock.timers.setTime(realNow);
+      await features.handleClaudeHook({ hook_event_name: 'UserPromptSubmit', session_id: 's1', cwd: '/x/dsh-pet' });
+      t.mock.timers.setTime(realNow + ANNOUNCE_AFTER_MS + 1_000);
+      await features.handleClaudeHook({ hook_event_name: 'Stop', session_id: 's1' });
+    } finally {
+      t.mock.timers.reset();
+    }
+    await until(() => (cultivationSave(home)?.pills as number | undefined) === 1);
+    // 冒泡排进了说话队列：等它真说出来；平常的气泡照旧联动说话动画
+    await until(() => said.includes('炼成一颗破境丹～'));
+    assert.equal(bodies.find((body) => body.text === '炼成一颗破境丹～')?.anim, true);
+    const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+    assert.ok(day.events.some((event) => event.kind === 'cultivate' && event.text === '炼成一颗破境丹'));
+  });
+});
+
+test('修炼：圆满时菜单有「突破」，点突破进下一个大境界、播突破动画', async () => {
+  const clicks: string[] = [];
+  await withFeatures(
+    { cultivation: cultivationSeed(), clicks },
+    async (_features, _said, bodies, home, { menus, anims }) => {
+      await until(() =>
+        menus.some((labels) => labels.includes('修炼/炼气九层 · 100%') && labels.includes('修炼/突破')),
+      );
+      clicks.push('修炼/突破');
+      await until(() => (cultivationSave(home)?.stage as number | undefined) === 9);
+      // 动画请求是异步发出去的：等它到
+      await until(() => anims.some((body) => String(body.url ?? '').includes(encodeURIComponent('修炼-突破'))));
+      // 突破那句话的气泡不带说话动画（anim: false），不顶掉正在播的突破动画
+      await until(() => bodies.some((body) => body.anim === false));
+      const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+      assert.ok(day.events.some((event) => event.kind === 'cultivate' && event.text.startsWith('突破到筑基初期')));
+    },
+  );
 });

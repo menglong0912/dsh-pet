@@ -80,6 +80,25 @@ test('first save follows the creation rules and survives a restart', () => {
   });
 });
 
+// 回归：建档属性曾用「拒绝重抽」，注入常量随机数（比如 0.1）会在里面死循环
+test('first save draws legal initial stats even from a constant rng', () => {
+  withPath((path) => {
+    for (const value of [0, 0.5, 0.999]) {
+      const c = new Cultivation(
+        `${path}-${String(value).replace('.', '_')}`,
+        () => undefined,
+        () => value,
+      );
+      const { hp, power, agility, speed } = c.view().stats;
+      assert.equal(hp, 50);
+      assert.equal(power + agility + speed, 11);
+      assert.ok(power >= 2 && power <= 5, `power=${power}`);
+      assert.ok(agility >= 2 && agility <= 5, `agility=${agility}`);
+      assert.ok(speed >= 2 && speed <= 5, `speed=${speed}`);
+    }
+  });
+});
+
 test('tick accumulates one xp per present minute', () => {
   withPath((path) => {
     const c = open(path, 1);

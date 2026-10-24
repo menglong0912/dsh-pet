@@ -195,6 +195,7 @@ async function boot(): Promise<void> {
       snackPath: join(home, 'dsh-pet', 'snacks.json'),
       identityPath: join(home, 'dsh-pet', 'visit-identity.json'),
       neighborsPath: join(home, 'dsh-pet', 'neighbors.json'),
+      cultivationPath: join(home, 'dsh-pet', 'cultivation.json'),
       petBase: `${origin}/dsh-pet-7340`,
       log,
     });

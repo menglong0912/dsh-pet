@@ -296,7 +296,8 @@ test('tribulate：同种子同结果，事件以 end 收尾', () => {
 // 平衡断言：固定种子，跑起来是确定性的；数值由 scripts/dev/battle-sim.mjs 调出来
 // ---------------------------------------------------------------------------
 
-const BALANCE_N = 600;
+// 4000 场的 1σ ≈ 0.008：有招式的期望胜率贴着下限（约 0.41），600 场的噪声（1σ ≈ 0.02）会随机翻过界
+const BALANCE_N = 4_000;
 
 const balanceRate = (make: (i: number) => [Fighter, Fighter]): number => {
   let wins = 0;

@@ -92,6 +92,22 @@ test('writes the diary page, and asks to rewrite a day whose diary was written b
   });
 });
 
+test('cultivate events are recorded and read back like any other day event', () => {
+  withDir((dir) => {
+    const diary = new Diary(dir, at(23, 9), () => undefined);
+    sit(diary, at(23, 9), 10);
+    diary.note(at(23, 10), 'cultivate', '修为精进，到了炼气二层');
+    diary.note(at(23, 11), 'cultivate', '突破到筑基初期，领悟了水枪');
+    const saved = JSON.parse(readFileSync(join(dir, '2026-10-23.json'), 'utf8')) as DiaryDay;
+    assert.deepEqual(
+      saved.events.filter((event) => event.kind === 'cultivate').map((event) => event.text),
+      ['修为精进，到了炼气二层', '突破到筑基初期，领悟了水枪'],
+    );
+    // 写日记的指令里新事件也读得通
+    assert.match(diary.instruction('2026-10-23') ?? '', /10:00 修为精进，到了炼气二层/);
+  });
+});
+
 test('an unreadable day file is reported and that day starts over', () => {
   withDir((dir) => {
     writeFileSync(join(dir, '2026-10-23.json'), '{ broken');

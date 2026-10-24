@@ -68,6 +68,13 @@ const schema = z
         autoAdmitFriends: false,
         notes: true,
       }),
+    /** 修炼；后加的字段，旧文件里没有时按默认值补上（设置页的开关在 X6） */
+    cultivation: z
+      .object({
+        /** 修炼总开关：关着时不建档、不涨修为、菜单里没有「修炼」 */
+        enabled: z.boolean().default(true),
+      })
+      .default({ enabled: true }),
   })
   .strict();
 
@@ -111,6 +118,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     autoAdmitFriends: false,
     notes: true,
   },
+  cultivation: { enabled: true },
 };
 
 /**
