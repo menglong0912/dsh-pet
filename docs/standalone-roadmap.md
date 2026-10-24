@@ -195,13 +195,15 @@ node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev
 **现状**：
 
 - 客人页面（`src/app/visit-windows.ts:312`）的气泡是 `margin-bottom:-4px`，底边几乎正好落在 16:9 舞台的上沿。
-- 自家宠物的气泡底边会伸进舞台 `size × BUBBLE_OVERLAP_RATIO`（`src/shared/fonts.ts:90`，0.108）。
-- 按代码算，客人气泡比自家宠物的高出约 0.108 × 客人窗口宽，宽 350 时约 38pt。之前截图目测离头一百多像素（Retina 像素）。以实现后的截图对比为准。
+- 自家宠物的气泡底边伸进**宠物盒** `size × BUBBLE_OVERLAP_RATIO`（`src/shared/fonts.ts:90`，0.108）。但舞台在宠物盒里往下错开了一段脚底垫高（舞台高 × 30/360，舞台高 = 宽 × 9/16，即 0.0469 × 宽），所以气泡伸进**舞台**的深度只有 0.108 − 0.0469 ≈ 0.0611 × 宽。
+- 客人气泡（伸进舞台约 4px）比自家宠物的高出约 0.061 × 客人窗口宽，宽 350 时约 21pt。以实现后的截图对比为准。
+
+> 2026-10-24 核验修正：初版方案漏了脚底垫高，让客人直接用 0.108，真机上客人气泡几乎压在头顶（约 6pt，应约 29pt）。下面的改法已更正。
 
 **改法**：
 
-- **下边距**：气泡下边距改成 `calc(-100vw * 0.108)`。客人窗口宽等于舞台宽，所以 `100vw` 就是舞台宽。
-- **系数来源**：系数从 `src/shared/fonts.ts` 的 `BUBBLE_OVERLAP_RATIO` 拼进模板字符串，不手写数字。`visit-windows.ts` 已经从 `../shared/constants` 引东西，同样方式引用。
+- **下边距**：气泡下边距改成 `calc(-100vw * <伸进舞台的比例>)`。客人窗口宽等于舞台宽，所以 `100vw` 就是舞台宽。
+- **系数来源**：比例 = `BUBBLE_OVERLAP_RATIO − (9/16) × (CANVAS_H − FEET_Y) / CANVAS_H`，用 `src/shared/fonts.ts` 和 `src/shared/constants.ts` 里的常量算出来，导出成一个常量后拼进模板字符串，不手写数字。
 - **层级与点击**：
   - 气泡加 `position:relative; z-index:1`，盖在画布上面。
   - 气泡加 `pointer-events:none`。光标在身体命中区里点到气泡时，仍要算摸到客人：命中区上沿在 0.15 舞台高处，气泡底边下来以后会到约 0.19 舞台高处。
@@ -210,7 +212,7 @@ node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev
 
 **测试**：在 `src/app/visit-windows.test.ts` 加一条契约测试，写法参照 `src/shared/fonts.test.ts`：
 
-- `guestPage` 里含 `calc(-100vw * ${BUBBLE_OVERLAP_RATIO})`；
+- 导出的比例约等于 0.0611（即 `BUBBLE_OVERLAP_RATIO − 9/16 × 30/360`），`guestPage` 里含 `calc(-100vw * ${这个常量})`；
 - `#bubble` 的规则里有 `pointer-events:none`。
 
 **真机**：
