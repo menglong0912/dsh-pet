@@ -561,6 +561,8 @@ node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev
 
 **模型调用**：不增加。
 
+**假邻居脚本跟着升级**（2026-10-24 补充）：`scripts/dev/visit-peer.mjs` 加捎话命令，好在真机上测两个方向——host 模式 `note <话>`（攒一条 note 事件捎给客人），visit 模式 `note <话>`（`POST /v1/note`），两种模式都打印收到的捎话和对方回的结果。
+
 **测试**：
 
 - `visit.test.ts`：
