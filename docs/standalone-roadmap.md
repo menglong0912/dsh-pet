@@ -325,7 +325,7 @@ node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev
 - **任何一步不过**：**不拒绝**，当陌生人处理（`Visitor` 不带 `id`），日志里记下原因。
 - **全部通过**：`Visitor.id = id`。`Visitor` 类型加可选的 `id`。
 
-**客人验证**：`knockOn` 返回后，应答里的 `id` 要等于信标里的 id，签名也要对上，这时记 `Trip.verified = true`。否则当作没认出主人家：T4 不记录，T7 不捎话。
+**客人验证**：`knockOn` 返回后，三条都满足才记 `Trip.verified = true`：应答里的 `id` 等于信标里的 id；`idOfPub(应答里的 pub)` 也等于这个 id（只核对填写的 id 不够，冒充者可以填熟人的 id、再用自己的密钥签名）；签名对得上。否则当作没认出主人家：T4 不记录，T7 不捎话。
 
 **为什么签名里要带地址**：防「假信标 + 转发」。有人可以广播一条抄来的熟人 id、地址写成自己，客人敲到它那里，它再把签名转给真主人家。签名里带了地址，转发后地址对不上，两边都能识破。ARP 欺骗那一级的真正中间人，明文 HTTP 防不住，这一档不防；T5 的设置页说明里要写清楚。
 
