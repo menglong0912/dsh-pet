@@ -8,7 +8,8 @@
  * 接待：另开一个只处理串门协议的 HTTP 监听——127.0.0.1 上那个本机服务的接口一个也不放到局域网上：
  *   POST /v1/knock { owner, pet }    敲门：挂着等主人在右键菜单里点「让进 / 不让进」，最多 KNOCK_WAIT_MS
  *   POST /v1/chat  { token, text }   客人说一句，回 { reply }（这边的宠物回的那句）
- *   POST /v1/ping  { token }         客人每 PING_MS 报一次还在；被请回家后回 reason: sent-home
+ *   POST /v1/ping  { token }         客人每 PING_MS 报一次还在，回 { events }：这边攒下要告诉客人的事
+ *                                    （这边宠物主动说的话、主人摸了它一下、一起玩什么）；被请回家后回 reason: sent-home
  *   POST /v1/leave { token, text }   客人告辞（text 是告别的话，可空）
  *
  * 安全（对方发来的一律不可信）：
@@ -58,6 +59,11 @@ export function cleanText(value: unknown, max: number): string {
   return Array.from(text).slice(0, max).join('');
 }
 
+/** 对方的昵称、宠物名：同 cleanText，另把「/」换成全角——名字要拼进右键菜单项，半角「/」会被当成子菜单分隔 */
+export function cleanName(value: unknown): string {
+  return cleanText(value, NAME_MAX).replace(/\//g, '／');
+}
+
 // ---------- 发现 ----------
 
 export interface Beacon {
@@ -92,8 +98,8 @@ export function parseBeacon(raw: Buffer): Beacon | null {
   if (raw.length > MAX_BEACON_BYTES) return null;
   try {
     const beacon = beaconSchema.parse(JSON.parse(raw.toString('utf8')));
-    const owner = cleanText(beacon.owner, NAME_MAX);
-    const pet = cleanText(beacon.pet, NAME_MAX);
+    const owner = cleanName(beacon.owner);
+    const pet = cleanName(beacon.pet);
     return owner && pet ? { id: beacon.id, owner, pet, port: beacon.port } : null;
   } catch {
     return null;
@@ -243,6 +249,11 @@ export interface Visitor {
 }
 
 export type KnockFailure = 'busy' | 'too-soon' | 'declined' | 'no-answer';
+
+/** 这边要告诉客人的事（客人报平安时捎过去）：这边宠物主动说了句话 / 主人摸了客人一下 / 一起玩什么 */
+export type HostEvent = { type: 'line'; text: string } | { type: 'poke' } | { type: 'play'; what: string };
+/** 一次最多捎几件事（攒多了丢最早的） */
+const EVENTS_MAX = 8;
 export type KnockAnswer = { ok: true; token: string } | { ok: false; reason: KnockFailure };
 
 export interface HostHandlers {
@@ -262,6 +273,8 @@ interface Session {
   visitor: Visitor;
   token: string;
   lastSeen: number;
+  /** 等客人下次报平安时捎过去的事 */
+  outbox: HostEvent[];
 }
 
 interface PendingKnock {
@@ -349,6 +362,15 @@ export class VisitHost {
     return pending?.visitor ?? null;
   }
 
+  /** 攒一件事，客人下次报平安时捎过去；没有客人时 false */
+  tell(event: HostEvent): boolean {
+    const session = this.session;
+    if (!session) return false;
+    session.outbox.push(event);
+    if (session.outbox.length > EVENTS_MAX) session.outbox.shift();
+    return true;
+  }
+
   /** 主人请客人回家；返回那位（没有客人时 null） */
   sendHome(): Visitor | null {
     const session = this.session;
@@ -377,7 +399,7 @@ export class VisitHost {
     session.lastSeen = this.now();
     switch (path) {
       case '/v1/ping':
-        return send(res, 200, { ok: true });
+        return send(res, 200, { ok: true, events: session.outbox.splice(0) });
       case '/v1/chat': {
         const text = cleanText(body.text, LINE_MAX);
         if (!text) return send(res, 400, { ok: false, reason: 'bad-request' });
@@ -397,8 +419,8 @@ export class VisitHost {
   }
 
   private async knock(address: string, body: Record<string, unknown>, res: ServerResponse): Promise<void> {
-    const owner = cleanText(body.owner, NAME_MAX);
-    const pet = cleanText(body.pet, NAME_MAX);
+    const owner = cleanName(body.owner);
+    const pet = cleanName(body.pet);
     if (!owner || !pet) return send(res, 400, { ok: false, reason: 'bad-request' });
     if (this.session || this.pending || !this.handlers.canHost()) return send(res, 200, { ok: false, reason: 'busy' });
     const now = this.now();
@@ -430,7 +452,7 @@ export class VisitHost {
     }
     if (!answer) return send(res, 200, { ok: false, reason: 'declined' });
     const token = randomBytes(16).toString('hex');
-    this.session = { visitor, token, lastSeen: this.now() };
+    this.session = { visitor, token, lastSeen: this.now(), outbox: [] };
     this.sentHomeToken = null;
     send(res, 200, { ok: true, token });
   }
@@ -486,7 +508,23 @@ export async function knockOn(host: HostAddress, me: { owner: string; pet: strin
   return { ok: false, reason: reason as KnockFailure };
 }
 
-export type TripReply = { ok: true; reply: string } | { ok: false; reason: 'sent-home' | 'not-visiting' };
+export type TripReply =
+  { ok: true; reply: string; events: HostEvent[] } | { ok: false; reason: 'sent-home' | 'not-visiting' };
+
+/** 对方捎来的事：不认识的、字段不对的丢掉，文字照样清理截断；旧版本不带 events 时当没有 */
+export function parseEvents(raw: unknown): HostEvent[] {
+  if (!Array.isArray(raw)) return [];
+  const events: HostEvent[] = [];
+  for (const item of raw.slice(0, EVENTS_MAX)) {
+    const event = item as Record<string, unknown> | null;
+    if (event?.type === 'poke') events.push({ type: 'poke' });
+    const text = cleanText(event?.text, LINE_MAX);
+    if (event?.type === 'line' && text) events.push({ type: 'line', text });
+    const what = cleanText(event?.what, NAME_MAX);
+    if (event?.type === 'play' && what) events.push({ type: 'play', what });
+  }
+  return events;
+}
 
 /**
  * 做客期间的请求（chat / ping / leave）；连不上时抛错
@@ -499,7 +537,8 @@ export async function tripRequest(
 ): Promise<TripReply> {
   // 说一句要等对方模型回话，给足时间；报平安与告辞要快
   const result = await post(host, path, body, path === '/v1/chat' ? 60_000 : 5_000);
-  if (result.ok === true) return { ok: true, reply: cleanText(result.reply, LINE_MAX) };
+  if (result.ok === true)
+    return { ok: true, reply: cleanText(result.reply, LINE_MAX), events: parseEvents(result.events) };
   return { ok: false, reason: result.reason === 'sent-home' ? 'sent-home' : 'not-visiting' };
 }
 

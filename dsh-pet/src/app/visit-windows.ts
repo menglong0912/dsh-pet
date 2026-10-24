@@ -1,8 +1,10 @@
 /**
  * 串门的窗口这一半（Electron）：
- *   - 客人来了：在自家宠物旁边开一个小窗显示客人——内置皮肤换个色、脚下挂名牌、头上冒它说的话。
- *     整窗点击穿透、不抢焦点，不挡主人干活；请它回家走右键菜单（features.ts）。
- *   - 自己出门了：自家宠物窗口变半透明，表示「人不在家」，右键菜单照常能点（叫它回家）。
+ *   - 客人来了：在自家宠物旁边开一个小窗显示客人——内置皮肤的蓝色换成粉色、面朝自家宠物、脚下挂名牌、
+ *     头上冒它说的话。不抢焦点；只有宠物身上那一块能点（摸它一下），别处点击穿透，不挡主人干活；
+ *     请它回家、一起玩走右键菜单（features.ts）。
+ *   - 自己出门了：自家宠物窗口变半透明，表示「人不在家」，右键菜单照常能点（叫它回家）；
+ *     转播别人家的聊天时临时调亮，看得清气泡。
  *
  * 客人窗口的页面由本机服务的 GET /app/guest 提供（guestPage），动画与字体走插件路由
  * （/dsh-pet-7340/thumb/main/… 与 /font/…），与页面同源，不用另开文件通道。
@@ -59,13 +61,17 @@ export interface PetBox {
 }
 
 /** 出门时自家宠物的不透明度 */
-const AWAY_OPACITY = 0.3;
+export const AWAY_OPACITY = 0.3;
+/** 转播别人家的聊天时（冒气泡那几秒）的不透明度 */
+export const RELAY_OPACITY = 0.9;
 /** 客人窗口宽度占自家宠物宽度的比例（客人小一号） */
 const GUEST_SCALE = 0.7;
 /** 客人窗口里，宠物上方留给气泡的高度 */
 const BUBBLE_ROOM = 96;
 /** 名牌的高度 */
 const TAG_ROOM = 26;
+/** 看光标在不在客人身上的间隔 */
+const HOVER_MS = 100;
 /** 脚底在舞台高度上的位置 */
 const FEET_RATIO = FEET_Y / CANVAS_H;
 
@@ -76,9 +82,9 @@ function homeWindows(electron: WindowElectron): WindowLike[] {
   );
 }
 
-/** 出门 / 回家：自家宠物变半透明 / 恢复 */
-export function fadeHome(electron: WindowElectron, away: boolean): void {
-  for (const win of homeWindows(electron)) win.setOpacity(away ? AWAY_OPACITY : 1);
+/** 出门 / 转播 / 回家：自家宠物窗口的不透明度（AWAY_OPACITY / RELAY_OPACITY / 1） */
+export function fadeHome(electron: WindowElectron, opacity: number): void {
+  for (const win of homeWindows(electron)) win.setOpacity(opacity);
 }
 
 /** pet:set-bounds 的载荷 → 包围盒（窗口坐标 + 左 / 上余量 = 包围盒）；字段不全时 null */
@@ -100,13 +106,45 @@ export function watchHomePet(electron: WindowElectron): { box(): PetBox | null; 
 }
 
 /**
- * 名字 → 色相偏移（同一位客人每次来颜色一样）。只在 240°–300° 之间转：整只宠物一起转色，
- * 这一段头发变绿 / 青、肤色还是粉的；转到别的角度脸会发绿发蓝（拿待机帧按 CSS hue-rotate 矩阵逐档比过）。
+ * 客人的配色：把蓝色系（色相 170°–270°，头发、裙子、眼睛）转到粉色，稍微提亮、降一点饱和度；
+ * 皮肤、白色花边、描边不动（整张图一起 hue-rotate 的话脸会发绿）。带边 20° 渐变，免得出现色块分界。
+ * 逐像素改 RGBA；客人页面里每帧对视频画面跑一遍（函数源码原样嵌进页面，所以只能用自己的局部变量）。
  */
-export function guestHue(name: string): number {
-  let hash = 0;
-  for (const ch of name) hash = (hash * 31 + (ch.codePointAt(0) ?? 0)) % 100_000;
-  return 240 + (hash % 61);
+export function pinkPixels(data: Uint8ClampedArray): void {
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] === 0) continue;
+    const r = data[i] / 255;
+    const g = data[i + 1] / 255;
+    const b = data[i + 2] / 255;
+    const max = Math.max(r, g, b);
+    const delta = max - Math.min(r, g, b);
+    if (max === 0 || delta / max < 0.12) continue;
+    const hue =
+      ((max === r ? ((g - b) / delta) % 6 : max === g ? (b - r) / delta + 2 : (r - g) / delta + 4) * 60 + 360) % 360;
+    const weight = Math.min(1, Math.max(0, (hue - 170) / 20), Math.max(0, (270 - hue) / 20));
+    if (weight === 0) continue;
+    const h = (hue + 110 * weight) % 360;
+    const s = (delta / max) * (1 - 0.15 * weight);
+    const v = max + (1 - max) * 0.25 * weight;
+    const c = v * s;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const m = v - c;
+    const [rr, gg, bb] =
+      h < 60
+        ? [c, x, 0]
+        : h < 120
+          ? [x, c, 0]
+          : h < 180
+            ? [0, c, x]
+            : h < 240
+              ? [0, x, c]
+              : h < 300
+                ? [x, 0, c]
+                : [c, 0, x];
+    data[i] = (rr + m) * 255;
+    data[i + 1] = (gg + m) * 255;
+    data[i + 2] = (bb + m) * 255;
+  }
 }
 
 /**
@@ -131,11 +169,32 @@ export function guestBounds(home: PetBox | null, workArea: Rect): Rect {
   return { x: Math.round(clampX(x)), y: Math.round(clampY(y)), width, height };
 }
 
+/** 客人站在自家宠物哪一边（不知道自家宠物在哪时当左边） */
+export function guestSide(bounds: Rect, home: PetBox | null): 'left' | 'right' {
+  return home && bounds.x + bounds.width / 2 > home.left + home.size / 2 ? 'right' : 'left';
+}
+
+/** 客人窗口里宠物身体那一块（屏幕坐标）：光标在这里时窗口才接点击，别处照样穿透 */
+export function petHitRect(bounds: Rect): Rect {
+  const videoHeight = (bounds.width * 9) / 16;
+  const top = bounds.y + BUBBLE_ROOM + videoHeight * 0.15;
+  return {
+    x: Math.round(bounds.x + bounds.width * 0.32),
+    y: Math.round(top),
+    width: Math.round(bounds.width * 0.36),
+    height: Math.round(bounds.y + BUBBLE_ROOM + videoHeight * FEET_RATIO - top),
+  };
+}
+
 export interface GuestWindow {
+  /** 客人站在自家宠物哪一边 */
+  side: 'left' | 'right';
   /** 客人说一句（气泡显示 10 秒） */
   say(text: string): void;
   /** 挥手（进门、告辞时） */
   wave(): void;
+  /** 播一段内置皮肤的动画（一起玩），播完回到待机 */
+  play(anim: string): void;
   /** 过一会儿关掉（先让告别的话和挥手放完） */
   close(afterMs: number): void;
 }
@@ -145,17 +204,20 @@ export interface GuestWindow {
  * @param pageUrl 本机服务的 /app/guest
  * @param tag 名牌（「小王家的 小鱼」）
  * @param home 自家宠物现在的位置（watchHomePet）
+ * @param onPoke 主人点了客人一下
  */
 export function openGuestWindow(
   electron: WindowElectron,
   pageUrl: string,
   tag: string,
   home: PetBox | null,
+  onPoke: () => void,
 ): GuestWindow {
   const point = home
     ? { x: home.left + home.size / 2, y: home.top + home.size / 4 }
     : electron.screen.getCursorScreenPoint();
   const bounds = guestBounds(home, electron.screen.getDisplayNearestPoint(point).workArea);
+  const side = guestSide(bounds, home);
   const win = new electron.BrowserWindow({
     ...bounds,
     show: false,
@@ -166,8 +228,17 @@ export function openGuestWindow(
     resizable: false,
     hasShadow: false,
     focusable: false,
+    // 主人在别的应用里时，点客人的第一下也要算数（不然第一下只用来激活窗口）
+    acceptFirstMouse: true,
     enableLargerThanScreen: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false },
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      // 客人是逐帧画出来的（requestAnimationFrame）：被自家宠物窗口挡住时也不能停
+      backgroundThrottling: false,
+    },
   });
   win.setAlwaysOnTop(true, 'floating');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
@@ -190,20 +261,48 @@ export function openGuestWindow(
       for (const code of queued.splice(0)) run(code);
     })
     .catch(() => win.destroy());
+  // 窗口没有 preload、不开 IPC：主进程每 HOVER_MS 看一眼光标——在客人身上就让窗口接点击，
+  // 再顺手问页面这段时间被点了几下（页面自己先播被摸的反应动画）
+  const hit = petHitRect(bounds);
+  let clickable = false;
+  const hover = setInterval(() => {
+    if (win.isDestroyed()) {
+      clearInterval(hover);
+      return;
+    }
+    const cursor = electron.screen.getCursorScreenPoint();
+    const inside =
+      cursor.x >= hit.x && cursor.x < hit.x + hit.width && cursor.y >= hit.y && cursor.y < hit.y + hit.height;
+    if (inside !== clickable) {
+      clickable = inside;
+      win.setIgnoreMouseEvents(!inside);
+    }
+    if (inside && ready) {
+      void win.webContents
+        .executeJavaScript('guest.takePokes()')
+        .then((pokes) => {
+          if (Number(pokes) > 0) onPoke();
+        })
+        .catch(() => undefined);
+    }
+  }, HOVER_MS);
   // 参数一律 JSON.stringify 成字面量：对方发来的名字和话只当字符串数据，页面里用 textContent 显示
-  run(`guest.arrive(${JSON.stringify(tag)}, ${guestHue(tag)})`);
+  run(`guest.arrive(${JSON.stringify(tag)}, ${JSON.stringify(side === 'left' ? 'right' : 'left')})`);
   return {
+    side,
     say: (text) => run(`guest.say(${JSON.stringify(text)})`),
     wave: () => run('guest.wave()'),
+    play: (anim) => run(`guest.play(${JSON.stringify(anim)})`),
     close(afterMs) {
       setTimeout(() => {
+        clearInterval(hover);
         if (!win.isDestroyed()) win.destroy();
       }, afterMs);
     },
   };
 }
 
-/** 客人窗口的页面（静态；名牌、色相、台词由 openGuestWindow 经 executeJavaScript 送进来） */
+/** 客人窗口的页面（静态；名牌、朝向、台词由 openGuestWindow 经 executeJavaScript 送进来） */
 export const guestPage = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>客人</title>
 <style>
@@ -212,28 +311,61 @@ html,body{margin:0;height:100%;background:transparent;overflow:hidden;user-selec
 body{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;font-family:"ShangshouSoftCandy","PingFang SC",sans-serif}
 #bubble{max-width:88%;box-sizing:border-box;padding:7px 12px;margin-bottom:-4px;background:#fff;color:#22313f;border:2px solid #4a5b6c;border-radius:14px;font-size:14px;line-height:1.45;word-break:break-all;opacity:0;transition:opacity .25s}
 #bubble.on{opacity:1}
-video{width:100%;display:block}
+#src{display:none}
+#pet{width:100%;aspect-ratio:16/9;display:block;cursor:pointer}
+/* 朝右 = 素材镜像（素材原样朝左） */
+#pet.right{transform:scaleX(-1)}
 /* 名牌往上提一截：舞台底部 30/360 是脚下的透明边（舞台高 = 窗口宽 × 9/16） */
 #tag{height:20px;margin:calc(-100vw * 9 / 16 * 30 / 360 + 2px) 0 4px;padding:0 9px;border-radius:10px;background:rgba(34,49,63,.72);color:#fff;font-size:12px;line-height:20px;white-space:nowrap}
 </style></head>
-<body><div id="bubble"></div><video id="pet" muted playsinline autoplay></video><div id="tag"></div>
+<body><div id="bubble"></div><canvas id="pet"></canvas><div id="tag"></div><video id="src" muted playsinline autoplay></video>
 <script>
 'use strict';
 const ANIM = '/dsh-pet-7340/thumb/main/';
-const video = document.getElementById('pet');
+const IDLE = '待机呼吸休闲';
+const REACTIONS = ['点击回应-开心跃动', '点击回应-挠痒咯咯笑', '点击回应-害羞惊讶'];
+const pink = ${pinkPixels.toString()};
+const video = document.getElementById('src');
+const canvas = document.getElementById('pet');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const bubble = document.getElementById('bubble');
 let hideTimer = null;
+let pokes = 0;
+let shown = -1;
 function play(name, loop) {
   video.loop = loop;
   video.src = ANIM + encodeURIComponent(name) + '.webm';
   video.play().catch(() => undefined);
 }
-// 挥完手回到待机
-video.addEventListener('ended', () => play('待机呼吸休闲', true));
+// 每出一帧新画面就画到画布上、换成粉色
+function draw() {
+  requestAnimationFrame(draw);
+  if (video.readyState < 2 || video.currentTime === shown) return;
+  shown = video.currentTime;
+  const width = Math.round(canvas.clientWidth * devicePixelRatio);
+  const height = Math.round((width * 9) / 16);
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  ctx.clearRect(0, 0, width, height);
+  ctx.drawImage(video, 0, 0, width, height);
+  const frame = ctx.getImageData(0, 0, width, height);
+  pink(frame.data);
+  ctx.putImageData(frame, 0, 0);
+}
+requestAnimationFrame(draw);
+// 挥完手、玩完回到待机
+video.addEventListener('ended', () => play(IDLE, true));
+// 被主人摸了一下：先自己笑一下，主进程过会儿来取次数，再让客人家那边回句话
+canvas.addEventListener('click', () => {
+  pokes += 1;
+  play(REACTIONS[Math.floor(Math.random() * REACTIONS.length)], false);
+});
 window.guest = {
-  arrive(tag, hue) {
+  arrive(tag, facing) {
     document.getElementById('tag').textContent = tag;
-    video.style.filter = 'hue-rotate(' + Number(hue) + 'deg)';
+    canvas.classList.toggle('right', facing === 'right');
     play('点击回应-元气挥手', false);
   },
   say(text) {
@@ -244,6 +376,14 @@ window.guest = {
   },
   wave() {
     play('点击回应-元气挥手', false);
+  },
+  play(name) {
+    play(String(name), false);
+  },
+  takePokes() {
+    const count = pokes;
+    pokes = 0;
+    return count;
   },
 };
 </script></body></html>

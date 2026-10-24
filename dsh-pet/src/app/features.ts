@@ -7,8 +7,9 @@
  *   - 与插件的自动碎碎念共用一个节拍（takeWhisperTurn）：看屏幕占它的拍，应用说话时它让一让；
  *   - 把 Claude Code 与番茄钟合成为一个外部工作状态（桌宠只有一个外部槽）；
  *   - 把一天里的事记进宠物日记（diary.ts），第二天回到电脑前时补写前一天的日记；
- *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口）：设置里开了才发信标、开接待端口；
- *     出门时自家宠物变半透明，客人来了在自家宠物旁边开个小窗；串门的台词只按人设生成，不带「主人此刻」；
+ *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口、visit-talk.ts 管怎么聊）：设置里开了才发信标、开接待端口；
+ *     出门时自家宠物变半透明、把别人家的聊天转播回来，客人来了在自家宠物旁边开个小窗（能摸、能一起玩）；
+ *     两边接着前文聊、主人家也会起话题；串门的台词只按人设生成，不带「主人此刻」；
  *   - 右键菜单根上注册「看看我在干嘛 / 开始·停止番茄钟 / 宠物日记」与串门的项（「串门」子菜单列附近的邻居，
  *     有人敲门时的应答项、送客 / 回家项），并长轮询点击。
  *
@@ -38,8 +39,25 @@ import type { HealthEvent, PomodoroEvent } from './reminders';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
 import { cleanText, knockOn, LINE_MAX, NAME_MAX, Neighborhood, PING_MS, tripRequest, VisitHost } from './visit';
-import type { HostHandlers, KnockAnswer, KnockFailure, Neighbor, TripReply, Visitor } from './visit';
-import { fadeHome, openGuestWindow, watchHomePet } from './visit-windows';
+import type { HostEvent, HostHandlers, KnockAnswer, KnockFailure, Neighbor, TripReply, Visitor } from './visit';
+import {
+  findPlayThing,
+  GUEST_ANSWERS,
+  GUEST_ASK,
+  guestPrompt,
+  HOST_ASK,
+  HOST_OPENERS,
+  hostPrompt,
+  NUDGE_GAP_MS,
+  openerGap,
+  PLAY_THINGS,
+  QUIET_MS,
+  talkGap,
+  travelPrompt,
+  tripRounds,
+} from './visit-talk';
+import type { PlayThing } from './visit-talk';
+import { AWAY_OPACITY, fadeHome, openGuestWindow, RELAY_OPACITY, watchHomePet } from './visit-windows';
 import type { GuestWindow, Rect, WindowElectron } from './visit-windows';
 
 const run = promisify(execFile);
@@ -55,9 +73,10 @@ const MENU_DIARY = '宠物日记';
 const MENU_VISIT_GROUP = '串门';
 /** 插件每个 owner 最多 20 项：根上固定 3 项 + 串门应答最多 2 项，邻居最多列这么多 */
 const MENU_NEIGHBORS_MAX = 15;
-/** 做客时最多聊几句、两句之间隔多久 */
-const TRIP_ROUNDS = 4;
-const TALK_GAP_MS = 60_000;
+/** 做客时转播回自家的气泡显示多久（窗口同时调亮这么久） */
+const RELAY_MS = 8_000;
+/** 转播的气泡每条至少显示这么久才换下一条：对方回话快时，自己说的那句也看得清 */
+const RELAY_MIN_MS = 4_000;
 /** 自动看屏幕要求键鼠最近活动过（秒）：人在看视频 / 发呆时不打扰 */
 const SCREEN_ACTIVE_IDLE_SEC = 60;
 /** 应用刚说过话这么久内，自动碎碎念让一让（气泡默认显示 10 秒） */
@@ -78,16 +97,38 @@ interface Trip {
   host: Neighbor;
   token: string;
   since: number;
-  /** 聊过的话（「你：…」「小鱼：…」），接着聊、回家讲见闻用 */
+  /** 聊过的话（「你：…」「小鱼：…」「（一起吃西瓜）」），接着聊、回家讲见闻用 */
   lines: string[];
-  /** 已经开口说过几句（送没送到都算） */
+  /** 最近一句（谁说的都算）的时间：刚有人说过话就先不开口 */
+  lastLineAt: number;
+  /** 自己开口说过几句（送没送到都算） */
   rounds: number;
+  /** 回过几次对方捎来的事（GUEST_ANSWERS 封顶） */
+  answers: number;
+  /** 说话按趟串行：上一句的回话到了再说下一句 */
+  queue: Promise<void>;
   /** 连着几次报平安没送到 */
   failures: number;
   pinging: boolean;
   /** 下一句的定时器 */
   talkTimer: ReturnType<typeof setTimeout> | null;
   pingTimer: ReturnType<typeof setInterval>;
+}
+
+/** 来自家做客的客人 */
+interface Hosting {
+  visitor: Visitor;
+  window: GuestWindow;
+  since: number;
+  /** 聊过的话（「你：…」是自家宠物，「小鱼：…」是客人），回话接前文用 */
+  lines: string[];
+  /** 最近一句（谁说的都算）的时间：刚有人说过话就先不起新话题 */
+  lastLineAt: number;
+  /** 主动起过几次话题（HOST_OPENERS 封顶） */
+  openers: number;
+  /** 上次把摸一下 / 一起玩捎给客人的时间（NUDGE_GAP_MS） */
+  lastNudgeAt: number;
+  openerTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /** 回家的原因：到点 / 主人叫回（含家里有话要说、关了串门、退出）/ 被对方请回 / 失联 */
@@ -191,9 +232,12 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let knockingOn: Neighbor | null = null;
   /** 自家宠物正在别人家做客 */
   let trip: Trip | null = null;
-  /** 来自家做客的客人的窗口与进门时间 */
-  let guestWindow: GuestWindow | null = null;
-  let guestSince = 0;
+  /** 来自家做客的客人 */
+  let hosting: Hosting | null = null;
+  /** 转播结束后把自家宠物调回半透明的定时器 */
+  let relayTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 下一条转播最早什么时候能顶掉上一条（RELAY_MIN_MS） */
+  let relayFreeAt = 0;
   /** 自家宠物在哪（客人站它旁边） */
   const homePet = watchHomePet(electron);
 
@@ -738,8 +782,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /** 关接待：家里的客人窗口直接关掉（客人下次报平安时知道自己该回家了） */
   async function closeHost(): Promise<void> {
-    guestWindow?.close(0);
-    guestWindow = null;
+    if (hosting && hosting.openerTimer !== null) clearTimeout(hosting.openerTimer);
+    hosting?.window.close(0);
+    hosting = null;
     const host = visitHost;
     visitHost = null;
     await host?.close();
@@ -782,11 +827,17 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       void refreshMenu(Date.now());
     },
     async line(visitor, text) {
-      guestWindow?.say(text);
-      const reply = await visitLine(
-        `${visitor.owner} 家的宠物「${visitor.pet}」来你家串门，它对你说：「${text}」。回它一句。`,
-        '欢迎来玩呀～',
+      const current = hosting?.visitor === visitor ? hosting : null;
+      current?.window.say(text);
+      const lines = current?.lines ?? [];
+      lines.push(`${visitor.pet}：${text}`);
+      if (current) current.lastLineAt = Date.now();
+      const reply = cleanText(
+        await visitLine(hostPrompt(visitor.owner, visitor.pet, lines, HOST_ASK.answer), '欢迎来玩呀～'),
+        LINE_MAX,
       );
+      lines.push(`你：${reply}`);
+      if (current) current.lastLineAt = Date.now();
       await say(reply);
       return reply;
     },
@@ -808,13 +859,75 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       return;
     }
     log(`串门：${visitor.owner} 家的 ${visitor.pet} 进门了`);
-    guestSince = Date.now();
-    guestWindow = openGuestWindow(
-      electron,
-      `${new URL(deps.petBase).origin}/app/guest`,
-      `${visitor.owner} 家的 ${visitor.pet}`,
-      homePet.box(),
-    );
+    const now = Date.now();
+    const current: Hosting = {
+      visitor,
+      window: openGuestWindow(
+        electron,
+        `${new URL(deps.petBase).origin}/app/guest`,
+        `${visitor.owner} 家的 ${visitor.pet}`,
+        homePet.box(),
+        () => pokeGuest(current),
+      ),
+      since: now,
+      lines: [],
+      lastLineAt: now,
+      openers: 0,
+      lastNudgeAt: 0,
+      openerTimer: null,
+    };
+    hosting = current;
+    if (deps.appConfig().visit.chat) current.openerTimer = setTimeout(() => void openTopic(current), openerGap(true));
+  }
+
+  /** 主人家起个新话题：自家宠物说出来，攒着等客人报平安时捎过去，客人那边会回一句 */
+  async function openTopic(current: Hosting): Promise<void> {
+    current.openerTimer = null;
+    if (hosting !== current || !deps.appConfig().visit.chat) return;
+    const quiet = Date.now() - current.lastLineAt;
+    if (quiet < QUIET_MS) {
+      current.openerTimer = setTimeout(() => void openTopic(current), QUIET_MS - quiet);
+      return;
+    }
+    current.openers += 1;
+    const { owner, pet } = current.visitor;
+    // 生成不了就不起话题（没有兜底句：固定的开场白聊不下去）
+    const text = cleanText(await compose(hostPrompt(owner, pet, current.lines, HOST_ASK.opener), ''), LINE_MAX);
+    if (hosting !== current || !text) return;
+    current.lines.push(`你：${text}`);
+    current.lastLineAt = Date.now();
+    visitHost?.tell({ type: 'line', text });
+    await say(text);
+    if (hosting === current && current.openers < HOST_OPENERS) {
+      current.openerTimer = setTimeout(() => void openTopic(current), openerGap(false));
+    }
+  }
+
+  /** 主人摸了客人一下（客人窗口里它自己先笑了）：隔一会儿才捎一次，客人家那边回句话 */
+  function pokeGuest(current: Hosting): void {
+    if (hosting !== current || Date.now() - current.lastNudgeAt < NUDGE_GAP_MS) return;
+    current.lastNudgeAt = Date.now();
+    current.lines.push(`（主人摸了摸 ${current.visitor.pet}）`);
+    visitHost?.tell({ type: 'poke' });
+  }
+
+  /** 和客人一起玩：两只宠物同时播同一段动画（自家宠物转身面朝客人），客人家那边说一句 */
+  async function playTogether(thing: PlayThing): Promise<void> {
+    const current = hosting;
+    if (!current) return;
+    current.window.play(thing.anim);
+    current.lines.push(`（一起${thing.label}）`);
+    if (Date.now() - current.lastNudgeAt >= NUDGE_GAP_MS) {
+      current.lastNudgeAt = Date.now();
+      visitHost?.tell({ type: 'play', what: thing.label });
+    }
+    try {
+      // 客人站左边就朝左（素材原样朝左），站右边朝右
+      const result = await petRequest('POST', '/anim', { name: thing.anim, facing: current.window.side });
+      if (result.ok !== true) log(`串门：一起玩没播成：${JSON.stringify(result)}`);
+    } catch (error) {
+      log(`串门：一起玩没播成：${errorText(error)}`);
+    }
   }
 
   function sendGuestHome(): void {
@@ -824,15 +937,19 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /** 送客：客人窗口说完告别的话、挥挥手再关，自家宠物说一句，记进日记 */
   function seeGuestOff(visitor: Visitor, farewell: string, line: string): void {
-    if (farewell) guestWindow?.say(farewell);
-    guestWindow?.wave();
-    guestWindow?.close(5_000);
-    guestWindow = null;
+    const current = hosting;
+    hosting = null;
+    if (current) {
+      if (current.openerTimer !== null) clearTimeout(current.openerTimer);
+      if (farewell) current.window.say(farewell);
+      current.window.wave();
+      current.window.close(5_000);
+    }
     log(`串门：${visitor.owner} 家的 ${visitor.pet} 走了`);
     diary.note(
       Date.now(),
       'visit',
-      `${visitor.owner} 家的宠物 ${visitor.pet} 来串门，待了 ${durationText(Date.now() - guestSince)}`,
+      `${visitor.owner} 家的宠物 ${visitor.pet} 来串门，待了 ${durationText(Date.now() - (current?.since ?? Date.now()))}`,
     );
     void say(line);
     void refreshMenu(Date.now());
@@ -853,6 +970,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       actions.set(`不让 ${knocking.pet} 进来`, () => letIn(false));
     } else if (guest) {
       actions.set(`请 ${guest.pet} 回家`, sendGuestHome);
+      for (const thing of PLAY_THINGS) actions.set(`和 ${guest.pet} 一起玩/${thing.label}`, () => playTogether(thing));
     } else if (trip) {
       actions.set(`从 ${trip.host.owner} 家回来`, () => comeHome('called'));
     } else if (enabled && visiting && knockingOn === null) {
@@ -915,47 +1033,124 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       token,
       since: Date.now(),
       lines: [],
+      lastLineAt: Date.now(),
       rounds: 0,
+      answers: 0,
+      queue: Promise.resolve(),
       failures: 0,
       pinging: false,
       talkTimer: null,
       pingTimer: setInterval(() => void pingTrip(current), PING_MS),
     };
     trip = current;
-    fadeHome(electron, true);
+    fadeHome(electron, AWAY_OPACITY);
     log(`串门：进了 ${host.owner} 家的门`);
     current.talkTimer = setTimeout(() => void talk(current), 3_000);
     void refreshStatus(Date.now());
     void refreshMenu(Date.now());
   }
 
-  /** 做客时说一句：头一句打招呼，之后接着聊，说满 TRIP_ROUNDS 句就安静待着 */
+  /** 做客时自己开口：头一句打招呼，之后隔 30–90 秒接着聊（刚有人说过话就再等等），说满 tripRounds 句就只回不说 */
   async function talk(current: Trip): Promise<void> {
+    current.talkTimer = null;
     if (trip !== current) return;
-    const { owner, pet } = current.host;
-    const first = current.lines.length === 0;
-    const instruction = first
-      ? `你去 ${owner} 家串门，刚进门，见到了它家的宠物「${pet}」。跟它打个招呼。`
-      : `你在 ${owner} 家串门，正和它家的宠物「${pet}」聊天。刚才你们说了：\n${current.lines.join('\n')}\n接着跟它聊一句。`;
-    const text = cleanText(await visitLine(instruction, first ? `${pet}，我来串门啦～` : '你家真舒服呀～'), LINE_MAX);
-    if (trip !== current) return;
-    current.rounds += 1;
-    let result: TripReply | null = null;
-    try {
-      result = await tripRequest(current.host, '/v1/chat', { token: current.token, text });
-    } catch (error) {
-      // 没送到：不算失联（报平安那条负责判断），下一句照常
-      log(`串门：说话没送到：${errorText(error)}`);
-    }
-    if (trip !== current) return;
-    if (result && !result.ok) {
-      await comeHome(result.reason === 'sent-home' ? 'sent-home' : 'lost');
+    const quiet = Date.now() - current.lastLineAt;
+    if (current.rounds > 0 && quiet < QUIET_MS) {
+      current.talkTimer = setTimeout(() => void talk(current), QUIET_MS - quiet);
       return;
     }
-    if (result) current.lines.push(`你：${text}`, `${pet}：${result.reply || '……'}`);
+    const first = current.rounds === 0;
+    current.rounds += 1;
+    await chatTrip(
+      current,
+      first ? GUEST_ASK.greet : GUEST_ASK.follow,
+      first ? `${current.host.pet}，我来串门啦～` : '你家真舒服呀～',
+    );
     // 不用模型聊天时只打个招呼
-    const rounds = deps.appConfig().visit.chat ? TRIP_ROUNDS : 1;
-    if (current.rounds < rounds) current.talkTimer = setTimeout(() => void talk(current), TALK_GAP_MS);
+    const { chat, stayMin } = deps.appConfig().visit;
+    if (trip === current && current.rounds < (chat ? tripRounds(stayMin) : 1)) {
+      current.talkTimer = setTimeout(() => void talk(current), talkGap());
+    }
+  }
+
+  /** 做客时说一句（按趟串行）：生成、转播回自家、说给对方听，记下对方的回话 */
+  function chatTrip(current: Trip, ask: string, fallback: string): Promise<void> {
+    const next = current.queue.then(async () => {
+      if (trip !== current) return;
+      const { owner, pet } = current.host;
+      const text = cleanText(await visitLine(guestPrompt(owner, pet, current.lines, ask), fallback), LINE_MAX);
+      if (trip !== current) return;
+      current.lastLineAt = Date.now();
+      relay(`（在 ${owner} 家）${text}`);
+      let result: TripReply | null = null;
+      try {
+        result = await tripRequest(current.host, '/v1/chat', { token: current.token, text });
+      } catch (error) {
+        // 没送到：不算失联（报平安那条负责判断），下一句照常
+        log(`串门：说话没送到：${errorText(error)}`);
+      }
+      if (trip !== current || !result) return;
+      if (!result.ok) {
+        await comeHome(result.reason === 'sent-home' ? 'sent-home' : 'lost');
+        return;
+      }
+      current.lines.push(`你：${text}`, `${pet}：${result.reply || '……'}`);
+      current.lastLineAt = Date.now();
+      if (result.reply) relay(`${pet}：${result.reply}`);
+    });
+    current.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  /** 主人家捎来的事：它家宠物起的话题记下、转播；话题、摸一下、一起玩都回一句（一趟最多回 GUEST_ANSWERS 次） */
+  function onHostEvent(current: Trip, event: HostEvent): void {
+    const { owner, pet } = current.host;
+    let ask: string;
+    if (event.type === 'line') {
+      current.lines.push(`${pet}：${event.text}`);
+      current.lastLineAt = Date.now();
+      relay(`${pet}：${event.text}`);
+      ask = GUEST_ASK.answer;
+    } else if (event.type === 'play') {
+      // 只认自己也有的项目：对方捎来的名字不进提示词
+      const thing = findPlayThing(event.what);
+      if (!thing) return;
+      current.lines.push(`（一起${thing.label}）`);
+      relay(`（在 ${owner} 家和 ${pet} 一起${thing.label}）`);
+      ask = GUEST_ASK.play(thing.label);
+    } else {
+      ask = GUEST_ASK.poke;
+    }
+    if (!deps.appConfig().visit.chat || current.answers >= GUEST_ANSWERS) return;
+    current.answers += 1;
+    void chatTrip(current, ask, '嘿嘿～');
+  }
+
+  /**
+   * 做客时把聊天转播回自家：自家宠物冒气泡（不走 say：say 会先叫它回家），这几秒窗口调亮看得清。
+   * 一条接一条排着放，每条至少 RELAY_MIN_MS；排到时已经回家了就不放。
+   */
+  function relay(text: string): void {
+    const now = Date.now();
+    const wait = Math.max(0, relayFreeAt - now);
+    relayFreeAt = now + wait + RELAY_MIN_MS;
+    setTimeout(() => {
+      if (trip) showRelay(text);
+    }, wait);
+  }
+
+  function showRelay(text: string): void {
+    fadeHome(electron, RELAY_OPACITY);
+    if (relayTimer !== null) clearTimeout(relayTimer);
+    relayTimer = setTimeout(() => {
+      relayTimer = null;
+      if (trip) fadeHome(electron, AWAY_OPACITY);
+    }, RELAY_MS);
+    void petRequest('POST', '/broadcast', { text, anim: false, duration: RELAY_MS })
+      .then((result) => {
+        if (result.ok !== true) log(`串门：转播没显示出来：${JSON.stringify(result)}`);
+      })
+      .catch((error: unknown) => log(`串门：转播没显示出来：${errorText(error)}`));
   }
 
   /** 每 PING_MS 报一次平安，顺便看到点没有 */
@@ -974,6 +1169,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         return;
       }
       current.failures = 0;
+      for (const event of result.events) onHostEvent(current, event);
     } catch (error) {
       current.failures += 1;
       if (current.failures >= 3 && trip === current) {
@@ -996,7 +1192,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     trip = null;
     clearInterval(current.pingTimer);
     if (current.talkTimer !== null) clearTimeout(current.talkTimer);
-    fadeHome(electron, false);
+    fadeHome(electron, 1);
     const { owner, pet } = current.host;
     log(`串门：从 ${owner} 家回来了（${reason}）`);
     if (reason === 'time-up' || reason === 'called') {
@@ -1004,7 +1200,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         reason === 'time-up'
           ? cleanText(
               await visitLine(
-                `你在 ${owner} 家串门，该回家了。跟它家的宠物「${pet}」道个别。`,
+                guestPrompt(owner, pet, current.lines, GUEST_ASK.farewell),
                 `${pet}，我该回家啦，下次见～`,
               ),
               LINE_MAX,
@@ -1014,7 +1210,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         log(`串门：告辞没送到：${errorText(error)}`),
       );
     }
-    const chats = current.lines.length / 2;
+    const chats = current.lines.filter((line) => line.startsWith('你：')).length;
     const ending = reason === 'sent-home' ? '，被它家主人请回来了' : reason === 'lost' ? '，后来连不上就回来了' : '';
     diary.note(Date.now(), 'visit', `去 ${owner} 家串门，和它家的宠物 ${pet} 聊了 ${chats} 句${ending}`);
     void refreshStatus(Date.now());
@@ -1026,8 +1222,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       return;
     }
     void speak(
-      chats > 0
-        ? `你刚去 ${owner} 家串门回来，和它家的宠物「${pet}」聊了这些：\n${current.lines.join('\n')}\n用一句话跟主人讲讲串门的见闻。`
+      current.lines.length > 0
+        ? travelPrompt(owner, pet, current.lines)
         : `你去 ${owner} 家串门，${HOME_WITHOUT_CHAT[reason]}。跟主人说一声。`,
       back,
     );
@@ -1134,7 +1330,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       if (tickTimer !== null) clearTimeout(tickTimer);
       // 在别人家做客：告个辞（不等）；家里的客人窗口关掉
       void comeHome('called');
-      guestWindow?.close(0);
+      if (hosting && hosting.openerTimer !== null) clearTimeout(hosting.openerTimer);
+      hosting?.window.close(0);
       neighborhood?.stop();
       void visitHost?.close();
       homePet.dispose();

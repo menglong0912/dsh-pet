@@ -11,6 +11,7 @@ import {
   knockOn,
   Neighborhood,
   parseBeacon,
+  parseEvents,
   PING_MS,
   tripRequest,
   VisitHost,
@@ -39,6 +40,8 @@ test('beacons round-trip, and anything that is not ours or is malformed is ignor
   assert.equal(parseBeacon(raw({ ...base, pet: 'x'.repeat(600) })), null); // 超过一条信标的大小
   assert.equal(parseBeacon(Buffer.from('not json')), null);
   assert.equal(parseBeacon(raw({ ...base, owner: '一二三四五六七八九十十一十二' }))?.owner, '一二三四五六七八九十十一');
+  // 名字要拼进右键菜单项：半角「/」会被当成子菜单分隔，换成全角
+  assert.equal(parseBeacon(raw({ ...base, owner: '小/王', pet: 'a/b' }))?.pet, 'a／b');
 });
 
 test('broadcast addresses: one per LAN interface, skipping loopback, IPv6 and point-to-point tunnels', () => {
@@ -184,13 +187,18 @@ test('a visit: knock, get let in, chat, then leave; a second knock meanwhile is 
     assert.deepEqual(await tripRequest(target, '/v1/chat', { token, text: '你好呀\n' }), {
       ok: true,
       reply: '欢迎 小鱼～',
+      events: [],
     });
-    assert.deepEqual(await tripRequest(target, '/v1/ping', { token }), { ok: true, reply: '' });
+    assert.deepEqual(await tripRequest(target, '/v1/ping', { token }), { ok: true, reply: '', events: [] });
     assert.deepEqual(await tripRequest(target, '/v1/ping', { token: 'f'.repeat(32) }), {
       ok: false,
       reason: 'not-visiting',
     });
-    assert.deepEqual(await tripRequest(target, '/v1/leave', { token, text: '拜拜' }), { ok: true, reply: '' });
+    assert.deepEqual(await tripRequest(target, '/v1/leave', { token, text: '拜拜' }), {
+      ok: true,
+      reply: '',
+      events: [],
+    });
     assert.equal(host.guest(), null);
     assert.deepEqual(await tripRequest(target, '/v1/ping', { token }), { ok: false, reason: 'not-visiting' });
 
@@ -206,6 +214,57 @@ test('a visit: knock, get let in, chat, then leave; a second knock meanwhile is 
       'knocked 小王/小鱼@127.0.0.1',
     ]);
   });
+});
+
+test('what the host has to tell the guest rides on the next ping, once, newest kept when too much piles up', async () => {
+  await withHost({}, async (host, port) => {
+    const target = { address: '127.0.0.1', port };
+    assert.equal(host.tell({ type: 'poke' }), false, '没有客人时没人可告诉');
+    const [answer] = await knockAndAnswer(host, port, true);
+    const token = answer.ok ? answer.token : '';
+    assert.equal(host.tell({ type: 'line', text: '你喜欢吃什么？' }), true);
+    host.tell({ type: 'poke' });
+    host.tell({ type: 'play', what: '吃西瓜' });
+    const ping = await tripRequest(target, '/v1/ping', { token });
+    assert.deepEqual(ping.ok && ping.events, [
+      { type: 'line', text: '你喜欢吃什么？' },
+      { type: 'poke' },
+      { type: 'play', what: '吃西瓜' },
+    ]);
+    const again = await tripRequest(target, '/v1/ping', { token });
+    assert.deepEqual(again.ok && again.events, [], '捎过一次就清掉');
+    for (let n = 1; n <= 10; n += 1) host.tell({ type: 'line', text: `第 ${n} 句` });
+    const piled = await tripRequest(target, '/v1/ping', { token });
+    assert.deepEqual(piled.ok && piled.events.map((event) => (event.type === 'line' ? event.text : event.type)), [
+      '第 3 句',
+      '第 4 句',
+      '第 5 句',
+      '第 6 句',
+      '第 7 句',
+      '第 8 句',
+      '第 9 句',
+      '第 10 句',
+    ]);
+  });
+});
+
+test('events from the other side are checked like everything else it sends', () => {
+  assert.deepEqual(parseEvents(undefined), [], '旧版本不带 events');
+  assert.deepEqual(parseEvents('poke'), []);
+  assert.deepEqual(
+    parseEvents([
+      { type: 'line', text: '你好\u202e呀\n' },
+      { type: 'line', text: '' },
+      { type: 'poke', extra: 1 },
+      { type: 'play', what: '吃西瓜吃西瓜吃西瓜吃西瓜吃西瓜' },
+      { type: 'play' },
+      { type: 'dance' },
+      null,
+      'line',
+    ]),
+    [{ type: 'line', text: '你好 呀' }, { type: 'poke' }, { type: 'play', what: '吃西瓜吃西瓜吃西瓜吃西瓜' }],
+  );
+  assert.equal(parseEvents(Array.from({ length: 20 }, () => ({ type: 'poke' }))).length, 8);
 });
 
 test('the host can send a guest home, and the guest hears it on its next ping', async () => {

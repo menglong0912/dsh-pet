@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { guestBounds, guestHue, petBoxFrom } from './visit-windows.ts';
+import { guestBounds, guestSide, petBoxFrom, petHitRect, pinkPixels } from './visit-windows.ts';
 
 const workArea = { x: 0, y: 25, width: 1440, height: 1200 };
 /** 500 宽的宠物：舞台 500 × 281.25，脚底垫高 = 舞台高 × 30/360 */
@@ -40,10 +40,44 @@ test('without a home pet window the guest sits in the bottom-left corner of the 
   assert.equal(bounds.y + bounds.height, 25 + 1200);
 });
 
-test('each guest gets a stable tint from the range that keeps the skin pink', () => {
-  assert.equal(guestHue('小王 家的 小鱼'), guestHue('小王 家的 小鱼'));
-  for (const name of ['a', '小王 家的 小鱼', '小李 家的 阿花', 'x'.repeat(50)]) {
-    const hue = guestHue(name);
-    assert.ok(hue >= 240 && hue <= 300, `${name} → ${hue}`);
+test('the guest knows which side of the home pet it stands on, and only its body takes clicks', () => {
+  const left = guestBounds(home, workArea);
+  assert.equal(guestSide(left, home), 'left');
+  assert.equal(guestSide(guestBounds({ ...home, left: 0 }, workArea), { ...home, left: 0 }), 'right');
+  assert.equal(guestSide(guestBounds(null, workArea), null), 'left');
+  // 身体那一块在舞台中间、脚底以上，不含上面留给气泡的空间
+  const hit = petHitRect(left);
+  assert.ok(hit.x > left.x && hit.x + hit.width < left.x + left.width);
+  assert.ok(hit.y > left.y + 96, '不含气泡空间');
+  const feet = left.y + 96 + ((350 * 9) / 16) * (330 / 360);
+  assert.ok(Math.abs(hit.y + hit.height - feet) <= 1, '到脚底为止');
+});
+
+/** RGBA → 色相（度）；灰色返回 null */
+function hueOf([r, g, b]: number[]): number | null {
+  const max = Math.max(r, g, b);
+  const delta = max - Math.min(r, g, b);
+  if (delta === 0) return null;
+  const sector = max === r ? ((g - b) / delta) % 6 : max === g ? (b - r) / delta + 2 : (r - g) / delta + 4;
+  return (sector * 60 + 360) % 360;
+}
+
+test('the guest turns pink: blue hair and dress become pink, skin, white and see-through pixels stay', () => {
+  const pixels = {
+    hair: [40, 70, 180, 255],
+    navy: [30, 35, 80, 255],
+    skin: [250, 220, 205, 255],
+    white: [245, 245, 245, 255],
+    clear: [40, 70, 180, 0],
+  };
+  const data = new Uint8ClampedArray(Object.values(pixels).flat());
+  pinkPixels(data);
+  const after = (index: number) => Array.from(data.slice(index * 4, index * 4 + 4));
+  for (const index of [0, 1]) {
+    const hue = hueOf(after(index));
+    assert.ok(hue !== null && hue >= 300 && hue <= 360, `蓝 → 粉：${hue}`);
   }
+  assert.deepEqual(after(2), pixels.skin);
+  assert.deepEqual(after(3), pixels.white);
+  assert.deepEqual(after(4), pixels.clear);
 });
