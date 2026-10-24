@@ -7,6 +7,7 @@ import {
   guestPrompt,
   HOST_ASK,
   hostPrompt,
+  memoPrompt,
   openerGap,
   PLAY_THINGS,
   talkGap,
@@ -29,6 +30,27 @@ test('both sides carry what was said so far, so a reply picks up the thread', ()
     '你在 小李 家串门，它家的宠物叫「阿花」。你刚进门，跟它打个招呼。',
   );
   assert.equal(GUEST_ASK.play('吃西瓜'), '你们正一起吃西瓜，说一句。');
+});
+
+test('prompts mention the last meeting only when there is a memo', () => {
+  const memory = '你们之前见过 3 次，上次是 1 小时前，上次聊了：「聊了放风筝」。';
+  const withMemo = guestPrompt('小李', '阿花', ['你：来啦'], GUEST_ASK.greet, memory);
+  assert.ok(withMemo.startsWith(`你在 小李 家串门，它家的宠物叫「阿花」。${memory}`));
+  const hostWithMemo = hostPrompt('小王', '小鱼', [], HOST_ASK.opener, memory);
+  assert.ok(hostWithMemo.startsWith(`小王 家的宠物「小鱼」来你家串门。${memory}`));
+  // 没有记录时和原来一样，不提上次
+  assert.equal(
+    guestPrompt('小李', '阿花', [], GUEST_ASK.greet),
+    '你在 小李 家串门，它家的宠物叫「阿花」。你刚进门，跟它打个招呼。',
+  );
+});
+
+test('memoPrompt sums up the chat for the notebook', () => {
+  const lines = ['你：今天天气真好', '阿花：是呀，适合放风筝', '（一起放风筝）'];
+  const prompt = memoPrompt('小李', '阿花', lines);
+  assert.match(prompt, /^你刚和 小李 家的宠物「阿花」聊了这些：\n/);
+  assert.ok(prompt.includes('你：今天天气真好\n阿花：是呀，适合放风筝\n（一起放风筝）\n'));
+  assert.ok(prompt.endsWith('用一句话给自己记条备忘，概括这次聊了什么，下次见面好提起。'));
 });
 
 test('long visits only send the latest lines to the model', () => {

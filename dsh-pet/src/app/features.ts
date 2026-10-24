@@ -38,6 +38,7 @@ import { HealthReminders, OffWorkReminder } from './reminders';
 import { findSnack, SnackPouch } from './snacks';
 import type { Snack } from './snacks';
 import type { HealthEvent } from './reminders';
+import { NeighborBook } from './neighbors';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
 import { cleanText, knockOn, LINE_MAX, NAME_MAX, Neighborhood, PING_MS, tripRequest, VisitHost } from './visit';
@@ -51,6 +52,8 @@ import {
   HOST_ASK,
   HOST_OPENERS,
   hostPrompt,
+  memoPrompt,
+  MEMORY_HINT,
   NUDGE_GAP_MS,
   openerGap,
   PLAY_THINGS,
@@ -111,6 +114,8 @@ interface Trip {
   answers: number;
   /** 在对方家吃到的零食（回家记日记） */
   treats: string[];
+  /** 进门时记好的上次见面备忘（neighbors.meet；整趟用它，不每句现读记录）；没记录 null */
+  memory: string | null;
   /** 说话按趟串行：上一句的回话到了再说下一句 */
   queue: Promise<void>;
   /** 连着几次报平安没送到 */
@@ -132,6 +137,8 @@ interface Hosting {
   lastLineAt: number;
   /** 主动起过几次话题（HOST_OPENERS 封顶） */
   openers: number;
+  /** 进门时记好的上次见面备忘（neighbors.meet；整趟用它，不每句现读记录）；没记录 null */
+  memory: string | null;
   /** 上次把摸一下 / 一起玩捎给客人的时间（NUDGE_GAP_MS） */
   lastNudgeAt: number;
   openerTimer: ReturnType<typeof setTimeout> | null;
@@ -199,6 +206,8 @@ export interface FeatureDeps {
   snackPath: string;
   /** 串门身份文件（$DSH_HOME/dsh-pet/visit-identity.json） */
   identityPath: string;
+  /** 邻居簿文件（$DSH_HOME/dsh-pet/neighbors.json） */
+  neighborsPath: string;
   /** 插件路由前缀的完整地址，如 http://127.0.0.1:53624/dsh-pet-7340 */
   petBase: string;
   log: (message: string) => void;
@@ -212,6 +221,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   const offWork = new OffWorkReminder(() => deps.appConfig().offWork);
   const diary = new Diary(deps.diaryDir, Date.now(), log);
   const pouch = new SnackPouch(deps.snackPath, log);
+  /** 邻居簿：只记验证过身份的（记录只存本机） */
+  const neighbors = new NeighborBook(deps.neighborsPath, (message) => log(`串门：${message}`));
   /** 这一天（日记口径）已经查过要不要补写日记：一天只查一次，补写失败也不每拍重试 */
   let diaryCheckedFor: string | null = null;
   let disposed = false;
@@ -813,6 +824,17 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return deps.appConfig().visit.chat ? compose(instruction, fallback) : Promise.resolve(fallback);
   }
 
+  /** 见面结束后给自己记一句摘要（不 await：可能正是从说话队列里被叫回来的）；生成不了就保留旧摘要 */
+  function saveMemo(id: string, owner: string, pet: string, lines: readonly string[]): void {
+    if (!deps.appConfig().visit.chat || spokenCount(lines) < 2) return;
+    void compose(memoPrompt(owner, pet, lines), '')
+      .then((text) => {
+        const summary = cleanText(text, LINE_MAX);
+        if (summary) neighbors.setSummary(id, summary);
+      })
+      .catch((error: unknown) => log(`串门：写见面摘要失败：${errorText(error)}`));
+  }
+
   /** 接待这一侧：VisitHost 收到敲门、说话、告辞时来问这里 */
   const hostHandlers: HostHandlers = {
     canHost: () => trip === null && knockingOn === null,
@@ -832,7 +854,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       lines.push(`${visitor.pet}：${text}`);
       if (current) current.lastLineAt = Date.now();
       const reply = cleanText(
-        await visitLine(hostPrompt(visitor.owner, visitor.pet, lines, HOST_ASK.answer), '欢迎来玩呀～'),
+        await visitLine(
+          hostPrompt(visitor.owner, visitor.pet, lines, HOST_ASK.answer, current?.memory ?? null),
+          '欢迎来玩呀～',
+        ),
         LINE_MAX,
       );
       lines.push(`你：${reply}`);
@@ -859,6 +884,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
     log(`串门：${visitor.owner} 家的 ${visitor.pet} 进门了`);
     const now = Date.now();
+    // 进门时先把「记这次之前」的上次见面备忘算好，整趟都用它；再记这次见面（只记验证过身份的）
+    const memory = visitor.id
+      ? neighbors.meet(visitor.id, { owner: visitor.owner, pet: visitor.pet }, 'hosted', now)
+      : null;
     const current: Hosting = {
       visitor,
       window: openGuestWindow(
@@ -872,6 +901,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       lines: [],
       lastLineAt: now,
       openers: 0,
+      memory,
       lastNudgeAt: 0,
       openerTimer: null,
     };
@@ -890,8 +920,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
     current.openers += 1;
     const { owner, pet } = current.visitor;
-    // 生成不了就不起话题（没有兜底句：固定的开场白聊不下去）
-    const text = cleanText(await compose(hostPrompt(owner, pet, current.lines, HOST_ASK.opener), ''), LINE_MAX);
+    const memory = current.memory;
+    // 生成不了就不起话题（没有兜底句：固定的开场白聊不下去）；头一回起话题时提醒可以提上次聊的
+    const ask = current.openers === 1 && memory ? `${HOST_ASK.opener}${MEMORY_HINT}` : HOST_ASK.opener;
+    const text = cleanText(await compose(hostPrompt(owner, pet, current.lines, ask, memory), ''), LINE_MAX);
     if (hosting !== current || !text) return;
     current.lines.push(`你：${text}`);
     current.lastLineAt = Date.now();
@@ -961,6 +993,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       'visit',
       `${visitor.owner} 家的宠物 ${visitor.pet} 来串门，待了 ${durationText(Date.now() - (current?.since ?? Date.now()))}`,
     );
+    if (visitor.id) saveMemo(visitor.id, visitor.owner, visitor.pet, current?.lines ?? []);
     void say(line);
     void refreshMenu();
   }
@@ -1040,10 +1073,15 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /** @param verified 进门应答的签名验证过了：这一家确实是对着自己信标里那个 id 的门（T4 记邻居、T7 捎话以此为前提） */
   function startTrip(host: Neighbor, token: string, verified: boolean): void {
+    // 进门时先把「记这次之前」的上次见面备忘算好，整趟都用它；再记这次见面（只记验证过身份的）
+    const memory = verified
+      ? neighbors.meet(host.id, { owner: host.owner, pet: host.pet }, 'visited', Date.now())
+      : null;
     const current: Trip = {
       host,
       token,
       verified,
+      memory,
       since: Date.now(),
       lines: [],
       lastLineAt: Date.now(),
@@ -1075,9 +1113,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
     const first = current.rounds === 0;
     current.rounds += 1;
+    // 头一句打招呼时有上次见面的备忘，就提醒可以提一句
+    const greet = first && current.memory;
     await chatTrip(
       current,
-      first ? GUEST_ASK.greet : GUEST_ASK.follow,
+      first ? (greet ? `${GUEST_ASK.greet}${MEMORY_HINT}` : GUEST_ASK.greet) : GUEST_ASK.follow,
       first ? `${current.host.pet}，我来串门啦～` : '你家真舒服呀～',
     );
     // 不用模型聊天时只打个招呼
@@ -1092,7 +1132,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const next = current.queue.then(async () => {
       if (trip !== current) return;
       const { owner, pet } = current.host;
-      const text = cleanText(await visitLine(guestPrompt(owner, pet, current.lines, ask), fallback), LINE_MAX);
+      const text = cleanText(
+        await visitLine(guestPrompt(owner, pet, current.lines, ask, current.memory), fallback),
+        LINE_MAX,
+      );
       if (trip !== current) return;
       current.lastLineAt = Date.now();
       relay(`（在 ${owner} 家）${text}`);
@@ -1235,6 +1278,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const ending = reason === 'sent-home' ? '，被它家主人请回来了' : reason === 'lost' ? '，后来连不上就回来了' : '';
     const treats = current.treats.length > 0 ? `，吃到了${current.treats.join('、')}` : '';
     diary.note(Date.now(), 'visit', `去 ${owner} 家串门，和它家的宠物 ${pet} 聊了 ${chats} 句${treats}${ending}`);
+    if (current.verified) saveMemo(current.host.id, owner, pet, current.lines);
     void refreshStatus(Date.now());
     void refreshMenu();
     const back = `我从 ${owner} 家回来啦～`;
@@ -1351,6 +1395,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       diary.flush(Date.now());
     },
   };
+}
+
+/** 这次见面聊过的句数（「（一起吃西瓜）」这类一起做过的事不算） */
+function spokenCount(lines: readonly string[]): number {
+  return lines.filter((line) => !line.startsWith('（')).length;
 }
 
 function knockFailText(owner: string, reason: KnockFailure | 'unreachable'): string {

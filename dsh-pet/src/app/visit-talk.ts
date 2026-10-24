@@ -70,6 +70,9 @@ export const HOST_ASK = {
   opener: '找个新话题跟它聊一句。',
 };
 
+/** 有上次见面的记录时，进门打招呼 / 头一回起话题可以带上这句提示 */
+export const MEMORY_HINT = '可以提一句上次聊的。';
+
 function withHistory(scene: string, lines: readonly string[], ask: string): string {
   if (lines.length === 0) return `${scene}${ask}`;
   return `${scene}刚才你们说了：\n${lines.slice(-HISTORY_MAX).join('\n')}\n${ask}`;
@@ -79,18 +82,40 @@ function withHistory(scene: string, lines: readonly string[], ask: string): stri
  * 客人（自家宠物在别人家）说一句的指令
  * @param owner 对方主人的昵称
  * @param pet 对方宠物的名字
+ * @param memory 上次见面的备忘（neighbors.ts 的 memoryLine；没有传 null）
  */
-export function guestPrompt(owner: string, pet: string, lines: readonly string[], ask: string): string {
-  return withHistory(`你在 ${owner} 家串门，它家的宠物叫「${pet}」。`, lines, ask);
+export function guestPrompt(
+  owner: string,
+  pet: string,
+  lines: readonly string[],
+  ask: string,
+  memory: string | null = null,
+): string {
+  return withHistory(`你在 ${owner} 家串门，它家的宠物叫「${pet}」。${memory ?? ''}`, lines, ask);
 }
 
 /**
  * 主人家（客人在自家）说一句的指令
  * @param owner 客人主人的昵称
  * @param pet 客人的名字
+ * @param memory 上次见面的备忘（neighbors.ts 的 memoryLine；没有传 null）
  */
-export function hostPrompt(owner: string, pet: string, lines: readonly string[], ask: string): string {
-  return withHistory(`${owner} 家的宠物「${pet}」来你家串门。`, lines, ask);
+export function hostPrompt(
+  owner: string,
+  pet: string,
+  lines: readonly string[],
+  ask: string,
+  memory: string | null = null,
+): string {
+  return withHistory(`${owner} 家的宠物「${pet}」来你家串门。${memory ?? ''}`, lines, ask);
+}
+
+/**
+ * 见面结束后给自己记的一句备忘（neighbors.ts 存的摘要）。只能走 compose 生成：
+ * 摘要会拼进下次的串门提示词、间接发到对方电脑上，speak / generate 带「主人此刻」，会把主人在干嘛漏出去。
+ */
+export function memoPrompt(owner: string, pet: string, lines: readonly string[]): string {
+  return `你刚和 ${owner} 家的宠物「${pet}」聊了这些：\n${lines.slice(-HISTORY_MAX).join('\n')}\n用一句话给自己记条备忘，概括这次聊了什么，下次见面好提起。`;
 }
 
 /** 回家后跟主人讲见闻的指令（只给最近的记录） */

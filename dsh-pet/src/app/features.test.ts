@@ -102,6 +102,7 @@ async function withFeatures(
     diaryDir: join(home, 'diary'),
     snackPath: join(home, 'snacks.json'),
     identityPath: join(home, 'visit-identity.json'),
+    neighborsPath: join(home, 'neighbors.json'),
     petBase: `http://127.0.0.1:${(server.address() as AddressInfo).port}/dsh-pet-7340`,
     log: () => undefined,
   });
