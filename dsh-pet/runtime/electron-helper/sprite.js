@@ -179,6 +179,8 @@ class PetSprite {
     const fontPx = S.resolveFontPx(this.font, this.size);
     this.el.style.setProperty('--dsh-pet-font-bubble', fontPx.bubble + 'px');
     this.el.style.setProperty('--dsh-pet-font-tip', fontPx.tip + 'px');
+    // 气泡尾巴高（与 index.html 的 .pet-bubble::after 同一系数）：翻到脚下时盒子顶边离脚底这么远（placeBubble）
+    this.bubbleTail = fontPx.bubble * S.BUBBLE_METRICS.tail;
     const stage = document.createElement('div');
     stage.className = 'pet-stage';
     stage.style.transform = 'translateY(' + this.bottomPad + 'px)';
@@ -233,6 +235,9 @@ class PetSprite {
     this.inputRegionElements = new Set();
     this.inputRegionMutation = new MutationObserver(() => this.syncInputRegions());
     this.inputRegionMutation.observe(document.body, { childList: true, subtree: true });
+    // 气泡尺寸变了（配图加载完、余额展开/收起）：头顶可能从放得下变成放不下，重新摆
+    this.bubbleResize = new ResizeObserver(() => this.placeBubble());
+    this.bubbleResize.observe(this.bubble);
     this.hit.addEventListener('pointerdown', (e) => this.onPointerDown(e), { signal: ac.signal });
     this.hit.addEventListener('pointermove', (e) => this.onPointerMove(e), { signal: ac.signal });
     this.hit.addEventListener('click', (e) => this.onClick(e), { signal: ac.signal });
@@ -304,6 +309,7 @@ class PetSprite {
     this.inputRegionMutation.disconnect();
     this.inputRegionResize.disconnect();
     this.inputRegionElements.clear();
+    this.bubbleResize.disconnect();
     if (this.bubbleTimer !== null) window.clearTimeout(this.bubbleTimer);
     if (this.whisperTimer !== null) window.clearTimeout(this.whisperTimer);
     if (this.workTimer !== null) window.clearTimeout(this.workTimer);
@@ -380,7 +386,7 @@ class PetSprite {
    * macOS：窗口上沿不伸进菜单栏。窗口哪怕只是透明余量压到菜单栏下面，系统也会在透明菜单栏后面
    * 垫上一整条系统壁纸（用动态壁纸类应用时就是一条突兀的「原壁纸」）。所以按需让出上余量（气泡空间）
    * 与视频顶部的透明边，窗口顶最多到所在屏工作区上沿；只有身体命中区（头顶）本身走进菜单栏条带时
-   * 窗口才跟进去，不裁身体。代价：贴近顶部时气泡在菜单栏下沿被截，而不是画进菜单栏。
+   * 窗口才跟进去，不裁身体。贴近顶部时头顶放不下的气泡翻到脚下（placeBubble），不画进菜单栏。
    */
   fitWindowTop() {
     if (!IS_MAC) return;
@@ -448,6 +454,8 @@ class PetSprite {
     // 而光标存的是视口坐标，窗口一移，光标相对窗口的位置就变了，不重摆提示会跟着窗口漂走。
     // 只在显示时重摆：漫游逐帧调本函数，没显示提示时不做无谓的 DOM 写入。
     if (this.tipOn) this.renderTip();
+    // 气泡同理：贴近屏幕上沿时头顶放不下，翻到脚下
+    this.placeBubble();
     // 实况标脏（节流上报，见 markPoseDirty）：所有位移都收口在本函数，所以这里一处就够
     this.markPoseDirty();
   }
@@ -2022,9 +2030,34 @@ class PetSprite {
       }
     }
     this.bubble.classList.add('is-on');
+    this.placeBubble();
     window.__dshPetDebug.lastBubbleTitle = this.bubble.textContent.slice(0, 60);
     // 气泡内容/尺寸变了 → 重报控件矩形（可点的余额气泡要靠它拿点击），并同步 busy 标记。
     // 这里是所有显隐/换内容的汇聚点，放在这里就不会漏掉任何一条路径。
     this.syncInputBusy();
+  }
+
+  /**
+   * 气泡放头顶还是翻到脚下（.is-below，判据见 shared 的 bubbleFlipsBelow）。可见范围 = 窗口 ∩ 工作区
+   * （visibleClampRect）：宠物贴近屏幕上沿时，头顶那块要么被 fitWindowTop 让掉（macOS 菜单栏），
+   * 要么伸出了屏幕，气泡留在头顶就会被截掉。
+   * 只在气泡显示时摆（淡出途中不跳位置）；调用点：renderBubble（显示 / 换内容）、sendBounds（宠物移动）、
+   * bubbleResize（配图加载完、展开收起等尺寸变化）。
+   */
+  placeBubble() {
+    if (!this.bubble.classList.contains('is-on')) return;
+    const vis = this.visibleClampRect();
+    // 窗口局部坐标：sprite 顶在 margin.t，头顶气泡的底边探进舞台 0.108×宠物尺寸，脚底在舞台底边
+    const below =
+      vis !== null &&
+      S.bubbleFlipsBelow(
+        this.bubble.offsetHeight,
+        this.margin.t + this.size * S.BUBBLE_OVERLAP_RATIO - vis.y,
+        vis.y + vis.h - (this.margin.t + this.height + this.bubbleTail),
+      );
+    if (below === this.bubble.classList.contains('is-below')) return;
+    this.bubble.classList.toggle('is-below', below);
+    window.__dshPetDebug.bubbleBelow = below;
+    this.syncInputRegions(); // 可点的余额气泡换了位置，控件矩形跟着换
   }
 }

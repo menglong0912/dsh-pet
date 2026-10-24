@@ -101,6 +101,8 @@ export const BUBBLE_METRICS = {
   imgMargin: 0.3736,
   /** 配图长宽比上限（内置 assets/memes 全为 128 宽、高 ≤ 128，即 ≤ 1.0） */
   imgMaxRatio: 1,
+  /** 尾巴（小三角）的高度：`.pet-bubble::after` 的 border 宽 */
+  tail: 0.3736,
 } as const;
 
 /** 气泡最大高度（px）：文本最多两行（余额气泡的「主行 + 次要行」），可带一张配图。
@@ -124,4 +126,14 @@ export function bubbleMaxHeightPx(font: FontConfig | undefined, size: number): n
 export function bubbleTopMarginPx(font: FontConfig | undefined, size: number): number {
   const overlap = (Number(size) || 0) * BUBBLE_OVERLAP_RATIO;
   return Math.max(0, Math.ceil(bubbleMaxHeightPx(font, size) - overlap));
+}
+
+/** 桌面端气泡放头顶还是翻到宠物脚下：头顶装不下整只气泡、脚下又比头顶宽裕时翻到脚下，否则留在头顶
+ *  （两边都装不下时留在空间多的一边，截得少）。宠物贴近屏幕上沿时头顶的可见空间会变小：
+ *  macOS 上窗口不伸进菜单栏（见 sprite.js 的 fitWindowTop），其他平台是窗口伸出屏幕。
+ *  @param height 气泡实测高度（px）
+ *  @param above 头顶可用高度：头顶气泡的底边到可见区上沿
+ *  @param below 脚下可用高度：脚下气泡的顶边（脚底 + 尾巴）到可见区下沿 */
+export function bubbleFlipsBelow(height: number, above: number, below: number): boolean {
+  return height > above && below > above;
 }

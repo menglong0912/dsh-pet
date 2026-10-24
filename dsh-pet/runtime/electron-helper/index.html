@@ -125,6 +125,18 @@
         border-top-color: rgba(255, 255, 255, 0.92);
         border-bottom: none;
       }
+      /* 翻到脚下（宠物贴近屏幕上沿、头顶放不下时，sprite.js 的 placeBubble 加上）：
+         盒子挂在脚底下方一个尾巴高处（.pet-sprite 高 = 舞台高，脚底正好在 100%），尾巴改朝上 */
+      .pet-bubble.is-below {
+        bottom: auto;
+        top: calc(100% + var(--f) * 0.3736);
+      }
+      .pet-bubble.is-below::after {
+        bottom: auto;
+        top: calc(var(--f) * -0.3736);
+        border-top: none;
+        border-bottom: calc(var(--f) * 0.3736) solid rgba(255, 255, 255, 0.92);
+      }
       .pet-bubble.is-on {
         opacity: 1;
       }
