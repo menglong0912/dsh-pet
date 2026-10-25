@@ -39,6 +39,21 @@ test('the guest stands left of the home pet, a size smaller, feet on the same li
   assert.ok(Math.abs(guestFeet - homeFeet) <= 1, `脚底对齐 ${guestFeet} vs ${homeFeet}`);
 });
 
+test('对战摆位（scale 1 + tight）：心魔与自家宠物等大、贴身站位；串门默认一个字不变', () => {
+  const battle = guestBounds(home, workArea, undefined, { scale: 1, tight: true });
+  assert.equal(battle.width, 500, 'scale 1 = 真等大（宽度上限跟着 scale 走，不被串门的 400 卡住）');
+  // tight：中心间距 = size/2 + width*0.15 = 250 + 75 = 325（默认 350 宽时是 250+122.5）
+  const gap = Math.abs(1250 - (battle.x + battle.width / 2));
+  assert.ok(Math.abs(gap - 325) <= 1, `贴身档中心间距 325，实际 ${gap}`);
+  const homeFeet = feetOf(home.top, home.bottomPad, (500 * 9) / 16);
+  const guestFeet = battle.y + 96 + ((battle.width * 9) / 16) * (330 / 360);
+  assert.ok(Math.abs(guestFeet - homeFeet) <= 1, '等大后脚底照样对齐');
+  // 串门默认：小一号、社交距离，零变化（对照上面的既有断言，这里只核间距没被 tight 波及）
+  const social = guestBounds(home, workArea);
+  assert.equal(social.width, 350);
+  assert.ok(Math.abs(1250 - (social.x + social.width / 2) - 372.5) <= 1, '默认档间距不变');
+});
+
 test('the guest moves to the right when there is no room on the left, and stays on screen', () => {
   const bounds = guestBounds({ ...home, left: 0 }, workArea);
   assert.ok(bounds.x + bounds.width / 2 > 250, '换到自家宠物右边');

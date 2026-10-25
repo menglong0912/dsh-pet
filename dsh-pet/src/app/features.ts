@@ -1738,7 +1738,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       foe.name,
       homePet.box,
       () => undefined, // 心魔不响应戳一下的反应
-      { tint: 'shadow' },
+      // 对战等大、贴身：攻击特效的飞行距离才对得上素材里的命中时刻（串门维持小一号的表意）
+      { tint: 'shadow', scale: 1, tight: true },
     );
     const arena = openArenaWindow(
       electron,

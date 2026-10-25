@@ -141,15 +141,15 @@ test('出手 → 台词 → 挨打反应：反应比出手晚到攻击素材的�
   assert.match(line?.line ?? '', /小鱼/);
 });
 
-test('reactDelayOf：反应延迟 = 素材打击时刻 ÷ 倍速（固定 0.9 秒只有出拳对得上）', () => {
-  // 出拳 5s：打击在 2.0s，倍速 2.083 → 960ms（≈ X3 原来的固定 900，观感不变）
-  assert.equal(reactDelayOf('战斗-出拳'), 960);
-  // 水枪 4s：水柱打在 1.9s，倍速 1.667 → 1140ms（固定 900 时对方在水柱沾身前就挨揍了）
-  assert.equal(reactDelayOf('法宝-水枪'), 1140);
-  // 气球 4s：炸在 2.0s → 1200ms
-  assert.equal(reactDelayOf('法宝-气球'), 1200);
-  // 蓝鲸 5s：俯冲撞在 2.25s，倍速 2.083 → 1080ms
-  assert.equal(reactDelayOf('招式-蓝鲸现世'), 1080);
+test('reactDelayOf：反应延迟 = 命中时刻 ÷ 倍速 + 受击前摇补偿（真机两次反馈：打击时刻该标「飞到身上」而非「特效出手」）', () => {
+  // 出拳 5s：冲击波命中 2.0s，倍速 2.083 → 960ms，+240ms 前摇补偿 → 1200ms
+  assert.equal(reactDelayOf('战斗-出拳'), 1_200);
+  // 水枪 4s：水柱首次命中 1.6s，倍速 1.667 → 960 + 240
+  assert.equal(reactDelayOf('法宝-水枪'), 1_200);
+  // 毽子 4s：毽子飞到身上 1.9s（不是踢出的 1.4s），→ 1140 + 240
+  assert.equal(reactDelayOf('法宝-毽子'), 1_380);
+  // 蓝鲸 5s：俯冲撞上 2.5s，倍速 2.083 → 1200 + 240
+  assert.equal(reactDelayOf('招式-蓝鲸现世'), 1_440);
   // 表里没有的 / 没有攻击动画：退回固定 REACT_MS
   assert.equal(reactDelayOf('战斗-胜利'), REACT_MS);
   assert.equal(reactDelayOf(null), REACT_MS);

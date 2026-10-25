@@ -189,9 +189,22 @@ export function shadowPixels(data: Uint8ClampedArray): void {
 /**
  * 客人窗口的位置与大小：站在自家宠物左边（左边放不下站右边），脚底对齐，客人小一号；
  * 不知道自家宠物在哪就放到这块屏的左下角。
+ * @param options.scale 客人窗口宽相对自家宠物的比例，缺省 `GUEST_SCALE`（小一号，串门的表意）。
+ *   对战（心魔 / 切磋）传 `1`：两边等大，攻击特效的飞行距离才对得上素材里的命中时刻——
+ *   小一号时特效要飞过更宽的空隙，「攻击刚出来就挨了」的观感被进一步放大（2026-10-25）。
+ * @param options.tight 站位收紧一档（中心间距 `size/2 + width*0.15`）：对战要打得贴身，
+ *   串门的社交距离不动。
  */
-export function guestBounds(home: PetBox | null, workArea: Rect, prefer?: 'left' | 'right'): Rect {
-  const width = Math.round(Math.min(400, Math.max(200, (home?.size ?? 300) * GUEST_SCALE)));
+export function guestBounds(
+  home: PetBox | null,
+  workArea: Rect,
+  prefer?: 'left' | 'right',
+  options: { scale?: number; tight?: boolean } = {},
+): Rect {
+  const scale = typeof options.scale === 'number' && options.scale > 0 ? options.scale : GUEST_SCALE;
+  // 宽度上限：串门档保持 400；对战 scale 1 要真等大，被 400 卡住的话 500px 的宠物开出来
+  // 只有 400 宽，「等大」名不副实——上限按 scale 等比放宽（400 是 0.7 档的值）
+  const width = Math.round(Math.min((400 / GUEST_SCALE) * scale, Math.max(200, (home?.size ?? 300) * scale)));
   const videoHeight = (width * 9) / 16;
   const height = Math.round(videoHeight) + BUBBLE_ROOM + TAG_ROOM;
   const clampX = (x: number) => Math.min(Math.max(x, workArea.x), workArea.x + workArea.width - width);
@@ -199,8 +212,8 @@ export function guestBounds(home: PetBox | null, workArea: Rect, prefer?: 'left'
   if (!home) return { x: workArea.x, y: workArea.y + workArea.height - height, width, height };
   const center = home.left + home.size / 2;
   const feet = home.top + home.bottomPad + ((home.size * 9) / 16) * FEET_RATIO;
-  // 两只宠物中心隔开半只自家宠物多一点：身体不挨着，两边的气泡也不打架
-  const apart = home.size / 2 + width * 0.35;
+  // 两只宠物中心隔开半只自家宠物多一点：身体不挨着，两边的气泡也不打架（tight = 对战贴身档）
+  const apart = home.size / 2 + width * (options.tight ? 0.15 : 0.35);
   const left = center - apart - width / 2;
   const right = center + apart - width / 2;
   // 优先 prefer 那一边，放不下才换；不传 prefer 时先试左边（原有行为）
@@ -226,8 +239,9 @@ export function followGuest(
   side: 'left' | 'right',
   home: PetBox | null,
   workArea: Rect,
+  options: { scale?: number; tight?: boolean } = {},
 ): { bounds: Rect; side: 'left' | 'right' } | null {
-  const bounds = guestBounds(home, workArea, side);
+  const bounds = guestBounds(home, workArea, side, options);
   const nextSide = guestSide(bounds, home);
   if (
     nextSide === side &&
@@ -281,6 +295,8 @@ export type GuestTint = 'pink' | 'shadow';
  * @param home 取自家宠物现在的位置（watchHomePet 的 box）；客人跟着它走
  * @param onPoke 主人点了客人一下
  * @param options.tint 配色，默认 pink；心魔试炼用 shadow（那种窗口不响应点击戳一下的反应）
+ * @param options.scale / options.tight 体型与站位（见 `guestBounds`）：对战（心魔 / 切磋）传
+ *   `{ scale: 1, tight: true }`——两边等大、贴身站位，串门维持默认（小一号、社交距离）
  */
 export function openGuestWindow(
   electron: WindowElectron,
@@ -288,14 +304,15 @@ export function openGuestWindow(
   tag: string,
   home: () => PetBox | null,
   onPoke: () => void,
-  options: { tint?: GuestTint } = {},
+  options: { tint?: GuestTint; scale?: number; tight?: boolean } = {},
 ): GuestWindow {
   const tint: GuestTint = options.tint ?? 'pink';
+  const layout = { scale: options.scale, tight: options.tight };
   const homeNow = home();
   const point = homeNow
     ? { x: homeNow.left + homeNow.size / 2, y: homeNow.top + homeNow.size / 4 }
     : electron.screen.getCursorScreenPoint();
-  let bounds = guestBounds(homeNow, electron.screen.getDisplayNearestPoint(point).workArea);
+  let bounds = guestBounds(homeNow, electron.screen.getDisplayNearestPoint(point).workArea, undefined, layout);
   let side = guestSide(bounds, homeNow);
   const win = new electron.BrowserWindow({
     ...bounds,
@@ -380,7 +397,7 @@ export function openGuestWindow(
       x: box.left + box.size / 2,
       y: box.top + box.size / 2,
     }).workArea;
-    const next = followGuest(bounds, side, box, workArea);
+    const next = followGuest(bounds, side, box, workArea, layout);
     if (!next) return;
     const turned = next.side !== side;
     bounds = next.bounds;
