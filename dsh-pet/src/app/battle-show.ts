@@ -33,12 +33,18 @@ export const OPEN_MS = 2_400;
 export const SLOT_MS = 2_400;
 /** 同一格里多段伤害的台词错开这么久（一句顶一句，都看得清） */
 export const BEAT_MS = 800;
-/** 挨打方的反应比出手晚这么久（§X3：约 0.9 秒，对上攻击打到的时刻） */
+/**
+ * 挨打方的反应比出手晚这么久——**兜底值**：出手素材不在下面的 `HIT_AT_MS` 表里时才用它。
+ * §X3 写的「约 0.9 秒」对出拳是准的（打击时刻 ÷ 倍速 ≈ 0.96 秒），真机看下来法宝类普遍偏早，
+ * 现在按素材各自的打击时刻算（见 `reactDelayOf`）。
+ */
 export const REACT_MS = 900;
-/** 反应动画占的窗口 = 一格减去那 0.9 秒 */
+/** 兜底的反应动画窗口 */
 const REACT_ANIM_MS = SLOT_MS - REACT_MS;
 /** 收场（赢的庆祝、输的倒地）一格 */
 const CLOSE_MS = 3_000;
+/** 第六感（反劈）比「自己挨的那一下」再晚这么久：先挨后反，别被受击动画顶掉 */
+const SIXTH_SENSE_AFTER_MS = 300;
 /**
  * 演出台词的显示时长：和一步的时长相当（X2 的坑：气泡压着后面的动画不好看，
  * 短到一步长就正好被下一句顶替）
@@ -61,6 +67,8 @@ const ANIM_MS: Record<string, number> = {
   '修炼-突破': 5_000,
   '修炼-挨雷': 5_000,
   '修炼-服丹': 4_000,
+  // 渡劫失败那一下（X4）：动画池里的现有素材，4.9 秒（名字形态播，见 TRIBULATION_LOSS_ANIM）
+  '工作状态-垂头叹气冒汗': 5_000,
   '招式-假死遁': 5_000,
   '招式-会心一击': 5_000,
   '招式-灵兽助阵': 5_000,
@@ -68,6 +76,41 @@ const ANIM_MS: Record<string, number> = {
 };
 /** 表里没列的（8 件法宝、其余 6 个招式）都是 4 秒 */
 const DEFAULT_ANIM_MS = 4_000;
+
+/**
+ * 出手素材里「攻击打到对方」的时刻（素材**原速**时间轴上的毫秒，分镜在 prompts 文档）。
+ * 挨打方的反应延迟 = 打击时刻 ÷ 这一段的倍速（倍速把素材压进了格子，打击画面出现的真实时刻
+ * 也跟着被压缩）——固定 0.9 秒只有出拳对得上，法宝 / 招式的打击动作在素材中后段，真机上
+ * 就是「招还没打到、人先挨了」。素材重做后跟着分镜改这里。
+ */
+const HIT_AT_MS: Record<string, number> = {
+  '战斗-出拳': 2_000,
+  '法宝-水枪': 1_900,
+  '法宝-扑克牌': 1_600,
+  '法宝-毽子': 1_400,
+  '法宝-气球': 2_000,
+  '法宝-三球': 1_900,
+  '法宝-陀螺': 1_500,
+  '法宝-鲸尾': 1_800,
+  '法宝-烟花': 1_900,
+  '招式-狮子吼': 1_600,
+  '招式-蓝鲸现世': 2_250,
+  '招式-灵兽助阵': 2_150,
+  '招式-无影手': 1_300,
+};
+
+/**
+ * 挨打方的反应该比出手晚多久：按出手素材的打击时刻算（见 `HIT_AT_MS`），夹在
+ * [400, SLOT_MS - 600]——太早看不出「打中才疼」，太晚反应动画刚起就贴格尾了。
+ * 出手素材不在表里（null 或没见过）就退回固定的 `REACT_MS`。
+ */
+export function reactDelayOf(attackAnim: string | null): number {
+  if (attackAnim === null) return REACT_MS;
+  const at = HIT_AT_MS[attackAnim];
+  if (at === undefined) return REACT_MS;
+  const rate = rateFor(attackAnim, SLOT_MS); // timeline 给出手动画用的就是这个倍速
+  return Math.min(Math.max(Math.round(at / rate), 400), SLOT_MS - 600);
+}
 
 /**
  * 一段素材要正好占满 `windowMs`，该开几倍速。
@@ -88,6 +131,8 @@ export interface Step {
   at: number;
   who: 0 | 1;
   anim?: string;
+  /** 这段素材的来处：不给（默认）= §2.3 的新素材，走 `/anim` 的 url 形态；`'pool'` = 动画池里的现有素材，走 name 形态 */
+  from?: 'pool';
   /** 播这段动画的倍速（timeline 按素材时长算好，执行器原样传给 /anim 的 rate） */
   rate?: number;
   line?: string;
@@ -132,29 +177,66 @@ function playDeadAfter(events: BattleEvent[], index: number): boolean {
   return next !== undefined && next.kind === 'play-dead';
 }
 
+/** 渡劫（X4）失败那一下：动画池里的现有素材（名字形态播，不是 §2.3 的新素材） */
+export const TRIBULATION_LOSS_ANIM = '工作状态-垂头叹气冒汗';
+/** 渡劫（X4）成功那一下 */
+export const TRIBULATION_WIN_ANIM = '修炼-突破';
+/** 渡劫开场的服丹（§2.3 的 url 形态素材） */
+export const TRIBULATION_PILL_ANIM = '修炼-服丹';
+
+/**
+ * `timeline` 的额外选项。
+ * @param tribulation 渡劫这一场：没有对手窗口（`ShowSides.foe = null`），开场不吃丹就不播起手式、
+ *   吃丹先播一段 `修炼-服丹`；收场用 `修炼-突破` / `工作状态-垂头叹气冒汗`（渡劫没有「打赢对手」那句
+ *   台词，结果感言由调用方按人设说一句，见 features.ts）。引擎的事件里 `actor` 恒为 0（天雷不算一方），
+ *   所以这几步都排在自家宠物那一边。
+ */
+export interface TimelineOptions {
+  tribulation?: { pill: boolean };
+}
+
 /**
  * 引擎事件 → 时间线。
  * @param events `fight()` / `tribulate()` 的事件序列
  * @param names 两边的名字（给 `lineOf`：[0] = 自家宠物，[1] = 对手）
  * @param rng 解说台词的随机数（注入序列才测得准）
  * @param skillSets 双方的招式表：闪避那句和闪避动画要看有没有化鸽遁，连击那一拍有没有无影手也看它
+ * @param options 见 `TimelineOptions`（渡劫用）
  */
 export function timeline(
   events: BattleEvent[],
   names: [string, string],
   rng: () => number,
   skillSets?: [SkillId[], SkillId[]],
+  options?: TimelineOptions,
 ): Step[] {
   const steps: Step[] = [];
   const start = events.find((event) => event.kind === 'start');
   const base: [number, number] = start ? start.hp : [0, 0];
-  // 开场：两边各一段起手式（`start` 事件本身不再另排一步）
-  for (const who of [0, 1] as const) {
-    steps.push({ at: 0, who, anim: '战斗-起手', rate: rateFor('战斗-起手', OPEN_MS), hp: base });
+  const tribulation = options?.tribulation;
+  if (tribulation) {
+    // 渡劫：没有对手，开场只有吃丹那一段（不吃丹就直接等第一道雷）
+    if (tribulation.pill) {
+      steps.push({
+        at: 0,
+        who: 0,
+        anim: TRIBULATION_PILL_ANIM,
+        rate: rateFor(TRIBULATION_PILL_ANIM, OPEN_MS),
+        line: '吃一颗破境丹，气色立马好起来',
+        hp: base,
+      });
+    }
+  } else {
+    // 开场：两边各一段起手式（`start` 事件本身不再另排一步）
+    for (const who of [0, 1] as const) {
+      steps.push({ at: 0, who, anim: '战斗-起手', rate: rateFor('战斗-起手', OPEN_MS), hp: base });
+    }
   }
   let cursor = OPEN_MS;
   /** 这一格里已经排了几句台词（决定后几句错开多远） */
   let beat = 0;
+  /** 这一格出手方在播的攻击动画（挨打方的反应延迟按它的打击时刻算；跨格作废，decide 时重置） */
+  let lastAttackAnim: string | null = null;
 
   /** 一格用完：按这一格里的句数推 cursor，下一件事另起一格 */
   const closeSlot = (): void => {
@@ -170,12 +252,30 @@ export function timeline(
     if (event.kind === 'decide') {
       closeSlot();
       const anim = attackAnimOf(event);
+      lastAttackAnim = anim;
       if (anim) steps.push({ at: cursor, who: event.actor, anim, rate: rateFor(anim, SLOT_MS), hp: event.hp });
       continue;
     }
 
     if (event.kind === 'end') {
       closeSlot();
+      if (tribulation) {
+        // 渡劫：只有自家这一边（引擎把「没扛住」的 end 排在 actor 1，这里统一排到 0），
+        // 成功播 修炼-突破、失败播 工作状态-垂头叹气冒汗（池里的现有素材，名字形态）。
+        // 结果不配「谁赢了」那种台词：结果感言由调用方按人设说一句（§X4 每次渡劫 +1 次模型调用）。
+        const win = event.winner === 0;
+        const anim = win ? TRIBULATION_WIN_ANIM : TRIBULATION_LOSS_ANIM;
+        steps.push({
+          at: cursor,
+          who: 0,
+          anim,
+          ...(win ? {} : { from: 'pool' as const }),
+          rate: rateFor(anim, CLOSE_MS),
+          hp: event.hp,
+          closing: true,
+        });
+        continue;
+      }
       const winner = event.winner;
       const loser = (winner ^ 1) as 0 | 1;
       const finish = (who: 0 | 1, anim: string): void => {
@@ -218,21 +318,31 @@ export function timeline(
       steps.push({ at, who: event.actor, anim, rate: rateFor(anim, REACT_ANIM_MS), hp: event.hp });
     } else if (isDamageOnFoe(event) && !playDeadAfter(events, i)) {
       // 致命那一拳后面紧跟假死遁时不播挨打：倒下的动作由假死遁自己演，两下顶在一起只会打断它
+      // 反应延迟对上**攻击素材的打击时刻**（出拳 ≈0.96s、水枪/烟花 ≈1.14s、气球 ≈1.2s……）；
+      // counter 挨的是反击（徒手快打，没有素材可对），维持固定 REACT_MS；
+      // beast 挨的是灵兽那一撞，跟灵兽素材自己的冲撞时刻
+      const delay =
+        event.kind === 'counter'
+          ? REACT_MS
+          : event.kind === 'beast'
+            ? reactDelayOf(SKILLS['spirit-beast'].anim)
+            : reactDelayOf(lastAttackAnim);
       // 挡下的那一下改播挨打方自己的泡泡护体（鼓腮吹泡、被撞凹又弹回、破成水珠）
       const anim = blockedHere(event) ? SKILLS.bubble.anim : '战斗-受击';
       steps.push({
-        at: at + REACT_MS,
+        at: at + delay,
         who: (event.actor ^ 1) as 0 | 1,
         anim,
-        rate: rateFor(anim, REACT_ANIM_MS),
+        rate: rateFor(anim, SLOT_MS - delay),
         hp: event.hp,
       });
     }
     if (event.kind === 'counter') {
-      // 第六感：反击方那一拍的反应动画（先挨一下、再反手劈出手刀）。不能和反击的台词同拍：
-      // 反击方自己刚挨的那下（前面 hit 的受击）就排在 at + REACT_MS，同拍或更早会被它顶掉
+      // 第六感：反击方先挨那一下（上面受击的延迟），贴着它之后再反手劈出手刀——
+      // 同拍或更早会被自己挨打的受击动画瞬间顶掉，「先挨后反」就看不出来了
       const anim = SKILLS['sixth-sense'].anim;
-      steps.push({ at: at + REACT_MS, who: event.actor, anim, rate: rateFor(anim, REACT_ANIM_MS), hp: event.hp });
+      const delay = reactDelayOf(lastAttackAnim) + SIXTH_SENSE_AFTER_MS;
+      steps.push({ at: at + delay, who: event.actor, anim, rate: rateFor(anim, SLOT_MS - delay), hp: event.hp });
     }
     if (event.kind === 'beast') {
       // 灵兽助阵：出手方自己追加的那一下，和台词同拍，顶掉攻击动画的尾巴（自己那下打完、灵兽再上）
@@ -252,7 +362,11 @@ export function timeline(
 
 /** 一边的手：播一段素材（带倍速）、说一句台词 */
 export interface ShowSide {
-  play(anim: string, rate: number): void;
+  /**
+   * 播一段素材。`from` = `'pool'` 时是动画池里的现有素材（走 `/anim` 的 name 形态），
+   * 没给就是 §2.3 的新素材（url 形态）。`rate` 是 timeline 按素材时长算好的倍速。
+   */
+  play(anim: string, rate: number, from?: 'pool'): void;
   say(line: string, durationMs: number): void;
 }
 
@@ -334,7 +448,7 @@ export class BattleShow {
     const side = step.who === 0 ? this.sides.self : this.sides.foe;
     // 没有对手窗口：那几步只是没画面，气血条照更新
     if (!side) return;
-    if (step.anim) side.play(step.anim, step.rate ?? 1);
+    if (step.anim) side.play(step.anim, step.rate ?? 1, step.from);
     if (step.line) side.say(step.line, LINE_MS);
   }
 

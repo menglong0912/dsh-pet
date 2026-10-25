@@ -28,6 +28,7 @@ import {
   LINE_MS,
   OPEN_MS,
   rateFor,
+  reactDelayOf,
   REACT_MS,
   SLOT_MS,
   timeline,
@@ -120,7 +121,7 @@ test('开场：两边各一段起手式，都在 t=0', () => {
   assert.deepEqual(steps[0].hp, hp);
 });
 
-test('出手 → 台词 → 挨打反应：反应比出手晚 0.9 秒，落在对方那一边', () => {
+test('出手 → 台词 → 挨打反应：反应比出手晚到攻击素材的打击时刻，落在对方那一边', () => {
   const steps = timeline([start(0), decide(0, { kind: 'unarmed' }), hit(0)], NAMES, seq());
   assert.deepEqual(
     steps.filter((step) => step.anim).map((step) => [step.at, step.who, step.anim]),
@@ -128,12 +129,26 @@ test('出手 → 台词 → 挨打反应：反应比出手晚 0.9 秒，落在�
       [0, 0, '战斗-起手'],
       [0, 1, '战斗-起手'],
       [OPEN_MS, 0, '战斗-出拳'],
-      [OPEN_MS + REACT_MS, 1, '战斗-受击'],
+      [OPEN_MS + reactDelayOf('战斗-出拳'), 1, '战斗-受击'],
     ],
   );
   const line = steps.find((step) => step.line);
   assert.ok(line && line.who === 0 && line.at === OPEN_MS, `台词挂在出手那一方：${JSON.stringify(line)}`);
   assert.match(line?.line ?? '', /小鱼/);
+});
+
+test('reactDelayOf：反应延迟 = 素材打击时刻 ÷ 倍速（固定 0.9 秒只有出拳对得上）', () => {
+  // 出拳 5s：打击在 2.0s，倍速 2.083 → 960ms（≈ X3 原来的固定 900，观感不变）
+  assert.equal(reactDelayOf('战斗-出拳'), 960);
+  // 水枪 4s：水柱打在 1.9s，倍速 1.667 → 1140ms（固定 900 时对方在水柱沾身前就挨揍了）
+  assert.equal(reactDelayOf('法宝-水枪'), 1140);
+  // 气球 4s：炸在 2.0s → 1200ms
+  assert.equal(reactDelayOf('法宝-气球'), 1200);
+  // 蓝鲸 5s：俯冲撞在 2.25s，倍速 2.083 → 1080ms
+  assert.equal(reactDelayOf('招式-蓝鲸现世'), 1080);
+  // 表里没有的 / 没有攻击动画：退回固定 REACT_MS
+  assert.equal(reactDelayOf('战斗-胜利'), REACT_MS);
+  assert.equal(reactDelayOf(null), REACT_MS);
 });
 
 test('映射：法宝攻击用 法宝-<名>，招式用 招式-<名>，空手用 战斗-出拳', () => {
@@ -201,7 +216,8 @@ test('同一格里的第二、三段错开 BEAT_MS；下一件事另起一格', 
   );
 });
 
-test('挡下的那一下：挨打方播招式-泡泡护体（代替战斗-受击），时刻和倍速窗口照旧', () => {
+test('挡下的那一下：挨打方播招式-泡泡护体（代替战斗-受击），时刻跟着攻击素材的打击时刻', () => {
+  const delay = reactDelayOf('战斗-出拳');
   const stepMaps = (blocked: boolean) => {
     const sets: [SkillId[], SkillId[]] = [[], ['bubble']];
     return timeline([start(0), decide(0, { kind: 'unarmed' }), hit(0, 20, [100, 80], blocked)], NAMES, seq(), sets)
@@ -212,7 +228,7 @@ test('挡下的那一下：挨打方播招式-泡泡护体（代替战斗-受击
     stepMaps(true),
     [
       [OPEN_MS, 0, '战斗-出拳', rateFor('战斗-出拳', SLOT_MS)],
-      [OPEN_MS + REACT_MS, 1, SKILLS.bubble.anim, rateFor(SKILLS.bubble.anim, SLOT_MS - REACT_MS)],
+      [OPEN_MS + delay, 1, SKILLS.bubble.anim, rateFor(SKILLS.bubble.anim, SLOT_MS - delay)],
     ],
     '泡泡护体是防御方（挨打那一方）的动画',
   );
@@ -220,7 +236,7 @@ test('挡下的那一下：挨打方播招式-泡泡护体（代替战斗-受击
     stepMaps(false),
     [
       [OPEN_MS, 0, '战斗-出拳', rateFor('战斗-出拳', SLOT_MS)],
-      [OPEN_MS + REACT_MS, 1, '战斗-受击', rateFor('战斗-受击', SLOT_MS - REACT_MS)],
+      [OPEN_MS + delay, 1, '战斗-受击', rateFor('战斗-受击', SLOT_MS - delay)],
     ],
     '没挡下照旧战斗-受击',
   );
@@ -247,10 +263,10 @@ test('灵兽助阵：beast 那一拍出兽方加播招式-灵兽助阵，和台�
     [
       [OPEN_MS, 0, '战斗-出拳'],
       [atBeast, 0, SKILLS['spirit-beast'].anim],
-      [OPEN_MS + REACT_MS, 1, '战斗-受击'],
-      [atBeast + REACT_MS, 1, '战斗-受击'],
+      [OPEN_MS + reactDelayOf('战斗-出拳'), 1, '战斗-受击'],
+      [atBeast + reactDelayOf(SKILLS['spirit-beast'].anim), 1, '战斗-受击'],
     ],
-    '出手方自己那拍追加灵兽（顶掉攻击动画的尾巴），挨打方照常规那拍反应',
+    '出手方自己那拍追加灵兽（顶掉攻击动画的尾巴）；挨打方各跟各的打击时刻（灵兽那一下跟灵兽素材的冲撞时刻）',
   );
   const beastLine = steps.find((step) => step.at === atBeast && step.line);
   assert.ok(beastLine && beastLine.who === 0, '灵兽那句台词和动画同拍、在出手方');
@@ -261,25 +277,28 @@ test('灵兽助阵：beast 那一拍出兽方加播招式-灵兽助阵，和台�
   );
 });
 
-test('第六感：counter 那一拍的晚 0.9 秒，反击方加播招式-第六感（先挨一下、再反手劈）', () => {
+test('第六感：反击方贴着自己挨的那一下之后加播招式-第六感（先挨一下、再反手劈）', () => {
   const steps = timeline(
     [start(0), decide(0, { kind: 'unarmed' }), hit(0, 20, [100, 70]), counter(1, 12, [88, 70])],
     NAMES,
     seq(),
   );
   const atCounter = OPEN_MS + BEAT_MS;
+  const hitDelay = reactDelayOf('战斗-出拳');
+  const senseDelay = hitDelay + 300;
   assert.deepEqual(
     steps.filter((step) => step.anim && step.at >= OPEN_MS).map((step) => [step.at, step.who, step.anim]),
     [
       [OPEN_MS, 0, '战斗-出拳'],
-      [OPEN_MS + REACT_MS, 1, '战斗-受击'],
+      [OPEN_MS + hitDelay, 1, '战斗-受击'],
       [atCounter + REACT_MS, 0, '战斗-受击'],
-      [atCounter + REACT_MS, 1, SKILLS['sixth-sense'].anim],
+      [atCounter + senseDelay, 1, SKILLS['sixth-sense'].anim],
     ],
-    '第六感不能放 at：反击方刚挨的那下正排在 at + REACT_MS，同拍或更早会被它顶掉',
+    '反击方挨的（hit 的受击）跟着攻击素材的打击时刻；第六感再晚 300ms（贴着挨完再反劈）；' +
+      '出手方挨的反击是徒手快打，维持固定 REACT_MS',
   );
   const sense = steps.find((step) => step.anim === SKILLS['sixth-sense'].anim);
-  assert.equal(sense?.rate, rateFor(SKILLS['sixth-sense'].anim, SLOT_MS - REACT_MS), '反应窗口算倍速');
+  assert.equal(sense?.rate, rateFor(SKILLS['sixth-sense'].anim, SLOT_MS - senseDelay), '反应窗口算倍速');
   const counterLine = steps.find((step) => step.at === atCounter && step.line);
   assert.ok(counterLine && counterLine.who === 1, '反击的台词还在反击方那一拍');
   // 反击打回去那一下被泡泡挡了：出手方照上一条播泡泡护体
@@ -293,9 +312,9 @@ test('第六感：counter 那一拍的晚 0.9 秒，反击方加播招式-第六
     blockedCounter.filter((step) => step.anim && step.at >= OPEN_MS).map((step) => [step.at, step.who, step.anim]),
     [
       [OPEN_MS, 0, '战斗-出拳'],
-      [OPEN_MS + REACT_MS, 1, '战斗-受击'],
+      [OPEN_MS + hitDelay, 1, '战斗-受击'],
       [atCounter + REACT_MS, 0, SKILLS.bubble.anim],
-      [atCounter + REACT_MS, 1, SKILLS['sixth-sense'].anim],
+      [atCounter + senseDelay, 1, SKILLS['sixth-sense'].anim],
     ],
   );
 });
@@ -307,13 +326,14 @@ test('无影手：combo 那一拍出手方加播招式-无影手，没有 shadow
       .filter((step) => step.anim && step.at >= OPEN_MS)
       .map((step) => [step.at, step.who, step.anim]);
   const atCombo = OPEN_MS + BEAT_MS;
+  const delay = reactDelayOf('战斗-出拳');
   assert.deepEqual(
     anims([['shadow-fists'], []]),
     [
       [OPEN_MS, 0, '战斗-出拳'],
       [atCombo, 0, SKILLS['shadow-fists'].anim],
-      [OPEN_MS + REACT_MS, 1, '战斗-受击'],
-      [atCombo + REACT_MS, 1, '战斗-受击'],
+      [OPEN_MS + delay, 1, '战斗-受击'],
+      [atCombo + delay, 1, '战斗-受击'],
     ],
     '一拳接连续拳影（和 combo 台词同拍），挨打方两段攻击各反应一次',
   );
@@ -321,8 +341,8 @@ test('无影手：combo 那一拍出手方加播招式-无影手，没有 shadow
     anims([[], []]),
     [
       [OPEN_MS, 0, '战斗-出拳'],
-      [OPEN_MS + REACT_MS, 1, '战斗-受击'],
-      [atCombo + REACT_MS, 1, '战斗-受击'],
+      [OPEN_MS + delay, 1, '战斗-受击'],
+      [atCombo + delay, 1, '战斗-受击'],
     ],
     '连击来自身法 / 毽子这些加成，出手方没无影手就不配拳影',
   );
