@@ -26,6 +26,12 @@ export interface NeighborRecord {
   lastMet: number;
   /** 最近一次见面的摘要，≤ LINE_MAX */
   summary: string;
+  /** 切磋赢了几场（X5；旧文件没有这个字段，读进来就当 0） */
+  sparWins: number;
+  /** 切磋输了几场（同上） */
+  sparLosses: number;
+  /** 最近一场切磋赢了吗（memoryLine 的「上次切磋你赢了 / 输了」用）；还没切过 null */
+  lastSparWon: boolean | null;
 }
 
 /** 最多记多少位邻居 */
@@ -41,6 +47,10 @@ const recordSchema = z.object({
   firstMet: z.number(),
   lastMet: z.number(),
   summary: z.string(),
+  // 切磋三样（X5）是后来加的：旧文件里没有，读进来当没切过
+  sparWins: z.number().int().min(0).default(0),
+  sparLosses: z.number().int().min(0).default(0),
+  lastSparWon: z.boolean().nullable().default(null),
 });
 
 export class NeighborBook {
@@ -111,6 +121,9 @@ export class NeighborBook {
         firstMet: now,
         lastMet: now,
         summary: '',
+        sparWins: 0,
+        sparLosses: 0,
+        lastSparWon: null,
       });
     }
     this.save();
@@ -133,6 +146,18 @@ export class NeighborBook {
     const text = cleanText(summary, LINE_MAX);
     if (!text) return;
     record.summary = text;
+    this.save();
+  }
+
+  /**
+   * 记一场切磋的输赢（X5，features.ts 在两边各自开打前调）：赢的记 sparWins、输的记 sparLosses，
+   * 顺带把「上次切磋」的输赢留给下次见面打招呼提一句。没记过的 id（没验证过身份 / 已被忘掉）不动。
+   */
+  recordSpar(id: string, won: boolean): void {
+    const record = this.records.get(id);
+    if (!record) return;
+    record[won ? 'sparWins' : 'sparLosses'] += 1;
+    record.lastSparWon = won;
     this.save();
   }
 
@@ -221,13 +246,14 @@ function agoText(ms: number): string {
 
 /**
  * 拼进串门提示词的「上次见面」一句（guestPrompt / hostPrompt 的 memory）。
- * 没记录、还没写过摘要时返回 null（提示词里不提）。
+ * 没记录、还没写过摘要时返回 null（提示词里不提）；切过磋就带一句上次切磋的输赢（X5）。
  */
 export function memoryLine(record: NeighborRecord | undefined, now: number): string | null {
   if (!record) return null;
   const met = record.hosted + record.visited;
   const when = `你们之前见过 ${met} 次，上次是 ${agoText(now - record.lastMet)}前`;
-  return record.summary ? `${when}，上次聊了：「${record.summary}」。` : `${when}。`;
+  const spar = record.lastSparWon === null ? '' : record.lastSparWon ? '，上次切磋你赢了' : '，上次切磋你输了';
+  return record.summary ? `${when}${spar}，上次聊了：「${record.summary}」。` : `${when}${spar}。`;
 }
 
 /**

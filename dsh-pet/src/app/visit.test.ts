@@ -1,24 +1,37 @@
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createSocket } from 'node:dgram';
 import { createServer, request } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { NetworkInterfaceInfo } from 'node:os';
 import {
   broadcastAddresses,
+  cardFighter,
   cleanText,
   encodeBeacon,
   isLanAddress,
+  isSparNonce,
   knockOn,
   Neighborhood,
   parseBeacon,
   parseEvents,
+  parseSparCard,
   PING_MS,
+  randomSparNonce,
   sendNote,
+  sendReveal,
+  sendSpar,
+  sparCardOf,
+  sparCommit,
+  sparFight,
+  SPAR_MODE,
   tripRequest,
   VisitHost,
 } from './visit.ts';
-import type { Beacon, HostHandlers, Visitor } from './visit.ts';
+import type { Beacon, HostHandlers, SparCard, Visitor } from './visit.ts';
+import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS } from './battle.ts';
+import type { Fighter, WeaponId } from './battle.ts';
 import { generateVisitIdentity, knockMessage, welcomeMessage } from './visit-identity.ts';
 import type { VisitIdentity } from './visit-identity.ts';
 
@@ -156,6 +169,14 @@ async function withHost(
     note: (visitor, text) => {
       calls.push(`note ${visitor.owner}:${text}`);
       return true;
+    },
+    spar: (visitor, card, commit) => {
+      calls.push(`spar ${visitor.pet} stage${card.stage} hp${card.hp} ${commit.slice(0, 8)}`);
+      return Promise.resolve({ ok: false, reason: 'off' });
+    },
+    reveal: (visitor, nonce, line) => {
+      calls.push(`reveal ${visitor.pet} ${nonce.slice(0, 8)} ${line}`);
+      return Promise.resolve({ ok: false, reason: 'late' });
     },
     left: (_visitor, reason, text) => calls.push(`left ${reason} ${text}`),
     ...overrides,
@@ -627,4 +648,240 @@ test('the guest only trusts a welcome signed for the address it dialed', async (
       await close();
     }
   }
+});
+
+// ---------- 切磋（X5） ----------
+
+/** 一份合法的名帖（炼气二层：statCap(1) 是气血 61、其余 7，都有余量） */
+const aCard: SparCard = {
+  v: BATTLE_VERSION,
+  stage: 1,
+  hp: 56,
+  power: 5,
+  agility: 5,
+  speed: 5,
+  weapons: ['water-gun', 'poker'],
+  skills: ['dove'],
+};
+
+const aFighter: Fighter = {
+  name: '小鱼',
+  hp: 80,
+  power: 6,
+  agility: 6,
+  speed: 6,
+  weapons: ['water-gun', 'top'],
+  skills: ['dove', 'critical'],
+};
+
+test('cards: a valid card parses; version mismatches and anything over the codex or statCap is refused', () => {
+  assert.deepEqual(parseSparCard(aCard), aCard);
+  // 引擎版本不同（含 v 缺失、类型不对）都说「版本」；名帖本身倒是其余不合法都说 bad-card
+  assert.equal(parseSparCard({ ...aCard, v: BATTLE_VERSION + 1 }), 'version');
+  assert.equal(parseSparCard({ ...aCard, v: '1' }), 'version');
+  assert.equal(parseSparCard('名帖'), 'version');
+  assert.equal(parseSparCard({ ...aCard, hp: 999 }), null, '数值超过该境界的理论上限');
+  assert.equal(parseSparCard({ ...aCard, power: 8 }), null);
+  assert.equal(parseSparCard({ ...aCard, hp: 0 }), null);
+  assert.equal(parseSparCard({ ...aCard, weapons: [...WEAPON_IDS, 'water-gun'] as WeaponId[] }), null, '法宝超过 8 件');
+  assert.equal(parseSparCard({ ...aCard, weapons: ['slingshot'] }), null, '法宝编号不认识');
+  assert.equal(parseSparCard({ ...aCard, skills: [...SKILL_IDS, 'dove'] }), null, '招式超过 10 个');
+  assert.equal(parseSparCard({ ...aCard, stage: 99 }), null, '境界出格');
+  assert.equal(parseSparCard({ ...aCard, stage: -1 }), null);
+  // 名帖与战斗档案互转，数值一件不少
+  assert.deepEqual(cardFighter('阿花', sparCardOf(aFighter, 3)), { ...aFighter, name: '阿花' });
+});
+
+test('nonces and commits: 32-byte hex in, sha256 hex out', () => {
+  const nonce = randomSparNonce();
+  assert.ok(isSparNonce(nonce));
+  assert.equal(nonce.length, 64);
+  assert.equal(sparCommit(nonce), createHash('sha256').update(nonce).digest('hex'));
+  assert.ok(!isSparNonce('a'.repeat(63)));
+  assert.ok(!isSparNonce('g'.repeat(64)));
+  assert.ok(!isSparNonce(nonce.toUpperCase()));
+  assert.ok(!isSparNonce(''));
+});
+
+test('sparFight: both sides compute the same fight, the host is actor 0, and the seed order is pinned', () => {
+  const guest: Fighter = {
+    name: '阿花',
+    hp: 76,
+    power: 6,
+    agility: 5,
+    speed: 7,
+    weapons: ['poker', 'balloon'],
+    skills: ['bloom', 'sixth-sense'],
+  };
+  const guestNonce = 'a'.repeat(64);
+  const hostNonce = 'b'.repeat(64);
+  const events = sparFight(aFighter, guest, guestNonce, hostNonce);
+  // 两边各自调，事件序列逐个相同（§X5 第 5 步）
+  assert.deepEqual(sparFight(aFighter, guest, guestNonce, hostNonce), events);
+  assert.equal(events[0].kind, 'start');
+  assert.equal(events[0].actor, 0, '主人家是 actor 0');
+  assert.equal(events[0].hp[0], aFighter.hp);
+  // 种子是「客人随机数:主人家随机数」：顺序反了就是另一场
+  assert.notDeepEqual(sparFight(aFighter, guest, hostNonce, guestNonce), events);
+});
+
+test("a spar challenge goes through with the host's card and nonce, and the reveal gets its line cleaned", async () => {
+  await withHost(
+    {
+      spar: async (visitor, card, commit) => {
+        assert.equal(visitor.pet, me.pet);
+        assert.deepEqual(card, aCard);
+        assert.equal(commit, sparCommit('c'.repeat(64)));
+        return { ok: true, card: sparCardOf(aFighter, 4), nonce: 'b'.repeat(64) };
+      },
+      reveal: async (visitor, nonce, line) => {
+        assert.equal(visitor.pet, me.pet);
+        // 感言照台词清洗截断（没带的就空）
+        assert.equal(line, nonce === 'c'.repeat(64) ? '你好 呀' : '');
+        return nonce === 'c'.repeat(64) ? { ok: true } : { ok: false, reason: 'mismatch' };
+      },
+    },
+    async (host, port) => {
+      const target = { address: '127.0.0.1', port };
+      const [answer] = await knockAndAnswer(host, port, true);
+      const token = answer.ok ? answer.token : '';
+      const reply = await sendSpar(target, {
+        token,
+        mode: SPAR_MODE,
+        card: aCard,
+        commit: sparCommit('c'.repeat(64)),
+      });
+      assert.ok(reply.ok);
+      assert.equal(reply.ok && reply.nonce, 'b'.repeat(64));
+      assert.ok(reply.ok && reply.card.v === BATTLE_VERSION && reply.card.stage === 4);
+      // 应答里的名帖与随机数也照对方的规矩验过一遍（坏的要当 bad-card）
+      assert.deepEqual(await sendReveal(target, { token, nonce: 'c'.repeat(64), line: '  你好\u202e呀\n' }), {
+        ok: true,
+      });
+      assert.deepEqual(await sendReveal(target, { token, nonce: 'd'.repeat(64), line: '' }), {
+        ok: false,
+        reason: 'mismatch',
+      });
+    },
+  );
+});
+
+test('a spar is refused with the right reason for each kind of wrong before the host is even asked', async () => {
+  let asked = 0;
+  await withHost(
+    {
+      spar: async () => {
+        asked += 1;
+        return { ok: false, reason: 'off' as const };
+      },
+    },
+    async (host, port) => {
+      const target = { address: '127.0.0.1', port };
+      const [answer] = await knockAndAnswer(host, port, true);
+      const token = answer.ok ? answer.token : '';
+      const ask = (body: Record<string, unknown>) =>
+        sendSpar(target, { token, mode: SPAR_MODE, card: aCard, commit: sparCommit('c'.repeat(64)), ...body });
+      assert.deepEqual(await ask({ mode: 'manual' }), { ok: false, reason: 'unsupported-mode' });
+      assert.deepEqual(await ask({ commit: 'nope' }), { ok: false, reason: 'bad-request' });
+      assert.deepEqual(await ask({ card: { ...aCard, v: BATTLE_VERSION + 1 } }), { ok: false, reason: 'version' });
+      assert.deepEqual(await ask({ card: { ...aCard, hp: 999 } }), { ok: false, reason: 'bad-card' });
+      assert.deepEqual(await ask({ card: { ...aCard, weapons: ['slingshot'] } }), { ok: false, reason: 'bad-card' });
+      assert.equal(asked, 0, '不对的请求根本没到 handlers.spar');
+      // 到了的：handlers 说什么回什么；客人走了以后如实带 sent-home 回去
+      assert.deepEqual(await ask({}), { ok: false, reason: 'off' });
+      assert.equal(asked, 1);
+      host.sendHome();
+      assert.deepEqual(await ask({}), { ok: false, reason: 'sent-home' });
+    },
+  );
+});
+
+test("the guest also checks the host's reply card, nonce and reasons like everything else it sends", async () => {
+  const replyWith = async (body: unknown): Promise<Awaited<ReturnType<typeof sendSpar>>> => {
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        const payload = JSON.stringify(body);
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+        res.end(payload);
+      });
+    });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    try {
+      const port = (server.address() as AddressInfo).port;
+      return await sendSpar(
+        { address: '127.0.0.1', port },
+        {
+          token: 'ab'.repeat(16),
+          mode: SPAR_MODE,
+          card: aCard,
+          commit: sparCommit('c'.repeat(64)),
+        },
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((done) => server.close(() => done()));
+    }
+  };
+  // 名帖越上限 / 版本不同 / 随机数格式不对：都当 bad-card
+  assert.deepEqual(await replyWith({ ok: true, card: { ...aCard, hp: 9_999 }, nonce: 'b'.repeat(64) }), {
+    ok: false,
+    reason: 'bad-card',
+  });
+  assert.deepEqual(await replyWith({ ok: true, card: { ...aCard, v: 2 }, nonce: 'b'.repeat(64) }), {
+    ok: false,
+    reason: 'bad-card',
+  });
+  assert.deepEqual(await replyWith({ ok: true, card: aCard, nonce: '短' }), {
+    ok: false,
+    reason: 'bad-card',
+  });
+  // 拒绝的原因原样带回去；没有的路由（旧主人家）如实说 old-host
+  assert.deepEqual(await replyWith({ ok: false, reason: 'off' }), { ok: false, reason: 'off' });
+  assert.deepEqual(await replyWith({ ok: false, reason: 'not-found' }), { ok: false, reason: 'old-host' });
+  assert.deepEqual(await replyWith({ ok: false, reason: '什么鬼' }), { ok: false, reason: 'not-visiting' });
+
+  // 旧主人家没有 /v1/spar 与 /v1/spar/reveal（404 + not-found，同 sendNote 的口径）：两个方向都说「还不会切磋」
+  const old = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const payload = JSON.stringify({ ok: false, reason: 'not-found' });
+      res.writeHead(404, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+      res.end(payload);
+    });
+  });
+  await new Promise<void>((done) => old.listen(0, '127.0.0.1', done));
+  try {
+    const port = (old.address() as AddressInfo).port;
+    const target = { address: '127.0.0.1', port };
+    assert.deepEqual(
+      await sendSpar(target, {
+        token: 'ab'.repeat(16),
+        mode: SPAR_MODE,
+        card: aCard,
+        commit: sparCommit('c'.repeat(64)),
+      }),
+      { ok: false, reason: 'old-host' },
+    );
+    assert.deepEqual(await sendReveal(target, { token: 'ab'.repeat(16), nonce: 'c'.repeat(64), line: '' }), {
+      ok: false,
+      reason: 'old-host',
+    });
+  } finally {
+    old.closeAllConnections();
+    await new Promise<void>((done) => old.close(() => done()));
+  }
+});
+
+test('a spar invite rides the next ping, and parseEvents keeps it while still dropping unknown kinds', async () => {
+  assert.deepEqual(parseEvents([{ type: 'spar-invite' }]), [{ type: 'spar-invite' }]);
+  assert.deepEqual(parseEvents([{ type: 'spar-invite' }, { type: 'dance' }, null]), [{ type: 'spar-invite' }]);
+  await withHost({}, async (host, port) => {
+    const target = { address: '127.0.0.1', port };
+    const [answer] = await knockAndAnswer(host, port, true);
+    const token = answer.ok ? answer.token : '';
+    assert.equal(host.tell({ type: 'spar-invite' }), true);
+    const ping = await tripRequest(target, '/v1/ping', { token });
+    assert.deepEqual(ping.ok && ping.events, [{ type: 'spar-invite' }]);
+  });
 });

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { createSocket } from 'node:dgram';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -11,11 +12,27 @@ import { configPathsFor } from '../standalone/options.ts';
 import { DEFAULT_APP_CONFIG } from './app-config.ts';
 import type { AppConfig } from './app-config.ts';
 import { ANNOUNCE_AFTER_MS } from './claude-hooks.ts';
-import { SKILLS, type SkillId } from './battle.ts';
+import { SKILLS, type Fighter, type SkillId } from './battle.ts';
 import { diaryDate } from './diary.ts';
 import type { DiaryDay } from './diary.ts';
 import { startAppFeatures } from './features.ts';
-import type { AppFeatures, FeatureElectron } from './features.ts';
+import type { AppFeatures, FeatureDeps, FeatureElectron } from './features.ts';
+import {
+  cardFighter,
+  encodeBeacon,
+  knockOn,
+  randomSparNonce,
+  sendReveal,
+  sendSpar,
+  sparCardOf,
+  sparCommit,
+  sparFight,
+  SPAR_MODE,
+  tripRequest,
+  VisitHost,
+} from './visit.ts';
+import type { SparCard } from './visit.ts';
+import { generateVisitIdentity, loadVisitIdentity } from './visit-identity.ts';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -140,10 +157,11 @@ function cultivationSeed(): Record<string, unknown> {
   };
 }
 
-/** withFeatures 顺带记下来的：最近一次注册的菜单 labels、播过的 /anim 请求体 */
+/** withFeatures 顺带记下来的：最近一次注册的菜单 labels、播过的 /anim 请求体、应用的日志 */
 interface FeaturesExtras {
   menus: string[][];
   anims: Array<Record<string, unknown>>;
+  logs: string[];
 }
 
 /**
@@ -162,6 +180,10 @@ async function withFeatures(
     rng?: () => number;
     /** 启动前写进 cultivation.json 的存档（比如造一个快圆满的） */
     cultivation?: Record<string, unknown>;
+    /** 切磋等应战 / 亮随机数的时限（默认 30 秒；测试调短） */
+    sparWaitMs?: number;
+    /** 信标的端口与发往地址（测试注入：绑随机端口、不往真实广播地址发） */
+    beacon?: { port?: number; targets?: () => Array<{ address: string; port: number }> };
   },
   fn: (
     features: AppFeatures,
@@ -175,6 +197,7 @@ async function withFeatures(
   const bodies: Array<Record<string, unknown>> = [];
   const menus: string[][] = [];
   const anims: Array<Record<string, unknown>> = [];
+  const logs: string[] = [];
   const server = createServer((req, res) => {
     const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
     const reply = (body: unknown) => {
@@ -207,7 +230,7 @@ async function withFeatures(
   const home = mkdtempSync(join(tmpdir(), 'dsh-pet-features-'));
   if (options.cultivation) writeFileSync(join(home, 'cultivation.json'), JSON.stringify(options.cultivation));
   const config = options.config ?? DEFAULT_APP_CONFIG;
-  const features = startAppFeatures({
+  const deps: FeatureDeps = {
     electron,
     ai,
     configPaths: configPathsFor(packageRoot, home),
@@ -218,11 +241,14 @@ async function withFeatures(
     neighborsPath: join(home, 'neighbors.json'),
     cultivationPath: join(home, 'cultivation.json'),
     cultivationRng: options.rng,
+    sparWaitMs: options.sparWaitMs,
+    beacon: options.beacon,
     petBase: `http://127.0.0.1:${(server.address() as AddressInfo).port}/dsh-pet-7340`,
-    log: () => undefined,
-  });
+    log: (message) => logs.push(message),
+  };
+  const features = startAppFeatures(deps);
   try {
-    await fn(features, said, bodies, home, { menus, anims });
+    await fn(features, said, bodies, home, { menus, anims, logs });
   } finally {
     features.dispose();
     // 等挂着的菜单长轮询回来、看到 disposed 再关服务，免得它进入失败重试的 5 秒等待
@@ -622,9 +648,9 @@ test('二选一过期没人挑：下一拍随机定一个（拨 Date，不真等
 /** 找某一页的假窗口（按 URL 结尾） */
 const windowOn = (page: string): FakeWin | undefined => windows.find((win) => win.url.endsWith(page));
 
-/** 一层炼气的存档（心魔试炼那几项用：从第一层开始，进账看得清） */
+/** 一层炼气的存档（心魔试炼 / 切磋那几项用：从第一层开始，进账看得清）；属性照建档口径（气血 50、三维合计 11），不能越 statCap(0) */
 function cultivationEarly(): Record<string, unknown> {
-  return { ...cultivationSeed(), stage: 0, progress: 0 };
+  return { ...cultivationSeed(), stage: 0, progress: 0, stats: { hp: 50, power: 4, agility: 4, speed: 3 } };
 }
 
 test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线走；打的时候碎碎念让路；快进后奖励进存档', async () => {
@@ -725,4 +751,331 @@ test('修炼关掉时没有「心魔试炼」这一项', async () => {
     await until(() => menus.length > 0);
     assert.ok(menus.every((labels) => !labels.includes('修炼/心魔试炼')));
   });
+});
+
+// ---------- 切磋（X5） ----------
+
+/** 空着的 UDP 端口（先占住再让出来：信标要用它，不能碰真 app 的 47340，也不能往真实广播地址发） */
+async function freeUdpPort(): Promise<number> {
+  const socket = createSocket('udp4');
+  await new Promise<void>((done) => socket.bind(0, '127.0.0.1', done));
+  const port = (socket.address() as AddressInfo).port;
+  await new Promise<void>((done) => socket.close(() => done()));
+  return port;
+}
+
+/** 开着接待的 features 里，替一位带身份的客人敲门、点菜单让进；返回接待端口与令牌 */
+async function knockIn(
+  home: string,
+  clicks: string[],
+  extras: FeaturesExtras,
+): Promise<{ port: number; token: string }> {
+  const { menus, logs } = extras;
+  await until(() => logs.some((line) => /接待开了，端口 (\d+)/.test(line)), '接待开了');
+  const port = Number(/接待开了，端口 (\d+)/.exec(logs.find((line) => /接待开了，端口/.test(line))!)![1]);
+  // 身份文件里只有私钥：id 要真的把它加载出来（照 visit-identity 的口径）
+  const hostId = loadVisitIdentity(join(home, 'visit-identity.json'), () => undefined).id;
+  const knocking = knockOn(
+    { address: '127.0.0.1', port },
+    { owner: '小李', pet: '阿花' },
+    generateVisitIdentity(),
+    hostId,
+  );
+  await until(() => menus.some((labels) => labels.includes('让 阿花 进来')), '敲门进了菜单');
+  clicks.push('让 阿花 进来');
+  const answer = await knocking;
+  assert.ok(answer.ok, '敲开了门');
+  assert.ok(answer.ok && answer.verified, '主人家的签名对上了');
+  return { port, token: answer.ok ? answer.token : '' };
+}
+
+/** 客人（阿花）的名帖：炼气二层、扑克牌、化鸽遁（都在 statCap(1) 之内） */
+function guestCard(): SparCard {
+  return sparCardOf({ name: '阿花', hp: 56, power: 5, agility: 5, speed: 5, weapons: ['poker'], skills: ['dove'] }, 1);
+}
+
+/** 主人家这边的战斗档案：照 cultivationEarly 的档造的（气血 50、灵力 4 / 身法 4 / 遁速 3、一件水枪、没有招式） */
+const hostFighter: Fighter = {
+  name: '桌宠',
+  hp: 50,
+  power: 4,
+  agility: 4,
+  speed: 3,
+  weapons: ['water-gun'],
+  skills: [],
+};
+
+/** 开接待那套配置（信标绑测试自己的端口、哪儿都不发） */
+function visitConfig(): AppConfig {
+  const config = structuredClone(DEFAULT_APP_CONFIG);
+  config.visit.enabled = true;
+  config.visit.hosting = true;
+  return config;
+}
+
+test('切磋（主人家）：邀约 → 应战 → 亮随机数 → 演出与擂台 → 修为、战绩、邻居簿、日记都记上', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const beaconPort = await freeUdpPort();
+  await withFeatures(
+    { config: visitConfig(), cultivation: cultivationEarly(), clicks, beacon: { port: beaconPort, targets: () => [] } },
+    async (_features, said, _bodies, home, extras) => {
+      const { menus } = extras;
+      const { port, token } = await knockIn(home, clicks, extras);
+      // 切磋的菜单项有了（开着修炼、客人在、验证过身份、没在打）
+      await until(() => menus.some((labels) => labels.includes('串门/和客人切磋')), '切磋菜单项');
+      const target = { address: '127.0.0.1', port };
+      clicks.push('串门/和客人切磋');
+      // 邀约捎到客人那边：开场那句说出口 = inviteSpar 跑完（邀约已攒进出风箱），下一次报平安就带上了
+      await until(() => said.some((text) => text.includes('过两招')), '开场那句');
+      const ping = await tripRequest(target, '/v1/ping', { token });
+      assert.ok(ping.ok && ping.events.some((event) => event.type === 'spar-invite'), '邀约上了 ping');
+      // 应战：主人家的随机数到了；正在打时再来一发是 busy
+      const ownNonce = randomSparNonce();
+      const ask = () =>
+        sendSpar(
+          { address: '127.0.0.1', port },
+          { token, mode: SPAR_MODE, card: guestCard(), commit: sparCommit(ownNonce) },
+        );
+      const reply = await ask();
+      assert.ok(reply.ok, `应战没成：${JSON.stringify(reply)}`);
+      const hostNonce = reply.ok ? reply.nonce : '';
+      assert.deepEqual(await ask(), { ok: false, reason: 'busy' });
+      // 亮随机数 → 开打（两边各自算同一场，赢家照这边自己的口径复核）
+      assert.deepEqual(
+        await sendReveal({ address: '127.0.0.1', port }, { token, nonce: ownNonce, line: '承让承让～' }),
+        { ok: true },
+      );
+      const fightEvents = sparFight(hostFighter, cardFighter('阿花', guestCard()), ownNonce, hostNonce);
+      const fightEnd = fightEvents[fightEvents.length - 1]!;
+      const won = fightEnd.kind === 'end' && fightEnd.winner === 0;
+      // 这边的账：战绩 +1、修为进账（anim:false 的冒泡）、邻居簿、日记
+      await until(() => {
+        const record = cultivationSave(home)?.record as { wins: number; losses: number } | undefined;
+        return record !== undefined && record.wins + record.losses === 1;
+      }, '战绩记上了');
+      const record = cultivationSave(home)!.record as { wins: number; losses: number };
+      assert.equal(won ? record.wins : record.losses, 1, '输赢跟两边各自算的那场一致');
+      assert.ok((cultivationSave(home)!.progress as number) > 0, '修为进了账');
+      const book = JSON.parse(readFileSync(join(home, 'neighbors.json'), 'utf8')) as {
+        neighbors: Array<Record<string, unknown>>;
+      };
+      assert.equal(book.neighbors.length, 1);
+      assert.equal(book.neighbors[0][won ? 'sparWins' : 'sparLosses'], 1, '邻居簿记了切磋账');
+      assert.equal(book.neighbors[0].lastSparWon, won, '上次切磋的输赢留给见面提');
+      const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+      assert.ok(
+        day.events.some((event) => event.kind === 'cultivate' && /切磋/.test(event.text)),
+        '记了日记',
+      );
+      // 演出：擂台开了、客人窗口照旧粉色、打的时候菜单换成快进
+      await until(() => windowOn('/app/arena') !== undefined, '擂台开了', 400);
+      const guest = windowOn('/app/guest');
+      assert.ok(guest, '客人窗口在');
+      assert.ok(!guest!.calls.some((code) => code.includes('"shadow"')), '切磋的客人窗口不是心魔配色');
+      await until(() => menus.some((labels) => labels.includes('修炼/快进')), '打的时候换成快进');
+      // 快进收场：客人的感言（跟着 reveal 带来的）上了客人窗口、自家感言走 compose
+      clicks.push('修炼/快进');
+      await until(
+        () => guest!.calls.some((code) => code.startsWith('guest.say(') && code.includes('承让承让')),
+        '客人的感言上了客人窗口',
+        400,
+      );
+      await until(() => memeAsks.some((ask) => /切磋/.test(ask)), '自家感言走 compose', 400);
+      await until(() => said.some((text) => text.includes('过两招')), '开场说了一句');
+      // 打完菜单收回来——必须看**最新**一帧（some 扫历史会被开打前的快照满足，真机 battle
+      // 残留的 bug 就是从这漏过去的）：快进消失、切磋项回来了
+      await until(
+        () => {
+          const latest = menus[menus.length - 1] ?? [];
+          return latest.includes('串门/和客人切磋') && !latest.includes('修炼/快进');
+        },
+        '打完菜单收回来（battle 清零、快进消失）',
+        400,
+      );
+    },
+  );
+});
+
+test('切磋：随机数对不上、超时没亮、邀约没人接，各按各的口径收场（不开打、没有擂台）', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const beaconPort = await freeUdpPort();
+  await withFeatures(
+    {
+      config: visitConfig(),
+      cultivation: cultivationEarly(),
+      clicks,
+      sparWaitMs: 300,
+      beacon: { port: beaconPort, targets: () => [] },
+    },
+    async (_features, said, _bodies, home, extras) => {
+      const { menus } = extras;
+      const { port, token } = await knockIn(home, clicks, extras);
+      const target = { address: '127.0.0.1', port };
+      // 邀约没人接：过了时限收摊，说一句没接招
+      await until(() => menus.some((labels) => labels.includes('串门/和客人切磋')));
+      clicks.push('串门/和客人切磋');
+      await until(() => said.some((text) => text.includes('过两招')), '开场那句');
+      await until(() => said.some((text) => text.includes('没接招')), '邀约超时收摊');
+      // 应战 → 亮的随机数对不上：按客人认输记（这边的战绩是赢），应答如实说 mismatch
+      const reply = await sendSpar(target, {
+        token,
+        mode: SPAR_MODE,
+        card: guestCard(),
+        commit: sparCommit('c'.repeat(64)),
+      });
+      assert.ok(reply.ok, `应战没成：${JSON.stringify(reply)}`);
+      assert.deepEqual(await sendReveal(target, { token, nonce: 'd'.repeat(64), line: '胡说的' }), {
+        ok: false,
+        reason: 'mismatch',
+      });
+      await until(() => (cultivationSave(home)?.record as { wins: number }).wins === 1, '认输记成赢');
+      // 没开打：没有擂台、没有快进、客人那句「感言」也没上屏
+      await new Promise((done) => setTimeout(done, 200));
+      assert.equal(windowOn('/app/arena'), undefined, '没开擂台');
+      assert.ok(
+        menus.every((labels) => !labels.includes('修炼/快进')),
+        '没开打',
+      );
+      assert.ok(!windowOn('/app/guest')!.calls.some((code) => code.includes('胡说的')), '没核上承诺的感言不上屏');
+      await until(() => said.some((text) => text.includes('算它认输')), '说了认输');
+      // 再来一场，超时才亮：同样按认输记
+      const again = await sendSpar(target, {
+        token,
+        mode: SPAR_MODE,
+        card: guestCard(),
+        commit: sparCommit('c'.repeat(64)),
+      });
+      assert.ok(again.ok);
+      await new Promise((done) => setTimeout(done, 500));
+      assert.deepEqual(await sendReveal(target, { token, nonce: 'c'.repeat(64), line: '迟到的' }), {
+        ok: false,
+        reason: 'late',
+      });
+      await until(() => (cultivationSave(home)?.record as { wins: number }).wins === 2, '超时也是认输');
+    },
+  );
+});
+
+test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数 → 台词转播回来、账记上、没被叫回家', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const config = structuredClone(DEFAULT_APP_CONFIG);
+  config.visit.enabled = true;
+  config.visit.visiting = true;
+  // 假主人家（跟 dev/visit-peer.mjs 的 host 模式同一套）：应战用一份假名帖，随机数是固定的
+  const HOST_NONCE = 'b'.repeat(64);
+  const fakeCard = sparCardOf(
+    { name: '大个', hp: 70, power: 8, agility: 6, speed: 6, weapons: ['top'], skills: ['shadow-fists'] },
+    3,
+  );
+  const fakeId = 'f'.repeat(32);
+  const saw: { card: SparCard | null; commit: string | null; nonce: string | null; line: string | null } = {
+    card: null,
+    commit: null,
+    nonce: null,
+    line: null,
+  };
+  const fake = new VisitHost(
+    {
+      canHost: () => true,
+      knocked: (visitor) => {
+        setTimeout(() => fake.answer(true), 50);
+        assert.ok(visitor);
+      },
+      knockEnded: () => undefined,
+      line: () => Promise.resolve('欢迎欢迎，随便玩呀～'),
+      note: () => false,
+      async spar(_visitor, card, commit) {
+        saw.card = card;
+        saw.commit = commit;
+        return { ok: true, card: fakeCard, nonce: HOST_NONCE };
+      },
+      async reveal(_visitor, nonce, line) {
+        saw.nonce = nonce;
+        saw.line = line;
+        return sparCommit(nonce) === saw.commit ? { ok: true } : { ok: false, reason: 'mismatch' };
+      },
+      left: () => undefined,
+    },
+    { log: () => undefined },
+  );
+  const fakePort = await fake.listen('127.0.0.1');
+  const beaconPort = await freeUdpPort();
+  // 信标：让 features 听见这位邻居（beacon 旋钮把 features 的信标绑到测试自己的端口）
+  const beacon = createSocket('udp4');
+  beacon.on('error', () => undefined);
+  const beaconPayload = encodeBeacon({ id: fakeId, owner: '测试邻居', pet: '大个', port: fakePort });
+  const sendBeacon = () => beacon.send(beaconPayload, beaconPort, '127.0.0.1', () => undefined);
+  sendBeacon();
+  const beaconTimer = setInterval(sendBeacon, 500);
+  try {
+    await withFeatures(
+      { config, cultivation: cultivationEarly(), clicks, beacon: { port: beaconPort, targets: () => [] } },
+      async (_features, said, bodies, home, extras) => {
+        const { menus } = extras;
+        await until(
+          () => menus.some((labels) => labels.some((label) => label.startsWith('串门/去 '))),
+          '信标听见了邻居（菜单要等下一拍才重注册）',
+          400,
+        );
+        clicks.push('串门/去 测试邻居 家');
+        await until(() => menus.some((labels) => labels.includes('串门/找主人家的宠物切磋')), '进了门、切磋项出现');
+        clicks.push('串门/找主人家的宠物切磋');
+        // 客人发来名帖与承诺，接着亮随机数（带一句按人设编的感言）
+        await until(() => saw.card !== null, '切磋请求送到了主人家');
+        await until(() => saw.nonce !== null, '亮了随机数');
+        assert.equal(saw.line, env.memeAnswer, '感言走 compose（假模型的回答，不是兜底模板）');
+        // 账：测试拿同一对随机数复核这场谁赢，客人的记录必须一致
+        const expected = sparFight(cardFighter('大个', fakeCard), hostFighter, saw.nonce!, HOST_NONCE);
+        const expectedEnd = expected[expected.length - 1]!;
+        const won = expectedEnd.kind === 'end' && expectedEnd.winner === 1;
+        await until(() => {
+          const record = cultivationSave(home)?.record as { wins: number; losses: number } | undefined;
+          return record !== undefined && record.wins + record.losses === 1;
+        }, '客人这边记了账');
+        const record = cultivationSave(home)!.record as { wins: number; losses: number };
+        assert.equal(won ? record.wins : record.losses, 1, '输赢跟两边各自算的那场一致');
+        assert.ok((cultivationSave(home)!.progress as number) > 0, '修为进了账（relay，不叫回家）');
+        const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+        assert.ok(
+          day.events.some((event) => event.kind === 'cultivate' && /切磋/.test(event.text)),
+          '记了日记',
+        );
+        // 转播：开场那句、台词、结果都是 anim:false 的气泡
+        await until(
+          () => bodies.some((body) => body.anim === false && String(body.text).includes('过两招')),
+          '开场那句转播了',
+        );
+        await until(() => menus.some((labels) => labels.includes('修炼/快进')), '转播中可快进');
+        clicks.push('修炼/快进');
+        await until(
+          () => bodies.some((body) => body.anim === false && String(body.text).startsWith('（切磋）这场')),
+          '结果转播了',
+          400,
+        );
+        assert.ok(
+          bodies.some(
+            (body) =>
+              body.anim === false &&
+              typeof body.text === 'string' &&
+              !String(body.text).startsWith('（切磋）') &&
+              !String(body.text).startsWith('（在 '),
+          ),
+          '战斗台词也转播回来了',
+        );
+        // 没被叫回家：还在别人家
+        await until(() => menus.some((labels) => labels.includes('从 测试邻居 家回来')), '还在别人家做客');
+        assert.ok(
+          said.every((text) => !text.includes('我从 测试邻居 家回来')),
+          '转播不走 say',
+        );
+      },
+    );
+  } finally {
+    clearInterval(beaconTimer);
+    beacon.close();
+    await fake.close();
+  }
 });

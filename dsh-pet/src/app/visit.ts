@@ -11,8 +11,14 @@
  *   POST /v1/chat  { token, text }   客人说一句，回 { reply }（这边的宠物回的那句）
  *   POST /v1/note  { token, text }   客人捎话（它家主人写给这边的，只收熟人的，每趟最多 NOTE_MAX 条、
  *                                    两条隔 NOTE_GAP_MS；events 里的 note 事件捎回去是另一个方向）
+ *   POST /v1/spar   { token, mode, card, commit }   客人应约（或主动）切磋（X5）：带上名帖与随机数的承诺，
+ *                                    回 { card, nonce }（这边自己的名帖与随机数）；模式不认识 / 版本不同 /
+ *                                    名帖不对各有原因，切磋关着回 off、正在打回 busy
+ *   POST /v1/spar/reveal { token, nonce, line? }    客人亮随机数（line 是它家宠物的赛后感言）；
+ *                                    对得上就开打（两边各自算同一场），对不上或超时按客人认输
  *   POST /v1/ping  { token }         客人每 PING_MS 报一次还在，回 { events }：这边攒下要告诉客人的事
- *                                    （这边宠物主动说的话、主人摸了它一下、一起玩什么、请它吃什么）；被请回家后回 reason: sent-home
+ *                                    （这边宠物主动说的话、主人摸了它一下、一起玩什么、请它吃什么、
+ *                                    邀它切磋）；被请回家后回 reason: sent-home
  *   POST /v1/leave { token, text }   客人告辞（text 是告别的话，可空）
  *
  * 安全（对方发来的一律不可信）：
@@ -24,7 +30,7 @@
  *
  * macOS 15 起，发广播、主动连局域网地址要主人在系统弹框里允许「本地网络」；监听与接收单播不需要（Apple TN3179）。
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createSocket } from 'node:dgram';
 import type { Socket } from 'node:dgram';
 import { createServer } from 'node:http';
@@ -32,6 +38,9 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { z } from 'zod';
+import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS, fight, statCap } from './battle';
+import type { BattleEvent, Fighter, SkillId, WeaponId } from './battle';
+import { MAX_STAGE } from './cultivation';
 import { idOfPub, knockMessage, verifyWithPub, welcomeMessage } from './visit-identity';
 import type { VisitIdentity } from './visit-identity';
 
@@ -76,6 +85,104 @@ export function cleanText(value: unknown, max: number): string {
 /** 对方的昵称、宠物名：同 cleanText，另把「/」换成全角——名字要拼进右键菜单项，半角「/」会被当成子菜单分隔 */
 export function cleanName(value: unknown): string {
   return cleanText(value, NAME_MAX).replace(/\//g, '／');
+}
+
+// ---------- 切磋（X5） ----------
+
+/** 切磋模式（现在只有自动打；以后的手动对战另加模式，收到不认识的回 unsupported-mode） */
+export const SPAR_MODE = 'auto';
+
+/** 名帖：切磋前双方交换的战斗档案（编号会过网，全用引擎图鉴里的 ASCII 编号） */
+export interface SparCard {
+  /** 引擎版本（BATTLE_VERSION）：两边不同就切不了 */
+  v: number;
+  /** 境界序号（对方报的，没法验证真伪；擂台名牌与属性上限的口径都用它） */
+  stage: number;
+  hp: number;
+  power: number;
+  agility: number;
+  speed: number;
+  weapons: WeaponId[];
+  skills: SkillId[];
+}
+
+const sparCardSchema = z.object({
+  v: z.number().int().min(1),
+  stage: z.number().int().min(0).max(MAX_STAGE),
+  hp: z.number().int().min(1),
+  power: z.number().int().min(1),
+  agility: z.number().int().min(1),
+  speed: z.number().int().min(1),
+  weapons: z.array(z.enum(WEAPON_IDS)).max(8),
+  skills: z.array(z.enum(SKILL_IDS)).max(10),
+});
+
+/**
+ * 对方发来的名帖（不可信）：过了给名帖；引擎版本不同回 'version'（菜单好说「两边版本不一样，切磋不了」，
+ * 也兜住未来版本名帖里字段对不上的情形）；其余不合法——字段不对、编号不认识、数值超过该境界的
+ * 理论上限（statCap）——回 null，当 bad-card 拒掉。
+ */
+export function parseSparCard(raw: unknown): SparCard | 'version' | null {
+  if ((raw as { v?: unknown } | null)?.v !== BATTLE_VERSION) return 'version';
+  const card = sparCardSchema.safeParse(raw);
+  if (!card.success) return null;
+  const cap = statCap(card.data.stage);
+  return card.data.hp <= cap.hp &&
+    card.data.power <= cap.power &&
+    card.data.agility <= cap.agility &&
+    card.data.speed <= cap.speed
+    ? card.data
+    : null;
+}
+
+/** 自己的名帖：战斗档案照 fighter 抄、境界另带（features.ts 接线用） */
+export function sparCardOf(fighter: Fighter, stage: number): SparCard {
+  return {
+    v: BATTLE_VERSION,
+    stage,
+    hp: fighter.hp,
+    power: fighter.power,
+    agility: fighter.agility,
+    speed: fighter.speed,
+    weapons: [...fighter.weapons],
+    skills: [...fighter.skills],
+  };
+}
+
+/** 名帖 → 对手的 Fighter（名字用敲门/信标里那位宠物的名字） */
+export function cardFighter(name: string, card: SparCard): Fighter {
+  return {
+    name,
+    hp: card.hp,
+    power: card.power,
+    agility: card.agility,
+    speed: card.speed,
+    weapons: [...card.weapons],
+    skills: [...card.skills],
+  };
+}
+
+/** 32 字节随机数的十六进制：切磋双方各出一个，合起来当种子（谁也没法一个人挑） */
+export function randomSparNonce(): string {
+  return randomBytes(32).toString('hex');
+}
+
+/** 承诺 = sha256(随机数) 的十六进制：客人先交承诺、主人家后出随机数，两边都做不了手脚 */
+export function sparCommit(nonce: string): string {
+  return createHash('sha256').update(nonce).digest('hex');
+}
+
+/** 是不是一条 32 字节的十六进制随机数 / 承诺 */
+export function isSparNonce(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
+}
+
+/**
+ * 两边各自算的同一场（§X5）：主人家是 a（事件里 actor 0），种子是「客人随机数:主人家随机数」。
+ * 两边都调它、传同一对随机数，事件序列逐个相同——顺序反了就是另一场，测试里钉住这条。
+ */
+export function sparFight(host: Fighter, guest: Fighter, guestNonce: string, hostNonce: string): BattleEvent[] {
+  return fight(host, guest, `${guestNonce}:${hostNonce}`);
 }
 
 // ---------- 发现 ----------
@@ -266,15 +373,38 @@ export interface Visitor {
 
 export type KnockFailure = 'busy' | 'too-soon' | 'declined' | 'no-answer';
 
-/** 这边要告诉客人的事（客人报平安时捎过去）：这边宠物主动说了句话 / 主人摸了客人一下 / 一起玩什么 / 请它吃什么 / 捎给客人主人的话 */
+/** 这边要告诉客人的事（客人报平安时捎过去）：这边宠物主动说了句话 / 主人摸了客人一下 / 一起玩什么 / 请它吃什么 / 捎给客人主人的话 / 邀它切磋（X5） */
 export type HostEvent =
   | { type: 'line'; text: string }
   | { type: 'poke' }
   | { type: 'play'; what: string }
   | { type: 'gift'; what: string }
-  | { type: 'note'; text: string };
+  | { type: 'note'; text: string }
+  | { type: 'spar-invite' };
 /** 一次最多捎几件事（攒多了丢最早的） */
 const EVENTS_MAX = 8;
+
+/** /v1/spar 的应答：答应了带这边的名帖与随机数；拒绝带原因（unsupported-mode / version / bad-card 在协议层，off / busy / no-id 在 features.ts） */
+export type SparReply =
+  | { ok: true; card: SparCard; nonce: string }
+  | {
+      ok: false;
+      reason:
+        | 'unsupported-mode'
+        | 'off'
+        | 'busy'
+        | 'no-id'
+        | 'version'
+        | 'bad-card'
+        | 'bad-request'
+        | 'sent-home'
+        | 'not-visiting'
+        | 'old-host';
+    };
+
+/** /v1/spar/reveal 的应答：对不上（mismatch）或超时（late）都按客人认输，应答里如实带回去 */
+export type SparRevealReply =
+  { ok: true } | { ok: false; reason: 'mismatch' | 'late' | 'sent-home' | 'not-visiting' | 'old-host' };
 
 export interface HostHandlers {
   /** 现在能不能接待（自己的宠物出门在外、正在敲别人家的门时不行） */
@@ -287,6 +417,13 @@ export interface HostHandlers {
   line(visitor: Visitor, text: string): Promise<string>;
   /** 客人捎来的话（它家主人写给这边的）：返回收不收——只收自己熟人的（T7，features.ts 查邻居簿） */
   note(visitor: Visitor, text: string): boolean;
+  /**
+   * 客人应约（或主动）发来切磋（X5 第 2 步）：名帖与承诺已在协议层验过（parseSparCard / isSparNonce），
+   * 这里只答切磋关不关（off）、在不在打（busy）、认不认得客人（no-id），答应对了回名帖与随机数
+   */
+  spar(visitor: Visitor, card: SparCard, commit: string): Promise<SparReply>;
+  /** 客人亮随机数（X5 第 4 步，line 是它带来的赛后感言）：核对承诺后开打，对不上或超时按客人认输 */
+  reveal(visitor: Visitor, nonce: string, line: string): Promise<SparRevealReply>;
   /** 客人走了：leave = 告辞（text 是告别的话，可空）；lost = 太久没动静 */
   left(visitor: Visitor, reason: 'leave' | 'lost', text: string): void;
 }
@@ -456,6 +593,22 @@ export class VisitHost {
         session.noteCount += 1;
         session.lastNoteAt = now;
         return send(res, 200, { ok: true });
+      }
+      case '/v1/spar': {
+        // 先验模式，再验版本（未来版本的名帖字段可能对不上现在的 schema，得先说清是版本问题），再验名帖
+        if (body.mode !== SPAR_MODE) return send(res, 200, { ok: false, reason: 'unsupported-mode' });
+        const commit = typeof body.commit === 'string' ? body.commit : '';
+        if (!isSparNonce(commit)) return send(res, 400, { ok: false, reason: 'bad-request' });
+        const card = parseSparCard(body.card);
+        if (card === 'version') return send(res, 200, { ok: false, reason: 'version' });
+        if (card === null) return send(res, 200, { ok: false, reason: 'bad-card' });
+        return send(res, 200, await this.handlers.spar(session.visitor, card, commit));
+      }
+      case '/v1/spar/reveal': {
+        // 感言是客人捎来给自己家客人窗口说的：照台词清洗截断，核过承诺才上屏（features.ts）
+        const nonce = typeof body.nonce === 'string' ? body.nonce : '';
+        const reply = await this.handlers.reveal(session.visitor, nonce, cleanText(body.line, LINE_MAX));
+        return send(res, 200, reply);
       }
       case '/v1/leave':
         this.session = null;
@@ -662,6 +815,8 @@ export function parseEvents(raw: unknown): HostEvent[] {
   for (const item of raw.slice(0, EVENTS_MAX)) {
     const event = item as Record<string, unknown> | null;
     if (event?.type === 'poke') events.push({ type: 'poke' });
+    // 邀切磋：旧客人不认识这种类型，走到这儿也不匹配，照样丢掉（X5 的兼容口径）
+    if (event?.type === 'spar-invite') events.push({ type: 'spar-invite' });
     const text = cleanText(event?.text, LINE_MAX);
     if (event?.type === 'line' && text) events.push({ type: 'line', text });
     // 捎给客人主人的话：只当文本显示，不进任何提示词（features.ts 的 onHostEvent）
@@ -702,6 +857,57 @@ export async function sendNote(host: HostAddress, body: { token: string; text: s
   if (result.reason === 'not-friend' || result.reason === 'too-many' || result.reason === 'sent-home')
     return { ok: false, reason: result.reason };
   return { ok: false, reason: result.reason === 'not-found' ? 'old-host' : 'not-visiting' };
+}
+
+/** /v1/spar 拒绝时客人那边要能说人话的全部原因（mismatch / late 只出现在 reveal 的应答里） */
+export type SparFailure = Exclude<SparReply, { ok: true }>['reason'];
+
+const SPAR_FAILURES: readonly string[] = [
+  'unsupported-mode',
+  'off',
+  'busy',
+  'no-id',
+  'version',
+  'bad-card',
+  'bad-request',
+  'sent-home',
+];
+
+/**
+ * 客人应约（或主动）发切磋（X5 第 2 步）；连不上时抛错。
+ * 应答里主人家的名帖与随机数照样不可信：名帖再过一遍 parseSparCard、随机数验格式，不对就当 bad-card。
+ * 旧主人家没有这条路径（404 + not-found）：如实映射成 old-host，客人那边好说「对方的桌宠还不会切磋」。
+ */
+export async function sendSpar(
+  host: HostAddress,
+  body: { token: string; mode: string; card: SparCard; commit: string },
+): Promise<SparReply> {
+  const result = await post(host, '/v1/spar', body, 5_000);
+  if (result.ok === true) {
+    const nonce = typeof result.nonce === 'string' ? result.nonce : '';
+    const card = parseSparCard(result.card);
+    if (card !== null && card !== 'version' && isSparNonce(nonce)) return { ok: true, card, nonce };
+    return { ok: false, reason: 'bad-card' };
+  }
+  const reason = typeof result.reason === 'string' ? result.reason : '';
+  if (reason === 'not-found') return { ok: false, reason: 'old-host' };
+  return {
+    ok: false,
+    reason: SPAR_FAILURES.includes(reason) ? (reason as SparFailure) : 'not-visiting',
+  };
+}
+
+/** 亮随机数（X5 第 4 步），line 是自家宠物的赛后感言，主人家核过承诺后让客人窗口说；连不上时抛错 */
+export async function sendReveal(
+  host: HostAddress,
+  body: { token: string; nonce: string; line: string },
+): Promise<SparRevealReply> {
+  const result = await post(host, '/v1/spar/reveal', body, 5_000);
+  if (result.ok === true) return { ok: true };
+  const reason = typeof result.reason === 'string' ? result.reason : '';
+  if (reason === 'not-found') return { ok: false, reason: 'old-host' };
+  if (reason === 'mismatch' || reason === 'late') return { ok: false, reason };
+  return { ok: false, reason: 'not-visiting' };
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {

@@ -113,6 +113,12 @@ export const SKILLS: Record<SkillId, SkillDef> = {
 
 export const SKILL_IDS = Object.keys(SKILLS) as SkillId[];
 
+/**
+ * 引擎版本（X5 名帖的 v）：结算规则、图鉴内容变了就 +1。切磋双方在名帖里各带一份，
+ * 两边不同就切不了（谁也不知道对方那版引擎会打出什么）。
+ */
+export const BATTLE_VERSION = 1;
+
 /** 主动招式（Action 里允许出现的） */
 const ACTIVE_SKILLS: readonly SkillId[] = ['bloom', 'lion-roar', 'blue-whale'];
 

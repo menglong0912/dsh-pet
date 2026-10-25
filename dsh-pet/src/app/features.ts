@@ -16,6 +16,8 @@
  *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口、visit-talk.ts 管怎么聊）：设置里开了才发信标、开接待端口；
  *     出门时自家宠物变半透明、把别人家的聊天转播回来，客人来了在自家宠物旁边开个小窗（能摸、能一起玩）；
  *     两边接着前文聊、主人家也会起话题；串门的台词只按人设生成，不带「主人此刻」；
+ *     串门进行中两边都能发起切磋（X5，visit.ts 的先承诺后揭示协议）：主人家屏幕上自家宠物对客人窗口
+ *     演全套（复用 X3 的演出执行器与擂台），客人那边只把台词转播回来；奖励与战绩各记各的；
  *     开着串门时，用餐时间宠物也分到一份零食（snacks.ts，晚上偶尔有宵夜），家里来客时请它吃；
  *     熟人之间还能捎话（note-window.ts 的小输入窗）：主人的话经宠物带给对方主人，原文不进提示词与日记；
  *   - 右键菜单根上注册「看看我在干嘛 / 宠物日记」与串门的项（「串门」子菜单列附近的邻居，
@@ -39,7 +41,7 @@ import { ActivityTracker, describeActivity, durationText } from './activity';
 import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
 import { SKILLS, WEAPONS, fight, shadowOf, tribulate } from './battle';
-import { BattleShow, timeline } from './battle-show';
+import { BattleShow, LINE_MS, timeline } from './battle-show';
 import { arenaScoreboard, openArenaWindow } from './arena-window';
 import { ClaudeSessions } from './claude-hooks';
 import { Cultivation, stageLabel } from './cultivation';
@@ -57,6 +59,7 @@ import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
 import {
   cleanText,
+  cardFighter,
   knockOn,
   LINE_MAX,
   NAME_MAX,
@@ -64,7 +67,14 @@ import {
   NOTE_GAP_MS,
   NOTE_MAX,
   PING_MS,
+  randomSparNonce,
   sendNote,
+  sendReveal,
+  sendSpar,
+  sparCardOf,
+  sparCommit,
+  sparFight,
+  SPAR_MODE,
   tripRequest,
   VisitHost,
 } from './visit';
@@ -75,6 +85,10 @@ import type {
   KnockFailure,
   Neighbor,
   NoteReply,
+  SparCard,
+  SparFailure,
+  SparReply,
+  SparRevealReply,
   TripReply,
   Visitor,
 } from './visit';
@@ -119,7 +133,8 @@ const MEDITATE_GAP_MIN = 40;
 const MEDITATE_JITTER_MIN = 20;
 /** 插件每个 owner 最多 20 项（`>` 就整份拒掉、菜单从此不再更新）：根上固定 2 项，修炼最多 4 项
  * （信息 + 渡劫 + 服丹后渡劫 + 心魔试炼／快进；待选二选一那两项只在没圆满时出现），邻居最多列这么多
- * （回访占名额）= 恰好 20。家里有客时换成送客 + 一起玩 + 请吃零食，至多 16 项。 */
+ * （回访占名额）= 恰好 20。家里有客时换成送客 + 切磋 + 一起玩 + 请吃零食 + 熟人 + 捎话，至多 17 项，
+ * 加上修炼的项会超 20：wantedLabels 按优先级兜底截断，先少的是尾巴上的零食和捎话。 */
 const MENU_NEIGHBORS_MAX = 14;
 /** 宿主每个 owner 的菜单项上限（src/host/menu.ts 的 ITEMS_MAX，`>` 才拒） */
 const MENU_ITEMS_MAX = 20;
@@ -137,6 +152,10 @@ const SCREEN_ACTIVE_IDLE_SEC = 60;
 const SPOKE_HOLD_MS = 15_000;
 /** 打完到关掉心魔窗口 / 擂台之间的停顿（§X3：3 秒） */
 const CLOSE_HOLD_MS = 3_000;
+/** 切磋等客人应战 / 亮随机数的时限（§X5：对不上或 30 秒没来，按客人认输记） */
+const SPAR_WAIT_MS = 30_000;
+/** 客人的赛后感言最多编这么久（跟着 reveal 带过去；模型磨蹭就退回模板，别把 reveal 拖过时限） */
+const SPAR_REMARK_CAP_MS = 10_000;
 /** 前台是这些应用时视为「取不到」（桌宠自己的窗口被点到前台） */
 const SELF_APP_NAMES = new Set(['dsh-pet', 'Electron']);
 const SCREEN_SETTINGS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
@@ -282,6 +301,10 @@ export interface FeatureDeps {
   cultivationPath: string;
   /** 修炼用的随机数（丹药、成长随机项）；只给测试注入固定序列用，平时不传 */
   cultivationRng?: () => number;
+  /** 切磋等客人应战 / 亮随机数的时限（默认 30 秒，超时按客人认输）；只给测试调短用 */
+  sparWaitMs?: number;
+  /** 信标的端口与发往地址（默认 BEACON_PORT + 每块网卡的广播地址）；只给测试注入用，不往真实网络发 */
+  beacon?: { port?: number; targets?: () => Array<{ address: string; port: number }> };
   /** 插件路由前缀的完整地址，如 http://127.0.0.1:53624/dsh-pet-7340 */
   petBase: string;
   log: (message: string) => void;
@@ -289,6 +312,8 @@ export interface FeatureDeps {
 
 export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   const { electron, ai, log } = deps;
+  /** 切磋等客人应战 / 亮随机数的时限（§X5：30 秒没来按客人认输；测试里调短） */
+  const sparWaitMs = deps.sparWaitMs ?? SPAR_WAIT_MS;
   const tracker = new ActivityTracker();
   const claude = new ClaudeSessions();
   const health = new HealthReminders(() => deps.appConfig());
@@ -945,6 +970,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       // 不接待客人时只听不发：别人看不到自己，自己照样能出门
       announce: () => (visitHost ? { owner: nickname(), pet: petName(), port: hostPort } : null),
       log,
+      // 端口与发往地址默认照常（BEACON_PORT + 每块网卡的广播地址）；测试里注入成随机的、不往外发
+      ...(deps.beacon?.port !== undefined ? { port: deps.beacon.port } : {}),
+      ...(deps.beacon?.targets ? { targets: deps.beacon.targets } : {}),
     });
     try {
       await hood.start();
@@ -1014,7 +1042,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       );
       lines.push(`你：${reply}`);
       if (current) current.lastLineAt = Date.now();
-      await say(reply);
+      // 正在演一场（切磋）：回话不联动说话动画，别顶掉演出的动画
+      await say(reply, battle ? { anim: false } : undefined);
       return reply;
     },
     note(visitor, text) {
@@ -1025,6 +1054,13 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       if (hosting?.visitor === visitor) hosting.window.say(`${visitor.owner} 托我带话：${text}`, NOTE_BUBBLE_MS);
       diary.note(Date.now(), 'visit', `${visitor.owner} 托 ${visitor.pet} 带来一句话`);
       return true;
+    },
+    // 切磋（X5）：协议层已验过模式、版本与名帖；关不关、忙不忙、认不认得客人在这边答
+    spar(visitor, card, commit) {
+      return hostSpar(visitor, card, commit);
+    },
+    reveal(visitor, nonce, line) {
+      return hostReveal(visitor, nonce, line);
     },
     left(visitor, reason, text) {
       seeGuestOff(
@@ -1093,7 +1129,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     current.lines.push(`你：${text}`);
     current.lastLineAt = Date.now();
     visitHost?.tell({ type: 'line', text });
-    await say(text);
+    // 正在演一场（切磋）时起话题：不联动说话动画（带 anim 的气泡会顶掉演出的动画）
+    await say(text, battle ? { anim: false } : undefined);
     if (hosting === current && current.openers < HOST_OPENERS) {
       current.openerTimer = setTimeout(() => void openTopic(current), openerGap(false));
     }
@@ -1110,7 +1147,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   /** 和客人一起玩：两只宠物同时播同一段动画（自家宠物转身面朝客人），客人家那边说一句 */
   async function playTogether(thing: PlayThing): Promise<void> {
     const current = hosting;
-    if (!current) return;
+    // 正在演一场（切磋）：一起玩的动画会把演出的动画顶掉，先不玩
+    if (!current || battle) return;
     current.window.play(thing.anim);
     current.lines.push(`（一起${thing.label}）`);
     if (Date.now() - current.lastNudgeAt >= NUDGE_GAP_MS) {
@@ -1129,7 +1167,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   /** 请客人吃零食：从零食袋里拿一份，客人窗口吃起来，客人家那边说一句、记进它的日记 */
   function treatGuest(snack: Snack): void {
     const current = hosting;
-    if (!current || !pouch.take(snack.label)) return;
+    // 正在演一场（切磋）：吃东西的动画会把演出的动画顶掉，先不吃
+    if (!current || battle || !pouch.take(snack.label)) return;
     const { owner, pet } = current.visitor;
     current.window.play(snack.anim);
     current.lines.push(`（请 ${pet} 吃了${snack.label}）`);
@@ -1146,6 +1185,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   function seeGuestOff(visitor: Visitor, farewell: string, line: string): void {
     const current = hosting;
     hosting = null;
+    // 正在切磋（主人家这一侧）：收摊——账在亮随机数那一步就记过了，不会漏
+    cancelSpar();
     if (current) {
       if (current.openerTimer !== null) clearTimeout(current.openerTimer);
       if (farewell) current.window.say(farewell);
@@ -1181,6 +1222,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       actions.set(`不让 ${knocking.pet} 进来`, () => letIn(false));
     } else if (guest) {
       actions.set(`请 ${guest.pet} 回家`, sendGuestHome);
+      // 切磋（X5）：开着修炼、没在打、客人是验证过身份的（奖励与邻居簿都靠 id 记）时才有
+      if (cultivationOn() && guest.id && !spar && !battle)
+        actions.set(`${MENU_VISIT_GROUP}/和客人切磋`, () => void inviteSpar());
       for (const thing of PLAY_THINGS) actions.set(`和 ${guest.pet} 一起玩/${thing.label}`, () => playTogether(thing));
       for (const snack of pouch.kinds()) actions.set(`请 ${guest.pet} 吃/${snack.label}`, () => treatGuest(snack));
       // 只对验证过身份的客人提供熟人开关：陌生人没身份可标，冒名的也不能被拉成熟人
@@ -1191,6 +1235,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         actions.set(`捎话给 ${guest.owner}`, () => void fireNote(noteViaGuest()));
     } else if (trip) {
       actions.set(`从 ${trip.host.owner} 家回来`, () => comeHome('called'));
+      // 切磋（X5）：开着修炼、没在打时才有（在别人家做客，对面是主人家的宠物）
+      if (cultivationOn() && !spar && !battle)
+        actions.set(`${MENU_VISIT_GROUP}/找主人家的宠物切磋`, () => void startGuestSpar());
       const hostId = trip.host.id;
       // 只对验证过身份的主人家提供熟人开关（trip.verified：见 startTrip）；捎话也只对熟人家开
       if (trip.verified)
@@ -1445,6 +1492,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       current.treats.push(snack.label);
       relay(`（在 ${owner} 家吃到了${snack.label}）`);
       ask = GUEST_ASK.treat(snack.label);
+    } else if (event.type === 'spar-invite') {
+      // 主人家邀战（X5）：开着修炼就自动应战（§X5 的口径——客人那边关了切磋就忽略，不回话）
+      void startGuestSpar();
+      return;
     } else {
       ask = GUEST_ASK.poke;
     }
@@ -1519,6 +1570,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const current = trip;
     if (!current) return;
     trip = null;
+    // 正在切磋（客人这一侧）：转播收摊，账在亮随机数那一步就记过了，不会漏
+    cancelSpar();
     clearInterval(current.pingTimer);
     if (current.talkTimer !== null) clearTimeout(current.talkTimer);
     fadeHome(electron, 1);
@@ -1825,6 +1878,361 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     if (plan.canPill) actions.set(`${MENU_CULTIVATION_GROUP}/服丹后渡劫`, () => void runTribulation(true));
   }
 
+  // ---------- 切磋（X5） ----------
+
+  /**
+   * 正在进行的切磋（两边各自记自己这一侧；一台电脑要么在家接待、要么出门做客，不会两边都有）：
+   *   - host：invited = 已把 spar-invite 捎给客人，等它发 /v1/spar 来；card = 已回了名帖与随机数，
+   *     等客人 reveal（对不上或超时都按客人认输）；showing = 开打了（演出在 battle 里跑）。
+   *   - guest：asking = 已发了 /v1/spar（带着随机数的承诺）；showing = 在转播那一场（也在 battle 里跑）。
+   * 战绩与奖励都在「开打」那一步记（两边同时记各自的账），演出只是回放：快进、客人走、退出都不会把账弄乱。
+   */
+  interface SparState {
+    role: 'host' | 'guest';
+    stage: 'invited' | 'card' | 'asking' | 'showing';
+    since: number;
+    /** 等客人应战 / 亮随机数的定时器（超时按客人认输）；客人这一侧没有 */
+    timer: ReturnType<typeof setTimeout> | null;
+    /** host：客人的承诺与名帖、自己亮出去的随机数 */
+    commit?: string;
+    guestCard?: SparCard;
+    hostNonce?: string;
+  }
+
+  let spar: SparState | null = null;
+  /** 这场切磋的擂台（演完 3 秒关掉；客人家那边没有窗口） */
+  let sparArena: ArenaWindow | null = null;
+
+  /** 收摊一场切磋（客人走了 / 回家了 / 退出）：定时器停掉、擂台关掉、演出立刻收尾 */
+  function cancelSpar(): void {
+    const current = spar;
+    if (!current) return;
+    spar = null;
+    if (current.timer !== null) clearTimeout(current.timer);
+    // dispose 只是让 run() 立刻 resolve；battle 不清零的话菜单永远挂着「快进」、
+    // 后续心魔 / 渡劫 / 切磋全被 `if (battle)` 挡住（真机踩过：一场演完全锁死）
+    battle?.dispose();
+    battle = null;
+    sparArena?.close(0);
+    sparArena = null;
+  }
+
+  /** 主人家发起切磋（菜单「串门/和客人切磋」）：把 spar-invite 捎给客人，等它应战（§X5 第 1 步） */
+  function inviteSpar(): void {
+    const current = hosting;
+    if (!current?.visitor.id || !cultivationOn() || spar || battle) return;
+    if (!visitHost?.tell({ type: 'spar-invite' })) return;
+    const state: SparState = { role: 'host', stage: 'invited', since: Date.now(), timer: null };
+    state.timer = setTimeout(() => {
+      if (spar !== state || state.stage !== 'invited') return;
+      spar = null;
+      log(`串门：${current.visitor.pet} 没接切磋的招`);
+      void say(`${current.visitor.pet} 好像没接招～`);
+      void refreshMenu();
+    }, sparWaitMs);
+    spar = state;
+    void say(`${current.visitor.pet}，来跟我过两招～`);
+    void refreshMenu();
+  }
+
+  /** 主人家这一侧收到 /v1/spar（客人应约或主动）：off / busy / no-id 在这里答，答应了回名帖与随机数 */
+  async function hostSpar(visitor: Visitor, card: SparCard, commit: string): Promise<SparReply> {
+    const practice = cultivationOn();
+    if (!practice) return { ok: false, reason: 'off' };
+    // 在打才算忙；等客人应战（invited）的那份不算——客人现在就是来应战的
+    if (battle || (spar && !(spar.role === 'host' && spar.stage === 'invited'))) return { ok: false, reason: 'busy' };
+    // 没验证过身份的客人没有稳定的 id：修为奖励没法按邻居去重、邻居簿也没得记，不接
+    if (!visitor.id) return { ok: false, reason: 'no-id' };
+    const hostNonce = randomSparNonce();
+    const state: SparState = {
+      role: 'host',
+      stage: 'card',
+      since: Date.now(),
+      timer: null,
+      commit,
+      guestCard: card,
+      hostNonce,
+    };
+    // 客人应了邀约（或自己先开的口）：把等邀约的那份状态连定时器一起收掉
+    const invited = spar;
+    if (invited && invited.timer !== null) clearTimeout(invited.timer);
+    state.timer = setTimeout(() => {
+      if (spar !== state || state.stage !== 'card') return;
+      guestConceded(visitor, '超时没亮随机数');
+    }, sparWaitMs);
+    spar = state;
+    log(`串门：${visitor.pet} 应战切磋（${stageLabel(card.stage)}）`);
+    return { ok: true, card: sparCardOf(practice.fighter(petName()), practice.view().stage), nonce: hostNonce };
+  }
+
+  /** 客人没亮随机数（对不上 / 超时，§X5）：按客人认输记，这场不开打 */
+  function guestConceded(visitor: Visitor, why: string): void {
+    const state = spar;
+    if (state?.timer) clearTimeout(state.timer);
+    spar = null;
+    const practice = cultivationOn();
+    if (practice && visitor.id) {
+      onCultivation(Date.now(), practice.sparDone(Date.now(), visitor.id, true), { anim: false });
+      neighbors.recordSpar(visitor.id, true);
+    }
+    diary.note(Date.now(), 'cultivate', `和 ${visitor.owner} 家的 ${visitor.pet} 切磋，它${why}，算它认输`);
+    void say(`${visitor.pet} ${why}，这场算它认输啦～`, { anim: false });
+    void refreshMenu();
+  }
+
+  /** 主人家这一侧收到 /v1/spar/reveal（客人亮随机数）：核承诺，对不上或超时都按客人认输，核过了开打 */
+  async function hostReveal(visitor: Visitor, nonce: string, line: string): Promise<SparRevealReply> {
+    const state = spar;
+    if (!state || state.role !== 'host' || state.stage !== 'card') return { ok: false, reason: 'late' };
+    if (Date.now() - state.since > sparWaitMs) {
+      guestConceded(visitor, '超时没亮随机数');
+      return { ok: false, reason: 'late' };
+    }
+    if (sparCommit(nonce) !== state.commit) {
+      guestConceded(visitor, '随机数对不上');
+      return { ok: false, reason: 'mismatch' };
+    }
+    if (state.timer !== null) clearTimeout(state.timer);
+    state.stage = 'showing';
+    void runHostSparShow(visitor, state, nonce, line);
+    return { ok: true };
+  }
+
+  /** 关掉这场的擂台（演完 3 秒收尾，同 X3 的心魔窗口；客人走了 / 退出时立刻关） */
+  function closeSparArena(afterMs: number): void {
+    const closing = sparArena;
+    if (!closing) return;
+    sparArena = null;
+    closing.close(afterMs);
+  }
+
+  /**
+   * 主人家这一侧的切磋演出：两边各自用同一对随机数算同一场（必然一致），这边演全套——
+   * 自家宠物对客人窗口（照旧粉色），头顶擂台两条血，名帖里的境界上名牌。
+   * 账（修为、战绩、邻居簿、日记）在开演前就记下：演出只是回放，中途快进 / 收摊都不会把账弄乱。
+   */
+  async function runHostSparShow(
+    visitor: Visitor,
+    state: SparState,
+    guestNonce: string,
+    guestLine: string,
+  ): Promise<void> {
+    const practice = cultivationOn();
+    const current = hosting;
+    if (!practice || !current || !visitor.id || !state.guestCard || !state.hostNonce) return;
+    const guestCard = state.guestCard;
+    const you = practice.fighter(petName());
+    const foe = cardFighter(visitor.pet, guestCard);
+    const events = sparFight(you, foe, guestNonce, state.hostNonce);
+    const end = events[events.length - 1];
+    const won = end.kind === 'end' && end.winner === 0;
+    // 记账：修为进账、战绩、邻居簿、日记（冒泡的 anim 一律 false，演出马上开场）
+    onCultivation(Date.now(), practice.sparDone(Date.now(), visitor.id, won), { anim: false });
+    neighbors.recordSpar(visitor.id, won);
+    diary.note(Date.now(), 'cultivate', `和 ${visitor.owner} 家的 ${visitor.pet} 切磋，${won ? '赢了' : '输了'}`);
+    const steps = timeline(events, [you.name, foe.name], Math.random, [you.skills, foe.skills]);
+    const arena = openArenaWindow(electron, `${new URL(deps.petBase).origin}/app/arena`, homePet.box, () =>
+      current.window.bounds(),
+    );
+    sparArena = arena;
+    const scoreboard = arenaScoreboard({
+      self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
+      foe: { label: `${foe.name} · ${stageLabel(guestCard.stage)}`, maxHp: foe.hp },
+    });
+    battle = new BattleShow(steps, {
+      self: {
+        // 自家宠物面朝对手（素材统一画成朝左，客人站右边时整段镜像）
+        play: (anim, rate) => void playExtra(anim, { facing: current.window.side === 'left' ? 'left' : 'right', rate }),
+        say: (line, durationMs) => void say(line, { anim: false, durationMs }),
+      },
+      foe: {
+        play: (anim, rate) => current.window.play(anim, rate),
+        say: (line, durationMs) => current.window.say(line, durationMs),
+      },
+      arena: (hp) => {
+        arena.place(homePet.box(), current.window.bounds());
+        // 左右跟着两只的实际位置：客人站在自家宠物左边时它那条在左
+        arena.update(scoreboard(hp, current.window.side === 'left'));
+      },
+    });
+    void refreshMenu();
+    await battle.run();
+    battle = null; // 不清零的话「快进」常驻菜单、下一场被 guard 挡住（真机踩过）
+    const cancelled = spar !== state || disposed;
+    if (spar === state) spar = null;
+    if (cancelled) return;
+    // 客人跟着 reveal 捎回来的赛后感言先上客人窗口的气泡；自家的走 compose（只带人设，每场 +1 次调用）
+    if (guestLine) current.window.say(guestLine, LINE_MS);
+    const instruction =
+      `你刚和来串门的${visitor.pet}（${visitor.owner} 家的）切磋了一场，${won ? '你赢了' : '你输了'}。` +
+      '跟主人说一句赛后感言。' +
+      (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人，下次再战。');
+    const text = cleanText(await compose(instruction, won ? '切磋赢啦，承让承让～' : '切磋输了，下次再战！'), LINE_MAX);
+    void say(text, { anim: false });
+    closeSparArena(CLOSE_HOLD_MS);
+    void refreshMenu();
+  }
+
+  /**
+   * 客人这一侧的切磋（菜单「串门/找主人家的宠物切磋」；收到 spar-invite 也走这里，§X5 的自动应战）：
+   * 发名帖与承诺 → 拿到主人家的随机数后这一场就定了 → 编好自己的赛后感言跟着 reveal 带过去 →
+   * 记账、把台词按同一张时间线转播回来（say 会先把宠物叫回家，所以全走 relay）。
+   */
+  async function startGuestSpar(): Promise<void> {
+    const current = trip;
+    const practice = cultivationOn();
+    if (!current || !practice || spar || battle) return;
+    const state: SparState = { role: 'guest', stage: 'asking', since: Date.now(), timer: null };
+    spar = state;
+    relay('（切磋）跟它过两招～');
+    void refreshMenu();
+    const ownNonce = randomSparNonce();
+    let reply: SparReply;
+    try {
+      reply = await sendSpar(current.host, {
+        token: current.token,
+        mode: SPAR_MODE,
+        card: sparCardOf(practice.fighter(petName()), practice.view().stage),
+        commit: sparCommit(ownNonce),
+      });
+    } catch (error) {
+      log(`串门：切磋的请求没送到：${errorText(error)}`);
+      if (spar === state) spar = null;
+      relay('（切磋）没送到，改天再切');
+      return;
+    }
+    if (trip !== current || spar !== state) return;
+    if (!reply.ok) {
+      guestSparFailed(state, reply.reason);
+      return;
+    }
+    const you = practice.fighter(petName());
+    const hostFighter = cardFighter(current.host.pet, reply.card);
+    // 名帖里的境界没法验证真伪（§设计 4.7）：奖励小、还封顶，照它报的打就是了
+    const events = sparFight(hostFighter, you, ownNonce, reply.nonce);
+    const end = events[events.length - 1];
+    const won = end.kind === 'end' && end.winner === 1;
+    // 感言先编好（跟着 reveal 带过去，在主人家的客人窗口里说）；编太久退回模板，别拖过主人家的时限
+    const remark = await sparRemark(current, won);
+    if (trip !== current || spar !== state) return;
+    let revealed: SparRevealReply;
+    try {
+      revealed = await sendReveal(current.host, { token: current.token, nonce: ownNonce, line: remark });
+    } catch (error) {
+      log(`串门：随机数没亮出去：${errorText(error)}`);
+      guestSparFailed(state, 'late');
+      return;
+    }
+    if (trip !== current || spar !== state) return;
+    if (!revealed.ok) {
+      guestSparFailed(state, revealed.reason);
+      return;
+    }
+    // 记账（对面同时也在记它的）：修为进账、战绩、日记
+    onCultivationRelayed(Date.now(), practice.sparDone(Date.now(), current.host.id, won));
+    if (current.verified) neighbors.recordSpar(current.host.id, won);
+    diary.note(
+      Date.now(),
+      'cultivate',
+      `和 ${current.host.owner} 家的 ${current.host.pet} 切磋，${won ? '赢了' : '输了'}`,
+    );
+    // 转播演出：跟主人家的演出同一张时间线（同一对随机数、同一个 timeline），台词 relay 回来、动画不播
+    const steps = timeline(events, [hostFighter.name, you.name], Math.random, [hostFighter.skills, you.skills]);
+    state.stage = 'showing';
+    battle = new BattleShow(steps, {
+      self: { play: () => undefined, say: (line, durationMs) => showRelay(line, durationMs) },
+      foe: { play: () => undefined, say: (line, durationMs) => showRelay(line, durationMs) },
+      arena: () => undefined,
+    });
+    void refreshMenu();
+    await battle.run();
+    battle = null; // 不清零的话「快进」常驻菜单、下一场被 guard 挡住（真机踩过）
+    const cancelled = trip !== current || spar !== state || disposed;
+    if (spar === state) spar = null;
+    if (cancelled) return;
+    relay(won ? '（切磋）这场我赢啦！' : '（切磋）这场输了，下次再战～');
+    relay(remark);
+    void refreshMenu();
+  }
+
+  /** 客人的赛后感言：按人设编一句（只带人设，§2.2 的口径），编太久退回模板（模型卡住别拖垮 reveal） */
+  async function sparRemark(current: Trip, won: boolean): Promise<string> {
+    const { owner, pet } = current.host;
+    const instruction =
+      `你正在${owner}家做客，刚和它家的宠物${pet}切磋了一场，${won ? '你赢了' : '你输了'}。说一句赛后感言。` +
+      (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人。');
+    const fallback = won ? '切磋赢啦，承让承让～' : '切磋输了，下次再战！';
+    const composed = compose(instruction, fallback);
+    const capped = new Promise<string>((done) => setTimeout(() => done(fallback), SPAR_REMARK_CAP_MS));
+    return Promise.race([composed, capped]);
+  }
+
+  /**
+   * 客人这边没打成：对面关着 / 正忙 / 版本不同……说清楚原因就好，谁都没记账；
+   * 认输类的（随机数对不上、没按时亮出去）对面已经按它赢记了账，这边同样按输记，两边才对得上。
+   */
+  function guestSparFailed(state: SparState, reason: SparFailure | 'mismatch' | 'late'): void {
+    if (spar === state) spar = null;
+    const current = trip;
+    relay(`（切磋）${sparFailText(reason)}`);
+    if (current && (reason === 'mismatch' || reason === 'late')) {
+      const practice = cultivationOn();
+      if (practice) onCultivationRelayed(Date.now(), practice.sparDone(Date.now(), current.host.id, false));
+      if (current.verified) neighbors.recordSpar(current.host.id, false);
+      diary.note(
+        Date.now(),
+        'cultivate',
+        `和 ${current.host.owner} 家的 ${current.host.pet} 切磋，${
+          reason === 'late' ? '没按时亮随机数' : '随机数没对上'
+        }，认输了`,
+      );
+    }
+    void refreshMenu();
+  }
+
+  /** 切磋没打成的原因，说给自家主人听（§X5 点名的两种说法在这里：还不会切磋、版本不一样） */
+  function sparFailText(reason: SparFailure | 'mismatch' | 'late'): string {
+    switch (reason) {
+      case 'old-host':
+        return '对方的桌宠还不会切磋';
+      case 'off':
+        return '对方没开修炼，切不了';
+      case 'busy':
+        return '对方正在切磋，等会儿吧';
+      case 'version':
+        return '两边版本不一样，切磋不了';
+      case 'unsupported-mode':
+        return '对方不支持这种打法';
+      case 'bad-card':
+        return '对方没看懂我的名帖';
+      case 'no-id':
+        return '对方没认出我，切不了';
+      case 'bad-request':
+        return '没打成';
+      case 'mismatch':
+        return '随机数没对上，算我认输';
+      case 'late':
+        return '亮随机数迟了，算我认输';
+      default:
+        return '已经回家了';
+    }
+  }
+
+  /** 在别人家做客时的切磋奖励冒泡：say 会先把宠物叫回家，一律转播回来；日记照记（+20 也能顶出升级） */
+  function onCultivationRelayed(now: number, events: CultivationEvent[]): void {
+    for (const event of events) {
+      if (event.kind === 'xp') {
+        relay(`（切磋）这一场修为 +${event.amount}`);
+      } else if (event.kind === 'stage-up') {
+        relay(`（切磋）修为精进，到${stageLabel(event.stage)}啦～`);
+        diary.note(now, 'cultivate', `修为精进，到了${stageLabel(event.stage)}`);
+      } else if (event.kind === 'full') {
+        relay('（切磋）修为圆满，可以渡劫了～');
+        diary.note(now, 'cultivate', '修为圆满，可以渡劫了');
+      }
+    }
+  }
+
   /**
    * 修炼的右键项（开关开着才有）：信息项带境界和百分比（变了才重新注册）；
    * 圆满时是「渡劫」（有丹再多一项「服丹后渡劫」，§X4 替换掉 X1 的「突破」）；
@@ -1864,7 +2272,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   /**
    * 要注册的菜单项。宿主每个 owner 最多 20 项（`>` 就整份拒了，菜单从此不再更新），
    * 所以这里按优先级兜底截断：固定的两项 + 修炼（最多 4：信息、渡劫、服丹后渡劫、领悟×2 中的一种组合）
-   * 在前，串门项在后——挤不下时先少列几个邻居 / 少几样一起玩和零食，「送客」「心魔试炼」「渡劫」这些都要留。
+   * 在前，串门项在后——挤不下时先少列几个邻居 / 少几样一起玩和零食，「送客」「切磋」「心魔试炼」「渡劫」这些都要留。
    */
   function wantedLabels(): string[] {
     const labels = [MENU_LOOK, MENU_DIARY, ...cultivationActions().keys(), ...visitActions().keys()];
@@ -1985,6 +2393,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       disposed = true;
       if (tickTimer !== null) clearTimeout(tickTimer);
       noteOpener.dispose();
+      // 正在切磋：定时器、擂台、演出（或转播）都收掉
+      cancelSpar();
       // 正在演一场：停掉剩下的步骤、立刻收窗口（不留下空转的心魔与擂台）
       battle?.dispose();
       battle = null;

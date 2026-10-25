@@ -130,7 +130,7 @@ test('meet returns the memory from before this meeting, then records it', () => 
   });
 });
 
-test('memoryLine describes the last meeting', () => {
+test('memoryLine describes the last meeting, and mentions how the last spar went', () => {
   const base = {
     id: 'a'.repeat(32),
     owner: '小李',
@@ -141,6 +141,9 @@ test('memoryLine describes the last meeting', () => {
     firstMet: 0,
     lastMet: 0,
     summary: '',
+    sparWins: 0,
+    sparLosses: 0,
+    lastSparWon: null,
   };
   assert.equal(memoryLine(undefined, 0), null);
   assert.equal(memoryLine({ ...base, lastMet: 30_000 }, 60_000), '你们之前见过 3 次，上次是 不到 1 分钟前。');
@@ -153,6 +156,62 @@ test('memoryLine describes the last meeting', () => {
     memoryLine({ ...base, lastMet: 0, summary: '聊了放风筝' }, 2 * 86_400_000),
     '你们之前见过 3 次，上次是 2 天前，上次聊了：「聊了放风筝」。',
   );
+  // 切过磋就带一句上次切磋的输赢（X5）
+  assert.equal(
+    memoryLine({ ...base, lastMet: 30_000, lastSparWon: true }, 60_000),
+    '你们之前见过 3 次，上次是 不到 1 分钟前，上次切磋你赢了。',
+  );
+  assert.equal(
+    memoryLine({ ...base, lastMet: 30_000, lastSparWon: false, summary: '聊了渡劫' }, 60_000),
+    '你们之前见过 3 次，上次是 不到 1 分钟前，上次切磋你输了，上次聊了：「聊了渡劫」。',
+  );
+});
+
+test('recordSpar keeps win/loss counts and the last result; old files without the spar fields read as never sparred', () => {
+  withPath((path) => {
+    const id = 'a'.repeat(32);
+    // 旧文件（X5 之前的）：没有切磋三样，读进来当 0 / null
+    writeFileSync(
+      path,
+      JSON.stringify({
+        neighbors: [
+          {
+            id,
+            owner: '小李',
+            pet: '阿花',
+            friend: false,
+            hosted: 1,
+            visited: 0,
+            firstMet: 0,
+            lastMet: 0,
+            summary: '',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const book = new NeighborBook(path, () => undefined);
+    assert.deepEqual(
+      (({ sparWins, sparLosses, lastSparWon }) => ({ sparWins, sparLosses, lastSparWon }))(book.get(id)!),
+      { sparWins: 0, sparLosses: 0, lastSparWon: null },
+    );
+    assert.ok(!memoryLine(book.get(id), 0)?.includes('切磋'));
+    // 赢一场、输一场：各记各的账，最近一场说了算
+    book.recordSpar(id, true);
+    book.recordSpar(id, false);
+    const record = book.get(id)!;
+    assert.equal(record.sparWins, 1);
+    assert.equal(record.sparLosses, 1);
+    assert.equal(record.lastSparWon, false);
+    assert.ok(memoryLine(record, 0)!.includes('上次切磋你输了'));
+    // 重启后还在
+    const again = new NeighborBook(path, () => undefined).get(id)!;
+    assert.equal(again.sparWins, 1);
+    assert.equal(again.lastSparWon, false);
+    // 没记过的 id 不动
+    book.recordSpar('b'.repeat(32), true);
+    assert.equal(book.get('b'.repeat(32)), undefined);
+  });
 });
 
 test('shouldAutoAdmit only fires for a verified friend with the switch on and the owner present', () => {
