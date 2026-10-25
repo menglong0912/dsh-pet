@@ -359,6 +359,15 @@
 - **测试工具**：`scripts/dev/visit-peer.mjs` 两种模式都加 `spar` 命令；`host` 模式能按假名帖应战。
 - **测试**：协议各分支（正常、commit 不符、超时、版本不同、mode 不认识、关着、正在打、旧对端 404）；两边算出的事件序列逐个相同；名帖超上限、编号不认识被拒；奖励一邻居一天一场；`neighbors.json` 旧文件兼容。
 
+**X5 落地情况**（2026-10-25 已提交 `184a674` + 测试工具 `0cae17c`，真机验证过）：
+
+- **开发方式**：dsh 两次尝试都断（一次配额 429、一次挂死），经用户拍板改用 ZCode workflow subagent（GLM-5.3-Flash）做——脚本 `dsh-pet/.zcode/workflow-drafts/X5-串门切磋开发.dwf.ts`，一个共享上下文的开发 agent + `world.run` 亲自跑四道验证门（prettier / typecheck / lint / 全量测试），挂了把输出喂回去回炉，最多 4 轮；实际两轮过（第一轮挂的 lint 是 workflow 自己的运行产物文件被 `eslint .` 扫到，顺手修了 `eslint.config.js` 忽略 `.zcode/**` 并加回归测试 `eslint-ignores.test.ts`）。验证门 exit code 说话，不依赖 agent 自报。
+- 协议在 `visit.ts`：`parseSparCard`（先验版本再过 schema 再卡 `statCap`）、`sparCommit` / `isSparNonce`（32 字节十六进制）、`sparFight`（种子「客人随机数:主人家随机数」，测试钉住「顺序反了是另一场」）；404 映射 `old-host`；`parseEvents` 对 `spar-invite` 显式收编（旧客人不认识会丢，确认过）。应答里的对方名帖**同样不可信**，`sendSpar` 收到后再过一遍校验。
+- `features.ts` 用一个小状态机管两边（host: `invited → card → showing`；guest: `asking → showing`）；**账（修为、战绩、邻居簿、日记）在开打那一步记**，演出只是回放——快进、客人走、退出都不会把账弄乱；客人侧赛后感言有 10 秒上限（`SPAR_REMARK_CAP_MS`），模型磨蹭不拖垮 reveal 时限；主客双方演出期间一起玩 / 请吃 / 回话都让路（`anim: false`）。
+- **真机踩到并修掉的 bug（`184a674` 内）**：主客两侧的演出结束后都没把 `battle` 置 null——一场打完菜单永远挂着「修炼/快进」、心魔 / 渡劫 / 切磋全被 `if (battle)` 锁死到退出 app。`cancelSpar` 与两处 `await battle.run()` 之后补清零；对应测试断言从「历史快照 `menus.some(...)`」（开打前的快照也满足，形同虚设）改严为「最新一帧里有切磋项、没有快进」。
+- 真机（假客人 `visit-peer.mjs visit` + 真实 app，签名 verified 进门）：客发起一场、主人发起一场连打，两边各自算出同一场（客人日志「主人家的宠物 赢」= 主人家屏幕上的结果），血条两条带名字境界（视觉分析确认「吃白饭的 · 炼气二层」/「小测 · 炼气三层」）、客人粉色、面对面、毽子攻击台词按时间线走、busy 分支（演出中再约回 busy）、修为 +20 一天一场、邻居簿 `sparWins/lastSparWon` 记账、演出后菜单恢复。测完存档 / 日记还原、测试期生成的 `neighbors.json` 已删。
+- 测试技巧：`visit-peer.mjs` 的 stdin 用 fifo 喂（`mkfifo` + 后台 `sleep 600 > fifo` 保住写端），命令之间留足间隔——脚本 10 分钟自动退出，`echo` 进无人读的 fifo 会卡死 shell（踩过）。
+
 ### X6 设置页「修炼」、README
 
 - **设置页**（`settings-page.ts`）：新的一节「修炼」：
