@@ -87,6 +87,11 @@ export const settingsPage = `<!doctype html>
 <div><button id="identityReset" type="button">重置我的串门身份</button></div></div>
 <p class="hint" id="identity-note">本机的串门身份是 <code id="identityId"></code>…。重置后大家都不认得这台电脑了，要重新串门、重新标熟人；串门进行中不能重置。局域网里有人做中间人时防不住冒充，别把这个身份当唯一凭据。</p>
 </fieldset>
+<fieldset id="cultivation-settings" hidden><legend>修炼</legend>
+<label class="check"><input id="cultivationEnabled" type="checkbox" aria-describedby="cultivation-note">开启修炼</label>
+<p id="cultivation-note" class="hint">开着时，桌宠在电脑前就攒修为，右键「修炼」里能看境界、渡劫、心魔试炼，串门时还能和邻居切磋；修为、法宝与战绩都只存本机。关掉后不再攒，已攒的不丢，重新打开接着修。</p>
+<div id="cultivation-view" hidden></div>
+</fieldset>
 <footer><p id="privacy">所有配置与密钥仅保存在当前机器。<br>关闭 AI 后，桌宠仍可正常显示、移动与互动。</p><button id="save" type="submit" disabled>保存到本机</button></footer>
 <p id="status" role="status" aria-live="polite">正在读取本机设置…</p>
 </form><noscript>需要启用 JavaScript 才能保存设置。请从桌宠菜单打开本页。</noscript></main></body></html>`;
@@ -169,6 +174,7 @@ export const settingsScript = `
     get('visitNotes').checked = data.visit.notes !== false;
     get('visitNickname').value = data.visit.nickname;
     get('visitStayMin').value = String(data.visit.stayMin);
+    get('cultivationEnabled').checked = data.cultivation.enabled !== false;
     syncVisitDetails();
   }
   // 「邻居」一节（/standalone-ai/app-neighbors）：邻居簿与串门身份；这里点的操作立即生效，不跟整页的保存按钮走
@@ -232,6 +238,40 @@ export const settingsScript = `
     if (!confirm('重置串门身份？重置后别的电脑都不认得这台电脑了，要重新串门、重新标熟人。')) return;
     void neighborsRequest('POST', {action: 'reset-identity'}).then(loadNeighbors).catch(e => message(e.message, true));
   });
+  // 「修炼」一节（/standalone-ai/app-cultivation）：只读的境界状态；开关本身随「陪伴与提醒」的配置一起保存
+  async function loadCultivation() {
+    const response = await fetch('/standalone-ai/app-cultivation', {
+      method: 'GET', credentials: 'omit', cache: 'no-store', redirect: 'error',
+      headers: { 'X-DSH-Pet-Token': token }
+    });
+    if (response.status === 404) return; // CLI 里没有这条路由：整节保持隐藏
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error || '修炼状态读取失败。');
+    }
+    // 开着开关才有状态可看；刚关着时视图是 null，这一节只留开关
+    get('cultivation-settings').hidden = false;
+    const view = await response.json();
+    if (view) renderCultivation(view);
+  }
+  // 状态全是本机存档里的数字与图鉴里的固定中文名，仍只用 textContent 拼节点，不拼进 HTML
+  function renderCultivation(view) {
+    const box = get('cultivation-view');
+    box.textContent = '';
+    const row = text => {
+      const line = document.createElement('p');
+      line.className = 'hint';
+      line.textContent = text;
+      box.appendChild(line);
+    };
+    row('境界：' + view.label + ' · ' + view.percent + '%');
+    row('气血 ' + view.stats.hp + ' · 灵力 ' + view.stats.power + ' · 身法 ' + view.stats.agility + ' · 遁速 ' + view.stats.speed);
+    row(view.weapons.length ? '法宝：' + view.weapons.join('、') : '法宝：还没有');
+    row(view.skills.length ? '招式：' + view.skills.join('、') : '招式：还没有');
+    row('破境丹：' + view.pills + ' 颗');
+    row('战绩：胜 ' + view.record.wins + ' · 负 ' + view.record.losses);
+    box.hidden = false;
+  }
   // 「宠物」一节改插件配置（main-config.jsonc）里的第一只桌面宠物：/standalone-ai/pet-settings 转给插件的 /config，
   // 其余宠物与没在这里的字段原样保留；只有独立应用有，CLI 里是 404
   let petConfig = null;
@@ -381,7 +421,8 @@ export const settingsScript = `
             enabled: get('visitEnabled').checked, hosting: get('visitHosting').checked, visiting: get('visitVisiting').checked,
             chat: get('visitChat').checked, autoAdmitFriends: get('visitAutoAdmit').checked, notes: get('visitNotes').checked,
             nickname: get('visitNickname').value.trim(), stayMin: num('visitStayMin')
-          }
+          },
+          cultivation: { enabled: get('cultivationEnabled').checked }
         }));
       }
       let relaunching = false;
@@ -401,6 +442,7 @@ export const settingsScript = `
     .catch(error => message(error.message, true));
   neighborsRequest('GET').then(data => { if (data) { renderNeighbors(data); get('neighbors-settings').hidden = false; } })
     .catch(error => message(error.message, true));
+  loadCultivation().catch(error => message(error.message, true));
   petRequest('GET').then(data => { if (data && populatePet(data)) get('pet-settings').hidden = false; })
     .catch(error => message(error.message, true));
 })();

@@ -171,6 +171,23 @@ export function appNeighborsHandler(
 }
 
 /**
+ * 设置页「修炼」一节的读（`/standalone-ai/app-cultivation`）：境界的只读视图（CultivationView）。
+ * 同 app-neighbors，挂在配置页那组令牌校验的路由下；只有独立应用注册这条路由，CLI 里是 404，
+ * 设置页据此不显示这一节。只读：开关走 app-settings 里的 cultivation.enabled，这里不收写。
+ * 开关关着（或还没建档）时 view() 是 null，照样 200——设置页只显示开关、不显示状态。
+ */
+export function appCultivationHandler(
+  features: () => AppFeatures | null,
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  return async (req, res) => {
+    const current = features();
+    if (!current) return send(res, 503, { error: '桌宠还在启动' });
+    if (req.method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
+    send(res, 200, current.cultivation.view());
+  };
+}
+
+/**
  * 设置页「宠物」一节的读写（`/standalone-ai/pet-settings`）：转给插件自己的 GET / PUT /dsh-pet-7340/config，
  * 不另写一套校验与合并——插件那边只改请求体带了的字段，main-config.jsonc 里手改的其余内容原样保留。
  * 设置页是网页，而插件路由拒绝带 Origin 的请求（防本机网页乱调），所以由这里先过令牌校验、再在本进程里代发。

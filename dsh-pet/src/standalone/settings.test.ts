@@ -102,11 +102,13 @@ test('settings browser script strips fragment, keeps key write-only and explicit
     document: { getElementById: element },
     fetch: async (url: string, options: { method: string; body?: string; headers: Record<string, string> }) => {
       requests.push({ url, options });
-      // CLI 没有「陪伴与提醒」「宠物」「邻居」几节：app-settings / pet-settings / app-neighbors 是 404，页面既不显示也不保存它们
+      // CLI 没有「陪伴与提醒」「宠物」「邻居」「修炼」几节：app-settings / pet-settings / app-neighbors /
+      // app-cultivation 是 404，页面既不显示也不保存它们
       if (
         url === '/standalone-ai/app-settings' ||
         url === '/standalone-ai/pet-settings' ||
-        url === '/standalone-ai/app-neighbors'
+        url === '/standalone-ai/app-neighbors' ||
+        url === '/standalone-ai/app-cultivation'
       ) {
         return { ok: false, status: 404, json: async () => ({}) };
       }
@@ -151,6 +153,7 @@ test('settings browser script strips fragment, keeps key write-only and explicit
           '/standalone-ai/app-settings',
           '/standalone-ai/pet-settings',
           '/standalone-ai/app-neighbors',
+          '/standalone-ai/app-cultivation',
         ].includes(url) && options.headers['X-DSH-Pet-Token'] === 'process-capability',
     ),
   );
@@ -158,6 +161,7 @@ test('settings browser script strips fragment, keeps key write-only and explicit
     '/standalone-ai/app-settings',
     '/standalone-ai/pet-settings',
     '/standalone-ai/app-neighbors',
+    '/standalone-ai/app-cultivation',
   ]) {
     assert.deepEqual(
       requests.filter(({ url }) => url === section).map(({ options }) => options.method),
@@ -214,6 +218,7 @@ test('settings browser script shows and saves the app section when the app serve
       autoAdmitFriends: false,
       notes: true,
     },
+    cultivation: { enabled: true },
   };
   runInNewContext(settingsScript, {
     URLSearchParams,
@@ -222,8 +227,9 @@ test('settings browser script shows and saves the app section when the app serve
     document: { getElementById: element },
     fetch: async (url: string, options: { method: string; body?: string }) => {
       requests.push({ url, options });
-      // 「邻居」一节另有专门测试；这里只当它不存在（不显示）
-      if (url === '/standalone-ai/app-neighbors') return { ok: false, status: 404, json: async () => ({}) };
+      // 「邻居」「修炼」两节另有专门测试；这里只当它们不存在（不显示）
+      if (url === '/standalone-ai/app-neighbors' || url === '/standalone-ai/app-cultivation')
+        return { ok: false, status: 404, json: async () => ({}) };
       return { ok: true, json: async () => (url === '/standalone-ai/app-settings' ? app : { hasKey: false }) };
     },
   });
@@ -336,7 +342,11 @@ test('settings browser script edits the first desktop pet and shows one automati
     fetch: async (url: string, options: { method: string; body?: string }) => {
       requests.push({ url, options });
       if (url === '/standalone-ai/pet-settings') return { ok: true, json: async () => ({ config, file }) };
-      if (url === '/standalone-ai/app-settings' || url === '/standalone-ai/app-neighbors') {
+      if (
+        url === '/standalone-ai/app-settings' ||
+        url === '/standalone-ai/app-neighbors' ||
+        url === '/standalone-ai/app-cultivation'
+      ) {
         return { ok: false, status: 404, json: async () => ({}) };
       }
       return { ok: true, json: async () => ({ hasKey: true, enabled: true, automaticWhispers: true }) };
@@ -523,4 +533,148 @@ test('settings browser script renders the neighbors section and fires immediate 
   element('identityReset').listeners.click();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(posts()[4], { action: 'reset-identity' });
+});
+
+test('settings browser script renders the cultivation view and saves its switch with the app settings', async () => {
+  const { runInNewContext } = await import('node:vm');
+  type Element = Record<string, unknown> & {
+    value: string;
+    checked: boolean;
+    hidden: boolean;
+    textContent: string;
+    className: string;
+    children: unknown[];
+    listeners: Record<string, (event?: unknown) => Promise<void> | void>;
+    addEventListener: (name: string, fn: () => void) => void;
+    appendChild: (child: unknown) => void;
+  };
+  /** 跑一遍页面脚本：cultivation 端点回给定的状态与内容，app-settings 回整份配置 */
+  const boot = (cultivation: { status: number; json: unknown }, config: unknown) => {
+    const elements = new Map<string, Element>();
+    const element = (id: string): Element => {
+      if (!elements.has(id)) {
+        const stub: Element = {
+          value: '',
+          checked: false,
+          disabled: false,
+          hidden: id === 'cultivation-settings' || id === 'cultivation-view',
+          textContent: '',
+          children: [],
+          className: '',
+          dataset: {},
+          listeners: {},
+          addEventListener(name, fn) {
+            stub.listeners[name] = fn;
+          },
+          reportValidity: () => true,
+          appendChild(child) {
+            stub.children.push(child);
+          },
+        };
+        elements.set(id, stub);
+      }
+      return elements.get(id)!;
+    };
+    const made: Element[] = [];
+    const document = {
+      getElementById: element,
+      createElement: () => {
+        const fresh = element(`made-${made.length}`);
+        made.push(fresh);
+        return fresh;
+      },
+    };
+    const requests: Array<{
+      url: string;
+      options: { method: string; body?: string; headers?: Record<string, string> };
+    }> = [];
+    runInNewContext(settingsScript, {
+      URLSearchParams,
+      location: { hash: '#token=process-capability', pathname: '/standalone-ai/' },
+      history: { replaceState: () => undefined },
+      document,
+      fetch: async (url: string, options: { method: string; body?: string; headers?: Record<string, string> }) => {
+        requests.push({ url, options });
+        if (url === '/standalone-ai/app-cultivation') {
+          return { ok: cultivation.status === 200, status: cultivation.status, json: async () => cultivation.json };
+        }
+        if (url === '/standalone-ai/app-settings') return { ok: true, status: 200, json: async () => config };
+        if (url === '/standalone-ai/settings') return { ok: true, status: 200, json: async () => ({ hasKey: false }) };
+        return { ok: false, status: 404, json: async () => ({}) };
+      },
+    });
+    return { element, requests, made };
+  };
+  const config = {
+    greetAfterAwayMin: 10,
+    screen: { enabled: true, intervalMin: 15 },
+    sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
+    water: { enabled: true, everyMin: 60 },
+    offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
+    visit: {
+      enabled: false,
+      hosting: true,
+      visiting: true,
+      chat: true,
+      nickname: '',
+      stayMin: 10,
+      autoAdmitFriends: false,
+      notes: true,
+    },
+    cultivation: { enabled: true },
+  };
+  const view = {
+    stage: 12,
+    label: '筑基中期',
+    percent: 63,
+    full: false,
+    stats: { hp: 122, power: 15, agility: 11, speed: 9 },
+    weapons: ['水枪', '毽子'],
+    skills: ['假死遁'],
+    pills: 2,
+    offer: null,
+    record: { wins: 3, losses: 1 },
+  };
+  const first = boot({ status: 200, json: view }, config);
+  await new Promise((resolve) => setImmediate(resolve));
+  // 200 且有状态：整节显示，六个只读行全用 textContent 渲染（class 复用 .hint，没有新的样式面）
+  assert.equal(first.element('cultivation-settings').hidden, false);
+  assert.equal(first.element('cultivation-view').hidden, false);
+  assert.equal(first.made.length, 6);
+  assert.equal(first.element('cultivation-view').children.length, 6);
+  const texts = first.made.map((row) => row.textContent);
+  assert.deepEqual(texts, [
+    '境界：筑基中期 · 63%',
+    '气血 122 · 灵力 15 · 身法 11 · 遁速 9',
+    '法宝：水枪、毽子',
+    '招式：假死遁',
+    '破境丹：2 颗',
+    '战绩：胜 3 · 负 1',
+  ]);
+  assert.ok(first.made.every((row) => row.className === 'hint'));
+  // 探测带令牌
+  const probe = first.requests.find(({ url }) => url === '/standalone-ai/app-cultivation');
+  assert.equal(probe?.options.method, 'GET');
+  assert.equal(probe?.options.headers?.['X-DSH-Pet-Token'], 'process-capability');
+  // 开关随「陪伴与提醒」的配置一起保存：关掉后整页保存，cultivation.enabled 带进 app-settings 的 POST
+  first.element('cultivationEnabled').checked = false;
+  await first.element('settings').listeners.submit({ preventDefault() {} });
+  const post = first.requests.find(
+    ({ url, options }) => url === '/standalone-ai/app-settings' && options.method === 'POST',
+  );
+  assert.equal(JSON.parse(post?.options.body ?? '{}').cultivation.enabled, false);
+
+  // 200 但状态是 null（开关关着、还没建档）：整节显示（要能重新打开），只读视图保持隐藏
+  const second = boot({ status: 200, json: null }, config);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(second.element('cultivation-settings').hidden, false);
+  assert.equal(second.element('cultivation-view').hidden, true);
+  assert.equal(second.made.length, 0);
+
+  // CLI 里路由是 404：整节保持隐藏，也没有渲染错误
+  const cli = boot({ status: 404, json: {} }, config);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cli.element('cultivation-settings').hidden, true);
+  assert.equal(cli.made.length, 0);
+  assert.equal(cli.element('status').textContent, '设置只在本机保存。');
 });

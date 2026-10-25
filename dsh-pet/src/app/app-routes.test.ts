@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { appNeighborsHandler, createAppRoutes, petSettingsHandler } from './app-routes.ts';
+import { appCultivationHandler, appNeighborsHandler, createAppRoutes, petSettingsHandler } from './app-routes.ts';
 import type { AppFeatures } from './features.ts';
 
 /** 起一个 HTTP 服务，跑完 fn 关掉 */
@@ -145,6 +145,48 @@ test('app neighbors route serves the book, applies each action, and guards ident
       const busy = await post('{"action":"reset-identity"}');
       assert.equal(busy.status, 409);
       assert.match(((await busy.json()) as { error: string }).error, /串门进行中/);
+
+      // 功能还没起来（app ready 之前）：503
+      current = null;
+      assert.equal((await fetch(base)).status, 503);
+    },
+  );
+});
+
+test('app cultivation route serves the read-only view, 200s null while off, and 503s before the app is up', async () => {
+  const view = {
+    stage: 4,
+    label: '炼气五层',
+    percent: 63,
+    full: false,
+    stats: { hp: 74, power: 8, agility: 6, speed: 5 },
+    weapons: ['水枪', '毽子'],
+    skills: [],
+    pills: 2,
+    offer: null,
+    record: { wins: 3, losses: 1 },
+  };
+  let current: unknown = { cultivation: { view: () => view } };
+  const handler = appCultivationHandler(() => current as AppFeatures | null);
+  await serve(
+    (req, res) => void handler(req, res),
+    async (base) => {
+      // GET：view() 原样回（设置页「修炼」一节的全部数据）
+      const read = await fetch(base);
+      assert.equal(read.status, 200);
+      assert.deepEqual(await read.json(), view);
+
+      // 开关关着（还没建档）：view() 是 null，照样 200——设置页只显示开关、不显示状态
+      current = { cultivation: { view: () => null } };
+      const off = await fetch(base);
+      assert.equal(off.status, 200);
+      assert.equal(await off.json(), null);
+
+      // 只读：不发明的写端点
+      assert.equal(
+        (await fetch(base, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status,
+        405,
+      );
 
       // 功能还没起来（app ready 之前）：503
       current = null;
