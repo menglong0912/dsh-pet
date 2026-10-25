@@ -5,6 +5,7 @@ import {
   tribulate,
   shadowOf,
   statCap,
+  majorBreaks,
   autoController,
   MAX_ACTIONS,
   WEAPON_IDS,
@@ -363,21 +364,31 @@ test('平衡：本体对心魔胜率 55%–70%', () => {
   assert.ok(rate >= 0.55 && rate <= 0.7, `实际 ${rate}`);
 });
 
-test('平衡：渡劫不吃丹约 65%、吃丹约 80%（±10%）', () => {
-  // 场景取进金丹（stage 12、3 道雷；雷数规则见 X4：进筑基、金丹 3 道，进元婴、化神 6 道，之后 9 道）
-  const survive = (pill: boolean): number => {
-    let ok = 0;
-    for (let i = 0; i < BALANCE_N; i++) {
-      const f = fighterAt(12, seededRng(i));
-      if (pill) f.hp = Math.floor(f.hp * 1.2);
-      const events = tribulate(f, 3, 12, `trib-bal-${i}`);
-      const last = events[events.length - 1];
-      if (last.kind === 'end' && last.winner === 0) ok++;
-    }
-    return ok / BALANCE_N;
+test('平衡：渡劫不吃丹约 65%、吃丹约 80%——七个渡劫分界全覆盖（X4 后按正式成长重标）', () => {
+  // 七个渡劫分界：圆满 stage 8（炼气九层）→ 筑基、11 → 金丹、14 → 元婴、17 → 化神、20 → 炼虚、23 → 合体、26 → 大乘；
+  // 雷数照 §X4（进筑基、金丹 3 道，进元婴、化神 6 道，之后 9 道）。旧参数只在 stage 12 一点标过，
+  // 各分界 0.30–0.72 不齐；TRIBULATION_* 重标后全站落在带内（校准记录见 battle.ts 常量注释）。
+  const FULL_STAGES = [8, 11, 14, 17, 20, 23, 26];
+  const strikesOf = (stage: number): number => {
+    const big = majorBreaks(stage + 1);
+    return big <= 2 ? 3 : big <= 4 ? 6 : 9;
   };
-  const noPill = survive(false);
-  const pill = survive(true);
-  assert.ok(noPill >= 0.55 && noPill <= 0.75, `不吃丹实际 ${noPill}`);
-  assert.ok(pill >= 0.7 && pill <= 0.9, `吃丹实际 ${pill}`);
+  const TRIB_N = 600;
+  for (const stage of FULL_STAGES) {
+    const survive = (pill: boolean): number => {
+      let ok = 0;
+      for (let i = 0; i < TRIB_N; i++) {
+        const f = fighterAt(stage, seededRng(i * 7 + stage));
+        if (pill) f.hp = Math.floor(f.hp * 1.2);
+        const events = tribulate(f, strikesOf(stage), stage, `trib-bal-${stage}-${i}`);
+        const last = events[events.length - 1];
+        if (last.kind === 'end' && last.winner === 0) ok++;
+      }
+      return ok / TRIB_N;
+    };
+    const noPill = survive(false);
+    const pill = survive(true);
+    assert.ok(noPill >= 0.55 && noPill <= 0.75, `stage ${stage} 不吃丹实际 ${noPill}`);
+    assert.ok(pill >= 0.75 && pill <= 0.92, `stage ${stage} 吃丹实际 ${pill}`);
+  }
 });

@@ -293,13 +293,17 @@ export const MAX_ACTIONS = 30;
 const BASE_CRIT = 0.08;
 /** 灵力对伤害的加成比例（整段出手合计） */
 const POWER_FACTOR = 0.75;
-/** 渡劫：单道天雷伤害 ≈ 典型气血 ÷ 雷数 ×（TRIBULATION_BASE + 境界 × TRIBULATION_STEP） */
-const TRIBULATION_BASE = 0.54;
-const TRIBULATION_STEP = 0.024;
+/**
+ * 渡劫：单道天雷伤害 ≈ 典型气血 ÷ 雷数 ×（TRIBULATION_BASE + 境界 × TRIBULATION_STEP）。
+ * X4 落地后按正式成长（fighterAt 同口径）对七个渡劫分界重标过（2026-10-25）：
+ * 旧值 0.54 / 0.024 / 0.35 下成功率 0.30–0.72 不齐（早期偏难），调后不吃丹全站 0.59–0.67、吃丹 0.83–0.89。
+ */
+const TRIBULATION_BASE = 0.46;
+const TRIBULATION_STEP = 0.022;
 /** 炼虚往上升的额外斜率：技能攒得全，扛雷能力一路变强 */
 const TRIBULATION_LATE_STEP = 0.008;
-/** 渡劫：单道雷按渡劫者自身气血加成的比例 */
-const TRIBULATION_HP_CUT = 0.35;
+/** 渡劫：单道雷按渡劫者自身气血加成的比例（吃丹加的血也走这里，丹的收益不至于陡成必过） */
+const TRIBULATION_HP_CUT = 0.38;
 /** 破势：伤害里随防守方气血上限加成的比例 */
 const HP_BONUS = 0.25;
 const CRIT_SKILL_CHANCE = 0.18;
