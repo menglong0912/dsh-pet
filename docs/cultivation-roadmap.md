@@ -377,6 +377,15 @@
 - **README**：根目录 README 的「新增功能」表加一行「修炼与切磋」，「设置页」那一行补上「修炼」一节。只做这两处外科式修改，**不要**对根 README 跑 prettier。
 - **测试**：`app-routes.test.ts`（令牌、503、返回结构）；设置页渲染只用 textContent。
 
+**X6 落地情况**（2026-10-26 已提交 `f831cdf`，workflow subagent 实现（同 X5 的四道验证门方式），真机验证过）：
+
+- 接口 `appCultivationHandler`（`app-routes.ts`）：features 没起来 503、非 GET 405、GET 回 `cultivation.view()`；挂在 `main.ts` 的令牌组（`/standalone-ai/app-cultivation`）。**开关关着 / 还没建档时 `view()` 是 null，照样 200**（照设计原话「功能还没起来回 503」的字面执行），设置页在 null 时只显示开关。
+- 开关的写口随「陪伴与提醒」的 `app-settings` POST 一起保存（复用整页保存管线），`app-cultivation` 保持纯读。
+- 设置页（`src/standalone/settings-page.ts`）：「修炼」fieldset 在「邻居」之后，开关 + 提示语 + 六行只读（境界 · 百分比、四项属性、法宝、招式、破境丹、战绩），全部 `createElement` + `textContent`；CLI 里 404 整节隐藏。只读行不含 `full` / `offer`（圆满态右键菜单可见）。
+- 根 README 恰好两处：「新增功能」表加「修炼与切磋」一行、「设置页」行补「修炼」一节；没跑 prettier。
+- 真机（2026-10-26）：带令牌设置页实际渲染核对——开关勾选、六行全是真实存档数据（炼气二层 88%、法宝毽子/扑克牌、战绩胜 4 负 0 是测试期累积后已还原的账）；无令牌 403。1259/1259 过。
+- 已知边缘态（不改）：app 启动后第一个 tick（5 秒）内打开设置页，懒建档前 `view()` 还是 null——只显示开关，刷新即有，与邻居节同款行为。
+
 ## 4. 主会话的核验清单
 
 照 `standalone-roadmap.md` §6，另外：
