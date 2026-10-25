@@ -15,9 +15,10 @@
  *   --identity none 模拟旧版本，不签名。visit 模式签名需要主人家的 id（来自信标）：脚本连脚本自测时
  *   从 host 模式打印的「身份」里抄过来，用 --host-id 带上；不带 --host-id 就不签名（当旧版本客人）。
  *
- * host 的标准输入命令：line <话> / poke / play <项> / gift <项> / note <话>（捎给客人的主人）/ friend <y|n>（收不收客人的捎话，默认收）/ home（请客人回家）；ask 模式下 y / n 答复敲门。
- * visit 的标准输入命令：say <话> / note <话>（捎给对方主人）/ leave（告辞，后面可以带告别的话）。
- * 两种模式 10 分钟后自动退出。
+ * host 的标准输入命令：line <话> / poke / play <项> / gift <项> / note <话>（捎给客人的主人）/ friend <y|n>（收不收客人的捎话，默认收）/ spar（邀客人切磋）/ home（请客人回家）；ask 模式下 y / n 答复敲门。
+ * visit 的标准输入命令：say <话> / note <话>（捎给对方主人）/ spar（找主人家的宠物切磋；收到邀约不自动应战，也输 spar）/ leave（告辞，后面可以带告别的话）。
+ * 两种模式 10 分钟后自动退出。切磋按 X5 的协议走：名帖都是脚本里这份假的（境界 2、水枪、化鸽遁），
+ * host 模式按它应战、两边各自算出同一场后打印输赢；visit 模式发名帖与承诺、亮随机数，主人家的屏幕上开演。
  */
 import { randomUUID } from 'node:crypto';
 import { createSocket } from 'node:dgram';
@@ -25,7 +26,23 @@ import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { BEACON_PORT, PING_MS, VisitHost, encodeBeacon, knockOn, sendNote, tripRequest } from '../../src/app/visit.ts';
+import {
+  BEACON_PORT,
+  PING_MS,
+  SPAR_MODE,
+  VisitHost,
+  cardFighter,
+  encodeBeacon,
+  knockOn,
+  randomSparNonce,
+  sendNote,
+  sendReveal,
+  sendSpar,
+  sparCardOf,
+  sparCommit,
+  sparFight,
+  tripRequest,
+} from '../../src/app/visit.ts';
 import { generateVisitIdentity, loadVisitIdentity } from '../../src/app/visit-identity.ts';
 
 const OWNER_DEFAULT = '测试邻居';
@@ -39,6 +56,18 @@ const LOG_PATH = join(homedir(), 'Library', 'Logs', 'dsh-pet', 'app.log');
 
 const print = (message) => console.log(`[visit-peer] ${message}`);
 const errorText = (error) => (error instanceof Error ? error.message : String(error));
+
+/** 脚本自家宠物的假战斗档案（两种模式都拿它切磋）：境界 2、一件水枪、化鸽遁 */
+const fakeFighter = {
+  name: PET_DEFAULT,
+  hp: 60,
+  power: 4,
+  agility: 4,
+  speed: 4,
+  weapons: ['water-gun'],
+  skills: ['dove'],
+};
+const fakeCard = sparCardOf(fakeFighter, 2);
 
 const USAGE = `用法：
   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--identity <路径>|none]
@@ -95,6 +124,8 @@ async function runHost(options) {
   const identity = identityOf(options);
   // 客人捎来的话收不收（收 = 模拟熟人；要测 not-friend 就 friend n）
   let friend = true;
+  // 应战中的客人：承诺、名帖与这边亮出去的随机数（reveal 时核对）
+  let pendingSpar = null;
   const host = new VisitHost(
     {
       canHost: () => true,
@@ -119,6 +150,35 @@ async function runHost(options) {
         }
         print(`${visitor.owner} 捎来一句话：${text}`);
         return true;
+      },
+      // 切磋（X5）：按假名帖应战，亮随机数后两边各自算同一场，打印输赢
+      async spar(visitor, card, commit) {
+        const hostNonce = randomSparNonce();
+        pendingSpar = { commit, guestCard: card, hostNonce };
+        print(`${visitor.pet} 应战（它报的境界 ${card.stage}，气血 ${card.hp}），承诺收下`);
+        return { ok: true, card: fakeCard, nonce: hostNonce };
+      },
+      async reveal(visitor, nonce, line) {
+        if (!pendingSpar || sparCommit(nonce) !== pendingSpar.commit) {
+          const reason = pendingSpar ? 'mismatch' : 'late';
+          print(`${visitor.pet} 亮的随机数${pendingSpar ? '对不上' : '迟到了'}，按它认输记`);
+          pendingSpar = null;
+          return { ok: false, reason };
+        }
+        const events = sparFight(
+          fakeFighter,
+          cardFighter(visitor.pet, pendingSpar.guestCard),
+          nonce,
+          pendingSpar.hostNonce,
+        );
+        const end = events[events.length - 1];
+        const won = end.kind === 'end' && end.winner === 0;
+        print(
+          `开打（${events.length} 个事件）：${won ? options.pet : visitor.pet} 赢${end.reason === 'ko' ? '，打到分晓' : '，满 30 手按比例判'}`,
+        );
+        if (line) print(`它家宠物的赛后感言：${line}`);
+        pendingSpar = null;
+        return { ok: true };
       },
       left(visitor, reason, text) {
         print(`${visitor.pet} ${reason === 'leave' ? `告辞：${text || '（没说话）'}` : '太久没动静，当它走了'}`);
@@ -190,6 +250,10 @@ async function runHost(options) {
         print(friend ? '客人的捎话按熟人收' : '客人的捎话一律拒收（not-friend）');
         return;
       }
+      case 'spar': {
+        print(host.tell({ type: 'spar-invite' }) ? '邀客人切磋：它应战就会发 /v1/spar 来' : '没有客人在，邀不了');
+        return;
+      }
       case 'home': {
         const visitor = host.sendHome();
         print(visitor ? `请 ${visitor.pet} 回家了` : '没有客人在');
@@ -198,7 +262,7 @@ async function runHost(options) {
       default:
         if (input) {
           print(
-            `不认识的命令：${command}（line / poke / play / gift / note / friend / home${options.accept === 'ask' ? ' / y / n' : ''}）`,
+            `不认识的命令：${command}（line / poke / play / gift / note / friend / spar / home${options.accept === 'ask' ? ' / y / n' : ''}）`,
           );
         }
     }
@@ -234,6 +298,7 @@ function printEvent(event) {
   else if (event.type === 'note') print(`它家宠物带回它主人的话：${event.text}`);
   else if (event.type === 'poke') print('它家主人摸了你一下');
   else if (event.type === 'play') print(`它家请你一起玩：${event.what}`);
+  else if (event.type === 'spar-invite') print('它家邀你切磋（脚本不自动应战，输 spar 应战）');
   else print(`它家请你吃：${event.what}`);
 }
 
@@ -306,12 +371,40 @@ async function runVisit(options) {
     const input = raw.trim();
     const command = input.split(/\s+/)[0];
     const text = input.slice(command.length).trim();
-    if (command !== 'say' && command !== 'note' && command !== 'leave') {
-      if (input) print(`不认识的命令：${command}（say / note / leave）`);
+    if (command !== 'say' && command !== 'note' && command !== 'spar' && command !== 'leave') {
+      if (input) print(`不认识的命令：${command}（say / note / spar / leave）`);
       return;
     }
-    if (command !== 'leave' && !text) {
+    if (command !== 'leave' && command !== 'spar' && !text) {
       print(`用法：${command} <话>`);
+      return;
+    }
+    // 切磋（X5 第 2–4 步）：发名帖与承诺 → 拿到主人家的随机数后两边各自算同一场 → 亮随机数（带句感言）
+    if (command === 'spar') {
+      void (async () => {
+        const ownNonce = randomSparNonce();
+        let reply;
+        try {
+          reply = await sendSpar(host, { token, mode: SPAR_MODE, card: fakeCard, commit: sparCommit(ownNonce) });
+        } catch (error) {
+          print(`切磋的请求没送到：${errorText(error)}`);
+          return;
+        }
+        if (!reply.ok) {
+          print(`没打成：${reply.reason}`);
+          return;
+        }
+        print(`主人家应战（它报的境界 ${reply.card.stage}，气血 ${reply.card.hp}）`);
+        const events = sparFight(cardFighter('主人家的宠物', reply.card), fakeFighter, ownNonce, reply.nonce);
+        const end = events[events.length - 1];
+        const won = end.kind === 'end' && end.winner === 1;
+        print(`两边各自算的这场（${events.length} 个事件）：${won ? options.pet : '主人家的宠物'} 赢`);
+        const revealed = await sendReveal(host, { token, nonce: ownNonce, line: '承让承让～' }).catch((error) => ({
+          ok: false,
+          reason: errorText(error),
+        }));
+        print(revealed.ok ? '亮了随机数，主人家的屏幕上该开演了' : `没亮成：${revealed.reason}`);
+      })();
       return;
     }
     if (command === 'note') {
