@@ -4,7 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { seededRng } from './battle-testkit.ts';
-import { majorBreaks, statCap, WEAPON_IDS, type WeaponId } from './battle.ts';
+import { majorBreaks, statCap, WEAPON_IDS, type SkillId, type WeaponId } from './battle.ts';
+import { diaryDate } from './diary.ts';
 import {
   Cultivation,
   drawDropWeapon,
@@ -14,6 +15,7 @@ import {
   stageLabel,
   stageReq,
   TICK_MAX_ELAPSED_MS,
+  tribulationStrikes,
 } from './cultivation.ts';
 
 const MIN = 60_000;
@@ -285,6 +287,28 @@ function growToFull(path: string, seed: number): Cultivation {
   return c;
 }
 
+/** 直接写存档（造圆满 / 有丹 / 待选二选一这些状态，不必真攒几天修为） */
+function writeSave(path: string, patch: Record<string, unknown>): void {
+  const base = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  writeFileSync(path, JSON.stringify({ ...base, ...patch }, null, 2), 'utf8');
+}
+
+/** 依次给值的随机数（注入常量会让「从几句里挑一句」「二选一挑一个」永远同一支，看不出轮着来对不对） */
+function seq(values: number[]): () => number {
+  let i = 0;
+  return () => values[Math.min(i++, values.length - 1)];
+}
+
+/** 事件里挑出某一支（顺便让类型收窄到那一个成员） */
+function pickEvent<K extends CultivationEvent['kind']>(
+  events: CultivationEvent[],
+  kind: K,
+): Extract<CultivationEvent, { kind: K }> {
+  const found = events.find((event) => event.kind === kind);
+  assert.ok(found, `事件里该有 ${kind}：${JSON.stringify(events)}`);
+  return found as Extract<CultivationEvent, { kind: K }>;
+}
+
 test('stage-up carries the remainder and full stops at the brim', () => {
   withPath((path) => {
     const c = open(path, 5);
@@ -306,14 +330,22 @@ test('stage-up carries the remainder and full stops at the brim', () => {
   });
 });
 
-test('breakthrough advances the major stage and grants a new skill', () => {
+test('渡劫成功：进下一个大境界、挂出二选一（两个还没有的招式）', () => {
   withPath((path) => {
     const c = growToFull(path, 5);
     const before = c.view();
     assert.equal(before.stage, 8);
-    const events = c.breakthrough(at(5, 13));
-    assert.equal(events.length, 1);
-    assert.equal(events[0].kind, 'breakthrough');
+    const plan = c.tribulationPlan(at(5, 13));
+    assert.deepEqual(plan, { stage: 8, strikes: 3, canPill: false, nextLabel: '筑基初期' });
+    // 两个随机数 = 在 10 门还没学的招式里挑两个不同的
+    const events = c.tribulationDone(at(5, 13), true, false);
+    assert.deepEqual(
+      events.map((event) => event.kind),
+      ['breakthrough', 'offer'],
+    );
+    const offer = pickEvent(events, 'offer');
+    assert.notEqual(offer.a, offer.b, '二选一给的是两个不同招式');
+    assert.equal(c.view().skills.length, 0, '待选期间招式还没到手');
     const after = c.view();
     assert.equal(after.stage, 9);
     assert.equal(after.label, '筑基初期');
@@ -321,10 +353,179 @@ test('breakthrough advances the major stage and grants a new skill', () => {
     assert.equal(after.stats.power, before.stats.power + 1);
     assert.equal(after.stats.agility, before.stats.agility + 1);
     assert.equal(after.stats.speed, before.stats.speed + 1);
-    assert.equal(after.skills.length, 1);
     assert.equal(after.percent, 0);
-    // 突破后再突破：没圆满，空操作
-    assert.deepEqual(c.breakthrough(at(5, 14)), []);
+    assert.deepEqual(after.offer, { a: offer.a, b: offer.b });
+    // 再点一次：没圆满了，plan 给 null，done 也不动境界
+    assert.equal(c.tribulationPlan(at(5, 14)), null);
+    assert.deepEqual(c.tribulationDone(at(5, 14), true, false), []);
+    assert.equal(c.view().stage, 9);
+  });
+});
+
+test('雷数：进筑基、金丹 3 道，进元婴、化神 6 道，之后 9 道', () => {
+  assert.equal(tribulationStrikes(9), 3); // 进筑基
+  assert.equal(tribulationStrikes(12), 3); // 进金丹
+  assert.equal(tribulationStrikes(15), 6); // 进元婴
+  assert.equal(tribulationStrikes(18), 6); // 进化神
+  for (const next of [21, 24, 27, 28, 30]) assert.equal(tribulationStrikes(next), 9);
+});
+
+test('渡劫失败：扣 20% 修为（封顶 300）、境界不掉、不再是圆满', () => {
+  withPath((path) => {
+    const c = growToFull(path, 5); // 炼气九层圆满（req 150）
+    const events = c.tribulationDone(at(5, 13), false, false);
+    assert.deepEqual(events, [{ kind: 'tribulation-fail', lost: 30 }]); // 150 × 20%
+    const view = c.view();
+    assert.equal(view.stage, 8, '失败不掉境界');
+    assert.equal(view.percent, 80);
+    assert.ok(!view.full, '不再是圆满：攒回来才能再渡（不设冷却计时）');
+    assert.equal(c.tribulationPlan(at(5, 14)), null);
+    // 没圆满时再算一场是空操作（不重复扣、也不报错）
+    assert.deepEqual(c.tribulationDone(at(5, 15), false, false), []);
+    assert.equal(progressOf(path), 120);
+    // 攒回圆满：立刻能再渡（中间没有冷却）
+    c.tick(at(5, 16), false);
+    for (let i = 0; i < 30; i++) c.tick(at(5, 16) + (i + 1) * MIN, true);
+    assert.ok(c.view().full);
+    assert.deepEqual(c.tribulationPlan(at(5, 20)), { stage: 8, strikes: 3, canPill: false, nextLabel: '筑基初期' });
+  });
+});
+
+test('扣修为封顶 300（合体后期 20% 是 2 800，太狠）', () => {
+  withPath((path) => {
+    open(path, 5); // 先建档
+    writeSave(path, {
+      stage: 26,
+      progress: 14_000,
+      stats: { hp: 300, power: 20, agility: 20, speed: 20 },
+      weapons: ['water-gun'],
+      skills: ['dove'],
+      pills: 0,
+    });
+    const c = open(path, 5);
+    assert.ok(c.view().full && c.view().label === '合体后期');
+    assert.deepEqual(c.tribulationPlan(at(0)), { stage: 26, strikes: 9, canPill: false, nextLabel: '大乘初期' });
+    assert.deepEqual(c.tribulationDone(at(0, 13), false, false), [{ kind: 'tribulation-fail', lost: 300 }]);
+    assert.equal(progressOf(path), 13_700);
+    assert.equal(c.view().stage, 26, '不掉境界');
+    assert.ok(!c.view().full);
+  });
+});
+
+test('大乘圆满渡劫成功：不再涨境界，也不挂二选一', () => {
+  withPath((path) => {
+    open(path, 5);
+    writeSave(path, {
+      stage: MAX_STAGE,
+      progress: 20_000,
+      stats: { hp: 300, power: 20, agility: 20, speed: 20 },
+      weapons: ['water-gun'],
+      skills: ['dove'],
+      pills: 0,
+    });
+    const c = open(path, 5);
+    assert.equal(c.tribulationPlan(at(0)), null, '修到头了（飞升在想法池）');
+    assert.deepEqual(c.tribulationDone(at(0, 13), true, false), []);
+    assert.equal(c.view().stage, MAX_STAGE);
+  });
+});
+
+test('吃丹：气血 ×1.2（向下取整）、丹数 −1，扛不住也照扣', () => {
+  withPath((path) => {
+    growToFull(path, 5);
+    writeSave(path, { pills: 2 });
+    const again = open(path, 5);
+    const plain = again.fighter('小鱼');
+    assert.equal(again.tribulationFighter('小鱼', true).hp, Math.floor(plain.hp * 1.2));
+    assert.equal(again.tribulationFighter('小鱼', false).hp, plain.hp, '没吃丹就照原样');
+    assert.ok(again.tribulationPlan(at(5, 13))?.canPill, '有丹就能吃');
+    again.tribulationDone(at(5, 14), true, true);
+    assert.equal(again.view().pills, 1, '一次最多吃 1 颗');
+    // 失败那一场丹也吃了：气血 ×1.2 是开打前生效的
+    writeSave(path, { stage: 8, progress: 150 });
+    const third = open(path, 5);
+    third.tribulationDone(at(5, 16), false, true);
+    assert.equal(third.view().pills, 0);
+    // 没圆满时调用是空操作：丹不扣、境界也不动
+    const before = third.view();
+    assert.deepEqual(third.tribulationDone(at(5, 17), true, false), []);
+    assert.deepEqual(third.view(), before);
+  });
+});
+
+test('二选一：挑一个就到手；10 分钟没人挑，tick 里随机定一个', () => {
+  withPath((path) => {
+    const c = growToFull(path, 5);
+    const events = c.tribulationDone(at(5, 13), true, false);
+    const offer = pickEvent(events, 'offer');
+    // 挑 b：b 到手，a 永远没了
+    const chosen = c.choose(at(5, 14), offer.b);
+    assert.deepEqual(chosen, [{ kind: 'choose', skill: offer.b }]);
+    assert.deepEqual(c.fighter('我').skills, [offer.b]);
+    assert.equal(c.view().offer, null);
+    // 已经定过了：再点（挂着的两项都没了）什么都不做
+    assert.deepEqual(c.choose(at(5, 15), offer.a), []);
+    assert.deepEqual(c.fighter('我').skills, [offer.b], 'a 不会再被领悟');
+  });
+});
+
+test('待选二选一重启还在；10 分钟没人挑，tick 里随机定一个（已有的不重复给）', () => {
+  withPath((path) => {
+    const until = at(0, 13);
+    open(path, 5);
+    writeSave(path, {
+      stage: 8,
+      progress: 150,
+      stats: { hp: 98, power: 8, agility: 8, speed: 8 },
+      weapons: ['water-gun'],
+      skills: ['dove'],
+      pills: 0,
+      offer: { a: 'bubble', b: 'critical', until },
+      today: {
+        date: diaryDate(at(0, 8)),
+        presence: 0,
+        presenceMs: 0,
+        rests: 0,
+        pills: 0,
+        trial: 0,
+        spars: [],
+      },
+    });
+    // 随机数序列：0.9 ≥ 0.5 → 过期时定 b（critical）
+    const c = new Cultivation(path, () => undefined, seq([0.9]), 24 * 3_600_000);
+    assert.deepEqual(c.view().offer, { a: 'bubble', b: 'critical' });
+    // 没到期：tick 不动它，菜单那两项还在
+    assert.deepEqual(c.tick(at(0, 12), false), []);
+    assert.deepEqual(c.view().offer, { a: 'bubble', b: 'critical' });
+    // 到点这一拍：随机定一个
+    assert.deepEqual(c.tick(until, false), [{ kind: 'choose', skill: 'critical' }]);
+    assert.deepEqual(c.fighter('我').skills, ['dove', 'critical'], '已有的不会被重复给');
+    assert.equal(c.view().offer, null);
+    // 定过一次不再定第二回
+    assert.deepEqual(c.tick(until + MIN, false), []);
+    // 存档里也落定了（重启不会再定一遍）
+    assert.deepEqual(open(path, 5).view().offer, null);
+  });
+});
+
+test('二选一不给已有的招式、也不会重复（随机数全 0 时不会拿到同一个两次）', () => {
+  withPath((path) => {
+    open(path, 5);
+    writeSave(path, {
+      stage: 8,
+      progress: 150,
+      stats: { hp: 98, power: 8, agility: 8, speed: 8 },
+      weapons: ['water-gun'],
+      // 已有两门：待选只能从剩下的 8 门里出
+      skills: ['play-dead', 'dove'],
+      pills: 0,
+    });
+    const c = new Cultivation(path, () => undefined, seq([0, 0]), 24 * 3_600_000);
+    const offer = pickEvent(c.tribulationDone(at(0), true, false), 'offer');
+    assert.notEqual(offer.a, offer.b, '随机数全 0 也必须挑两个不同的');
+    for (const id of [offer.a, offer.b]) {
+      assert.ok(!['play-dead', 'dove'].includes(id), `已有的 ${id} 不会再进待选`);
+    }
   });
 });
 
@@ -374,13 +575,17 @@ test('growth never exceeds statCap over random paths', () => {
     const rng = seededRng(99);
     const c = new Cultivation(path, () => undefined, rng, 24 * 3_600_000);
     let day = 0;
-    // 一路修到大乘圆满：每天喂满在场修为、打一场心魔，随机数全部走 rng
+    // 一路修到大乘圆满：每天喂满在场修为、打一场心魔、圆满就渡劫成功并挑一个招式，随机数全部走 rng
     while (c.view().stage < MAX_STAGE || !c.view().full) {
       const now = at(day, 8);
       c.tick(now, false);
       c.tick(now + 240 * MIN, true);
       c.trialDone(now + 241 * MIN, true);
-      if (c.view().full) c.breakthrough(now + 242 * MIN);
+      if (c.view().full && c.view().stage < MAX_STAGE) {
+        const events = c.tribulationDone(now + 242 * MIN, true, false);
+        const offer = events.find((event) => event.kind === 'offer');
+        if (offer?.kind === 'offer') c.choose(now + 243 * MIN, offer.a);
+      }
       day += 1;
       assert.ok(day < 700, 'growth should terminate'); // 全程约 17.5 万修为，每天 270
     }
@@ -392,8 +597,10 @@ test('growth never exceeds statCap over random paths', () => {
     assert.ok(view.stats.agility <= cap.agility, `agility ${view.stats.agility} > cap ${cap.agility}`);
     assert.ok(view.stats.speed <= cap.speed, `speed ${view.stats.speed} > cap ${cap.speed}`);
     // 法宝只可能来自建档和心魔掉落，不重复
-    const ids = JSON.parse(readFileSync(path, 'utf8')).weapons as WeaponId[];
-    assert.equal(new Set(ids).size, ids.length);
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as { weapons: WeaponId[]; skills: SkillId[] };
+    assert.equal(new Set(saved.weapons).size, saved.weapons.length);
+    // 二选一一路挑下来也不会重复给同一个招式（10 个大境界段最多攒 10 门，图鉴 10 门）
+    assert.equal(new Set(saved.skills).size, saved.skills.length);
   });
 });
 
@@ -436,6 +643,25 @@ test('the save file is only written when persisted state changes', () => {
     assert.equal(progressOf(path), 1);
     assert.notEqual(readFileSync(path, 'utf8'), before);
     assert.notEqual(statSync(path).mtimeMs, mtime);
+  });
+});
+
+test('X1 那份存档（offer 恒为 null）照读；待选形状坏了照旧改名重建', () => {
+  withPath((path, warns) => {
+    const c = open(path, 5);
+    c.trialDone(at(0), true); // 落一次盘
+    // X1 写的就是 offer: null —— 换成待选形状之后仍要读得了
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as { offer: unknown }).offer, null);
+    const again = new Cultivation(path, () => undefined, seededRng(5), 24 * 3_600_000);
+    assert.equal(again.view().offer, null);
+    assert.equal(progressOf(path), 30, 'X1 的修为读得进来');
+    // 待选形状不对（编号不在图鉴里）：整份存档按坏文件处理，不静默丢掉这一项
+    writeSave(path, { offer: { a: 'not-a-skill', b: 'dove', until: at(1) } });
+    const rebuilt = new Cultivation(path, (message) => warns.push(message), seededRng(5));
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /修炼存档读不了/);
+    assert.equal(rebuilt.view().offer, null);
+    assert.equal(rebuilt.view().stage, 0);
   });
 });
 

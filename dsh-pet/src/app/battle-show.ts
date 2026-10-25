@@ -183,6 +183,8 @@ export const TRIBULATION_LOSS_ANIM = '工作状态-垂头叹气冒汗';
 export const TRIBULATION_WIN_ANIM = '修炼-突破';
 /** 渡劫开场的服丹（§2.3 的 url 形态素材） */
 export const TRIBULATION_PILL_ANIM = '修炼-服丹';
+/** 每一道雷（§2.3） */
+export const TRIBULATION_STRIKE_ANIM = '修炼-挨雷';
 
 /**
  * `timeline` 的额外选项。
@@ -190,9 +192,11 @@ export const TRIBULATION_PILL_ANIM = '修炼-服丹';
  *   吃丹先播一段 `修炼-服丹`；收场用 `修炼-突破` / `工作状态-垂头叹气冒汗`（渡劫没有「打赢对手」那句
  *   台词，结果感言由调用方按人设说一句，见 features.ts）。引擎的事件里 `actor` 恒为 0（天雷不算一方），
  *   所以这几步都排在自家宠物那一边。
+ *   `strikes` = 这一场该有几道雷（`tribulationPlan` 给的）：台词报「第 i/N 道」的 N。
+ *   没扛住时事件里只有前几道雷，不传就会报成「第 2/2 道」那种偏小的数。
  */
 export interface TimelineOptions {
-  tribulation?: { pill: boolean };
+  tribulation?: { pill: boolean; strikes?: number };
 }
 
 /**
@@ -214,6 +218,10 @@ export function timeline(
   const start = events.find((event) => event.kind === 'start');
   const base: [number, number] = start ? start.hp : [0, 0];
   const tribulation = options?.tribulation;
+  /** 这场一共几道雷（渡劫台词报「第 i/N 道」用）：优先按 plan 给的雷数，没传就按事件里数得着的算 */
+  const strikeTotal = tribulation
+    ? (tribulation.strikes ?? events.filter((event) => event.kind === 'strike').length)
+    : 0;
   if (tribulation) {
     // 渡劫：没有对手，开场只有吃丹那一段（不吃丹就直接等第一道雷）
     if (tribulation.pill) {
@@ -294,13 +302,16 @@ export function timeline(
       closeSlot();
       const blocked = blockedHere(event);
       // 雷被泡泡挡了：这一拍改播渡劫者自己的泡泡护体（吹泡、被撞凹又弹回、破成水珠），没有对手那一边
-      const anim = blocked ? SKILLS.bubble.anim : '修炼-挨雷';
+      const anim = blocked ? SKILLS.bubble.anim : TRIBULATION_STRIKE_ANIM;
+      let line = lineOf(event, names, rng, skillSets) ?? undefined;
+      // 渡劫的台词报第几道雷（设计 §4.6：气泡显示「第 3 道天雷」）——共几道按事件里数得着的雷算
+      if (tribulation && line) line = `第 ${event.index + 1}/${strikeTotal} 道：${line}`;
       steps.push({
         at: cursor,
         who: event.actor,
         anim,
         rate: rateFor(anim, SLOT_MS),
-        line: lineOf(event, names, rng, skillSets) ?? undefined,
+        line,
         hp: event.hp,
       });
       beat += 1;

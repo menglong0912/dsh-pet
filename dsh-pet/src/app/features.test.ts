@@ -11,6 +11,7 @@ import { configPathsFor } from '../standalone/options.ts';
 import { DEFAULT_APP_CONFIG } from './app-config.ts';
 import type { AppConfig } from './app-config.ts';
 import { ANNOUNCE_AFTER_MS } from './claude-hooks.ts';
+import { SKILLS, type SkillId } from './battle.ts';
 import { diaryDate } from './diary.ts';
 import type { DiaryDay } from './diary.ts';
 import { startAppFeatures } from './features.ts';
@@ -444,22 +445,176 @@ test('修炼：Claude 干完一轮 ≥ 30 秒的活能拿到丹（注入的随�
   });
 });
 
-test('修炼：圆满时菜单有「突破」，点突破进下一个大境界、播突破动画', async () => {
-  const clicks: string[] = [];
+/** 招式编号 → 中文名（菜单「领悟：X」的标签用它拼，测试不重复一份表） */
+const SKILL_NAMES: Record<string, string> = Object.fromEntries(
+  Object.values(SKILLS).map((def) => [def.id as SkillId, def.name]),
+);
+
+/** 圆满档（炼气九层修满）：X4 换成渡劫，这一档加丹数与属性，造必赢 / 必输两种局面用 */
+function cultivationFull(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ...cultivationSeed(), ...over };
+}
+
+test('修炼：圆满时菜单是「渡劫」（不再是「突破」），有丹再多一项「服丹后渡劫」', async () => {
   await withFeatures(
-    { cultivation: cultivationSeed(), clicks },
-    async (_features, _said, bodies, home, { menus, anims }) => {
+    { cultivation: cultivationFull({ pills: 0 }) },
+    async (_features, _said, _bodies, _home, { menus }) => {
       await until(() =>
-        menus.some((labels) => labels.includes('修炼/炼气九层 · 100%') && labels.includes('修炼/突破')),
+        menus.some((labels) => labels.includes('修炼/炼气九层 · 100%') && labels.includes('修炼/渡劫')),
       );
-      clicks.push('修炼/突破');
-      await until(() => (cultivationSave(home)?.stage as number | undefined) === 9);
-      // 动画请求是异步发出去的：等它到
-      await until(() => anims.some((body) => String(body.url ?? '').includes(encodeURIComponent('修炼-突破'))));
-      // 突破那句话的气泡不带说话动画（anim: false），不顶掉正在播的突破动画
-      await until(() => bodies.some((body) => body.anim === false));
+      assert.ok(
+        menus.every((labels) => !labels.includes('修炼/突破')),
+        '「突破」已经被渡劫替换',
+      );
+      assert.ok(
+        menus.every((labels) => !labels.includes('修炼/服丹后渡劫')),
+        '没丹就没有服丹那一项',
+      );
+    },
+  );
+  await withFeatures(
+    { cultivation: cultivationFull({ pills: 2 }) },
+    async (_features, _said, _bodies, _home, { menus }) => {
+      await until(() => menus.some((labels) => labels.includes('修炼/服丹后渡劫')), '有丹时的服丹项');
+    },
+  );
+});
+
+test('渡劫成功：扛雷演出（无对手窗口）→ 进大境界 → 挂出两项「领悟」→ 点一个招式到手', async () => {
+  const clicks: string[] = [];
+  // 气血给到 10 万：天雷怎么劈都劈不死，这一场必赢（雷数、动画、二选一都要看得清）
+  windows.length = 0;
+  await withFeatures(
+    { cultivation: cultivationFull({ pills: 2, stats: { hp: 100_000, power: 8, agility: 8, speed: 8 } }), clicks },
+    async (_features, _said, bodies, home, { menus, anims }) => {
+      await until(() => menus.some((labels) => labels.includes('修炼/服丹后渡劫')), '服丹后渡劫可点');
+      const before = menus.length;
+      clicks.push('修炼/服丹后渡劫');
+      await until(() => menus.some((labels) => labels.includes('修炼/快进')), '开打后菜单换成快进');
+      // 吃了丹：开场先播 修炼-服丹（url 形态）；渡劫没有对手，不开任何窗口
+      await until(
+        () => anims.some((body) => String(body.url ?? '').includes(encodeURIComponent('修炼-服丹'))),
+        '服丹动画',
+        400,
+      );
+      assert.equal(windowOn('/app/guest'), undefined, '渡劫不该开心魔 / 客人窗口');
+      assert.equal(windowOn('/app/arena'), undefined, '只有一只挨雷，没有擂台血条');
+      // 台词报第几道雷，走 anim: false + 一步长（带 anim 的气泡会顶掉正在播的动画）
+      clicks.push('修炼/快进');
+      await until(() => (cultivationSave(home)?.stage as number | undefined) === 9, '进了筑基');
+      const save = cultivationSave(home)!;
+      assert.equal(save.pills, 1, '丹扣了一颗（2 → 1）');
+      assert.equal((save.stats as { hp: number }).hp, 100_020, '大境界加成 +20 气血');
+      assert.ok((save.offer as Record<string, unknown> | null) !== null, '二选一挂出来了');
+      // 挨雷的动画（快进只播收场，前面那几步不一定发得出去，这里核收场的 修炼-突破）
+      await until(
+        () => anims.some((body) => String(body.url ?? '').includes(encodeURIComponent('修炼-突破'))),
+        '突破动画',
+        400,
+      );
+      // 结果感言走 compose（只带人设）
+      await until(() => memeAsks.some((ask) => /渡劫|天雷/.test(ask)), '结果感言的指令', 400);
+      // 菜单：两项「领悟：X」，不再有两个渡劫项
+      const offer = save.offer as { a: string; b: string };
+      const names = [offer.a, offer.b].map((id) => SKILL_NAMES[id]);
+      await until(
+        () =>
+          menus.some(
+            (labels) => labels.includes(`修炼/领悟：${names[0]}`) && labels.includes(`修炼/领悟：${names[1]}`),
+          ),
+        `领悟两项（一共 ${before} 次注册）`,
+        400,
+      );
+      const tail = last(menus)!;
+      assert.ok(
+        tail.filter((label) => label.startsWith('修炼/')).length <= 4,
+        `修炼子菜单不超名额：${JSON.stringify(tail)}`,
+      );
+      clicks.push(`修炼/领悟：${names[0]}`);
+      await until(() => {
+        const now = cultivationSave(home)!;
+        return (now.skills as string[]).includes(offer.a) && now.offer === null;
+      }, '点了领悟：招式到手、二选一收走');
+      await until(
+        () => menus.some((labels) => !labels.some((label) => label.startsWith('修炼/领悟：'))),
+        '菜单收回领悟两项',
+      );
+      assert.ok(
+        bodies.some((body) => body.anim === false),
+        '演出台词不联动动画',
+      );
       const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
-      assert.ok(day.events.some((event) => event.kind === 'cultivate' && event.text.startsWith('突破到筑基初期')));
+      assert.ok(
+        day.events.some((event) => event.kind === 'cultivate' && /突破到筑基初期/.test(event.text)),
+        '记了渡劫成功',
+      );
+    },
+  );
+});
+
+test('渡劫失败：扣 20% 修为、境界不掉、不再是圆满（不设冷却），播池内的垂头叹气', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  // 气血 1：三道雷只要有一道没躲开就倒下（全躲开的概率约 3e-6）
+  await withFeatures(
+    { cultivation: cultivationFull({ stats: { hp: 1, power: 8, agility: 8, speed: 8 }, pills: 0 }), clicks },
+    async (_features, _said, _bodies, home, { menus, anims }) => {
+      await until(() => menus.some((labels) => labels.includes('修炼/渡劫')), '渡劫可点');
+      clicks.push('修炼/渡劫');
+      await until(() => menus.some((labels) => labels.includes('修炼/快进')), '开打');
+      // 快进前该已经挨上第一道雷了（时间线第一拍在 2.4 秒）
+      await until(
+        () => anims.some((body) => String(body.url ?? '').includes(encodeURIComponent('修炼-挨雷'))),
+        '挨雷动画',
+        400,
+      );
+      clicks.push('修炼/快进');
+      await until(() => (cultivationSave(home)?.progress as number | undefined) === 120, '扣了 30 修为');
+      const save = cultivationSave(home)!;
+      assert.equal(save.stage, 8, '不掉境界');
+      assert.equal(save.offer, null, '失败不挂二选一');
+      // 不再是圆满：菜单里渡劫那项没了，攒回 100% 才会再出现
+      await until(() => menus.some((labels) => labels.includes('修炼/炼气九层 · 80%')), '菜单跟着改');
+      assert.ok(last(menus)!.every((label) => label !== '修炼/渡劫' && label !== '修炼/服丹后渡劫'));
+      // 失败收场是池里的现有素材（名字形态，不是 url）
+      await until(() => anims.some((body) => body.name === '工作状态-垂头叹气冒汗'), '垂头叹气冒汗走名字形态播', 400);
+      const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+      assert.ok(day.events.some((event) => event.kind === 'cultivate' && /渡劫没扛住，修为退了 30/.test(event.text)));
+    },
+  );
+});
+
+test('二选一过期没人挑：下一拍随机定一个（拨 Date，不真等 10 分钟）', async (t) => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  await withFeatures(
+    { cultivation: cultivationFull({ pills: 0, stats: { hp: 100_000, power: 8, agility: 8, speed: 8 } }), clicks },
+    async (_features, _said, _bodies, home, { menus }) => {
+      await until(() => menus.some((labels) => labels.includes('修炼/渡劫')), '渡劫可点');
+      const realNow = Date.now();
+      clicks.push('修炼/渡劫');
+      await until(() => menus.some((labels) => labels.includes('修炼/快进')), '开打');
+      clicks.push('修炼/快进');
+      await until(() => cultivationSave(home)?.offer !== null, '二选一挂出来');
+      const offer = cultivationSave(home)!.offer as { a: string; b: string };
+      await until(
+        () => menus.some((labels) => labels.includes(`修炼/领悟：${SKILL_NAMES[offer.a]}`)),
+        '菜单有领悟两项',
+      );
+      try {
+        // 只接管 Date（拍子照走真的），把时钟拨过 10 分钟：tick 那一拍该随机定一个
+        t.mock.timers.enable({ apis: ['Date'] });
+        t.mock.timers.setTime(realNow + 11 * 60_000);
+        // 拨完表要等下一拍（TICK_MS = 5 秒，真的）：tries 给够
+        await until(() => cultivationSave(home)?.offer === null, '过期自动定', 800);
+      } finally {
+        t.mock.timers.reset();
+      }
+      const save = cultivationSave(home)!;
+      const skills = save.skills as string[];
+      assert.equal(skills.length, 1);
+      assert.ok(skills[0] === offer.a || skills[0] === offer.b, `定的是两个里的一个：${skills[0]}`);
+      await until(() => menus.some((labels) => !labels.some((label) => label.startsWith('修炼/领悟：'))), '菜单收回');
     },
   );
 });

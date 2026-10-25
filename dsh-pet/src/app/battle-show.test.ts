@@ -6,11 +6,11 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fighterAt } from './battle-testkit.ts';
-import { MAX_STAGE } from './cultivation.ts';
+import { MAX_STAGE, tribulationStrikes } from './cultivation.ts';
 import {
   fight,
   shadowOf,
@@ -32,6 +32,10 @@ import {
   REACT_MS,
   SLOT_MS,
   timeline,
+  TRIBULATION_LOSS_ANIM,
+  TRIBULATION_PILL_ANIM,
+  TRIBULATION_STRIKE_ANIM,
+  TRIBULATION_WIN_ANIM,
   type ShowSides,
   type Step,
 } from './battle-show.ts';
@@ -415,6 +419,92 @@ test('渡劫：一道雷一格，没有对手的反应；雷被泡泡挡了改�
   );
 });
 
+/** 渡劫事件序列（引擎里 actor 恒为 0，收场的 winner 0 = 扛住、1 = 没扛住） */
+const tribEnd = (survived: boolean, after: [number, number] = [40, 0]): BattleEvent => ({
+  actor: survived ? 0 : 1,
+  kind: 'end',
+  winner: survived ? 0 : 1,
+  reason: 'ko',
+  hp: after,
+});
+const TRIB = { tribulation: { pill: false } };
+const TRIB_PILL = { tribulation: { pill: true } };
+
+test('渡劫形态：没有对手窗口就不排起手式；吃丹先播一段 修炼-服丹', () => {
+  const plain = timeline([start(0), strike(0), tribEnd(true)], ['小鱼', '天雷'], seq(), undefined, TRIB);
+  assert.deepEqual(
+    plain.filter((step) => step.at === 0).map((step) => [step.who, step.anim]),
+    [],
+    '不吃丹：开场什么都没有（第一道雷自己就是开头）',
+  );
+  assert.equal(plain.filter((step) => step.anim === '战斗-起手').length, 0, '没有对手，不播两个起手式');
+
+  const fed = timeline([start(0), strike(0), tribEnd(true)], ['小鱼', '天雷'], seq(), undefined, TRIB_PILL);
+  assert.deepEqual(
+    fed.filter((step) => step.at === 0).map((step) => [step.who, step.anim, step.rate]),
+    [[0, '修炼-服丹', rateFor('修炼-服丹', OPEN_MS)]],
+  );
+});
+
+test('渡劫形态：台词报第几道雷（第 i/N 道），一道雷一句', () => {
+  const steps = timeline(
+    [start(0), strike(0), strike(1), strike(2), tribEnd(false)],
+    ['小鱼', '天雷'],
+    seq(2),
+    undefined,
+    TRIB,
+  );
+  const lines = steps.filter((step) => step.line).map((step) => step.line ?? '');
+  assert.equal(lines.length, 3, '三道雷三句');
+  assert.ok(
+    lines.every((line) => line.startsWith('第 ') && line.includes('/3 道：')),
+    `都报第几道：${lines}`,
+  );
+  assert.match(lines[0], /^第 1\/3 道：/);
+  assert.match(lines[2], /^第 3\/3 道：/);
+  // 被挡的那道照旧带「（泡泡挡掉一半）」
+  const blocked = timeline([start(0), strike(0, 20, [80, 0], true)], ['小鱼', '天雷'], seq(2), [['bubble'], []], TRIB);
+  assert.match(blocked.find((step) => step.line)?.line ?? '', /第 1\/1 道：.*（泡泡挡掉一半）$/);
+  // 中途倒下的那场：引擎提前收尾、事件里只有挨到的那 2 道雷，N 用 plan 给的雷数（别报成 2/2）
+  const early = timeline(
+    [start(0), strike(0), strike(1, 999, [0, 0]), tribEnd(false, [0, 0])],
+    ['小鱼', '天雷'],
+    seq(2),
+    undefined,
+    { tribulation: { pill: false, strikes: 9 } },
+  );
+  const fallen = early.filter((step) => step.line).map((step) => step.line ?? '');
+  assert.match(fallen[0], /^第 1\/9 道：/);
+  assert.match(fallen[fallen.length - 1], /^第 2\/9 道：/);
+});
+
+test('渡劫形态：收场成功播 修炼-突破，失败播池里的 工作状态-垂头叹气冒汗（from = pool）', () => {
+  const win = timeline([start(0), strike(0), tribEnd(true)], ['小鱼', '天雷'], seq(), undefined, TRIB);
+  const closing = win.filter((step) => step.closing);
+  assert.deepEqual(
+    closing.map((step) => [step.who, step.anim, step.from, step.rate]),
+    [[0, '修炼-突破', undefined, rateFor('修炼-突破', 3_000)]],
+  );
+  const lose = timeline(
+    [start(0), strike(0, 999, [0, 0]), tribEnd(false, [0, 0])],
+    ['小鱼', '天雷'],
+    seq(),
+    undefined,
+    TRIB,
+  );
+  assert.deepEqual(
+    lose.filter((step) => step.closing).map((step) => [step.who, step.anim, step.from]),
+    [[0, '工作状态-垂头叹气冒汗', 'pool']],
+    '失败那一下是池里的现有素材（名字形态播）',
+  );
+  // 两种收场都不带「谁赢了」那种台词：结果感言由调用方按人设说一句（§X4 每次渡劫 +1 次模型调用）
+  assert.ok(
+    lose.filter((step) => step.closing).every((step) => step.line === undefined),
+    '收场只有动画，台词交给结果感言',
+  );
+  assert.equal(lose.filter((step) => step.anim === '战斗-倒地').length, 0);
+});
+
 test('气血：每一步都带上它之后的两条血（擂台照它刷新）', () => {
   const steps = timeline([start(0), decide(0, { kind: 'unarmed' }), hit(0, 20, [100, 70])], NAMES, seq());
   assert.ok(steps.every((step) => step.hp.length === 2));
@@ -434,21 +524,24 @@ test('真引擎的一场：时间线按时间递增，整场长度可控（一�
   assert.ok(steps[steps.length - 1].at < 90_000, `整场不超过 90 秒：实际 ${steps[steps.length - 1].at / 1000} 秒`);
 });
 
-/** 执行器用的假手：记下每次调用 */
+/** 执行器用的假手：记下每次调用（`from = 'pool'` 的素材走名字形态，这里一并记下来核对） */
 interface FakeSide {
   played: Array<[string, number]>;
+  pooled: Array<[string, number]>;
   said: Array<[string, number]>;
-  play(anim: string, rate: number): void;
+  play(anim: string, rate: number, from?: 'pool'): void;
   say(line: string, durationMs: number): void;
 }
 
 function fakeSide(): FakeSide {
   const played: Array<[string, number]> = [];
+  const pooled: Array<[string, number]> = [];
   const said: Array<[string, number]> = [];
   return {
     played,
+    pooled,
     said,
-    play: (anim, rate) => void played.push([anim, rate]),
+    play: (anim, rate, from) => void (from === 'pool' ? pooled : played).push([anim, rate]),
     say: (line, durationMs) => void said.push([line, durationMs]),
   };
 }
@@ -510,6 +603,31 @@ test('没有对手窗口（X4 渡劫）：对手那几步只是没画面，气�
   assert.deepEqual(arena, [10, 10, 10], '三步都刷了擂台');
 });
 
+test('渡劫形态整场跑一遍：雷一道道挨、失败那一下走池内素材的名字形态', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  const steps = timeline(
+    [start(0), strike(0, 40, [60, 0]), strike(1, 60, [0, 0]), tribEnd(false, [0, 0])],
+    ['小鱼', '天雷'],
+    seq(2),
+    undefined,
+    TRIB,
+  );
+  const { self, show } = makeShow(steps, null);
+  const done = show.run();
+  t.mock.timers.tick(OPEN_MS + SLOT_MS * 2 + LINE_MS * 2);
+  await done;
+  assert.deepEqual(
+    self.played.map(([anim]) => anim),
+    ['修炼-挨雷', '修炼-挨雷'],
+    '两道雷各一段挨雷（url 形态）',
+  );
+  assert.deepEqual(
+    self.pooled.map(([anim]) => anim),
+    ['工作状态-垂头叹气冒汗'],
+    '失败收场走名字形态（池内素材）',
+  );
+});
+
 test('快进：剩下的步骤不播，直接到结果（收场几步 + 最终气血），run 立即结束', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
   const { self, foe, arena, show } = makeShow([
@@ -566,10 +684,18 @@ test('空时间线：run 直接结束（引擎没给事件也不能卡住调用�
 test('真引擎的若干场：素材名都对得上包内素材、倍速都在 /anim 允许区间、整场不拖沓', () => {
   // 素材名是拼出来的（法宝-<名> / 招式-<名>），拼错就是「那一下没动画」——这里逐个核到文件；
   // 倍速越界宿主直接回 bad-request，同样等于没动画。
-  const assets = new Set(
-    readdirSync(join(packageRoot, 'assets', 'webm'))
-      .filter((file) => file.endsWith('.webm'))
-      .map((file) => file.slice(0, -'.webm'.length)),
+  const assetFiles = readdirSync(join(packageRoot, 'assets', 'webm'))
+    .filter((file) => file.endsWith('.webm'))
+    .map((file) => file.slice(0, -'.webm'.length));
+  const assets = new Set(assetFiles);
+  // X4 渡劫失败那一下是**动画池里的现有素材**（名字形态播）：除了文件在，还得真在池里（config 的
+  // animations.events.workStatus 那一档），不然宿主回 unknown-animation，那一下就是没动画。
+  assert.ok(assetFiles.includes(TRIBULATION_LOSS_ANIM), `${TRIBULATION_LOSS_ANIM} 有素材文件`);
+  const pool = readFileSync(join(packageRoot, 'assets', 'config.jsonc'), 'utf8');
+  assert.match(
+    pool.slice(pool.indexOf('"workStatus"')),
+    new RegExp(`${TRIBULATION_LOSS_ANIM}"`),
+    '池子里点得到它（用户没换配置时）',
   );
   // 境界扫到顶： fighterAt 一路攒下被动招式，高境界那几只才带得出泡泡护体 / 灵兽助阵 / 第六感 / 无影手
   const newAnims = [
@@ -582,21 +708,29 @@ test('真引擎的若干场：素材名都对得上包内素材、倍速都在 /
   for (let stage = 0; stage <= MAX_STAGE; stage += 1) {
     const you = fighterAt(stage, seq(stage));
     const foe = shadowOf(you);
-    for (const events of [
-      fight(you, foe, `sweep-${stage}`, [unarmed, unarmed]),
-      tribulate(you, 3, stage, `tribulate-${stage}`),
+    const tribulated = tribulate(you, tribulationStrikes(stage + 1), stage, `tribulate-${stage}`);
+    for (const [events, options] of [
+      [fight(you, foe, `sweep-${stage}`, [unarmed, unarmed]), undefined] as const,
+      // 渡劫：吃丹不吃丹两种开场 × 扛住没扛住两种收场（雷数照 §X4 的规则，境界扫到顶也就排到 9 道）
+      [tribulated, { tribulation: { pill: false } }] as const,
+      [tribulated, { tribulation: { pill: true } }] as const,
     ]) {
-      const steps = timeline(events, [you.name, foe.name], seq(), [you.skills, foe.skills]);
+      const steps = timeline(events, [you.name, foe.name], seq(), [you.skills, foe.skills], options);
       for (const step of steps) {
         if (step.anim) {
           assert.ok(assets.has(step.anim), `素材不存在：${step.anim}`);
           played.add(step.anim);
         }
         if (step.rate !== undefined) assert.ok(step.rate >= 0.5 && step.rate <= 3, `倍速越界：${step.rate}`);
+        // 渡劫这一场只有自家这一边（没有对手窗口）：排到 who = 1 就是映射漏了
+        if (options) assert.equal(step.who, 0, `渡劫不该有对手那一边：${step.anim ?? step.line}`);
       }
       assert.ok(steps[steps.length - 1].at < 90_000, `整场不超过 90 秒：${steps[steps.length - 1].at / 1000}`);
     }
   }
   // 这四段是这次新接的：没演到就是扫描白跑（招式攒不满、映射没生效都算）
   for (const anim of newAnims) assert.ok(played.has(anim), `这批扫描没演到 ${anim}`);
+  // X4 渡劫那几段（挨雷 / 服丹 / 突破 / 垂头叹气）也都得演到
+  for (const anim of [TRIBULATION_STRIKE_ANIM, TRIBULATION_PILL_ANIM, TRIBULATION_WIN_ANIM, TRIBULATION_LOSS_ANIM])
+    assert.ok(played.has(anim), `扫描没演到 ${anim}`);
 });

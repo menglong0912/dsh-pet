@@ -63,6 +63,15 @@ const todaySchema = z.object({
   spars: z.array(z.string().min(1).max(64)).max(16),
 });
 
+/** 渡劫成功后待选的二选一（X4）：两个招式编号 + 有效期（毫秒时间戳，过期在 tick 里随机定一个） */
+const offerSchema = z.object({
+  a: z.enum(SKILL_IDS),
+  b: z.enum(SKILL_IDS),
+  until: z.number().int().nonnegative(),
+});
+
+type CultivationOffer = z.infer<typeof offerSchema>;
+
 const saveSchema = z.object({
   version: z.literal(1),
   stage: z.number().int().min(0).max(MAX_STAGE),
@@ -71,8 +80,8 @@ const saveSchema = z.object({
   weapons: z.array(z.enum(WEAPON_IDS)).max(WEAPON_IDS.length),
   skills: z.array(z.enum(SKILL_IDS)).max(SKILL_IDS.length),
   pills: z.number().int().min(0).max(9),
-  /** X4 的二选一放这，X1 里恒为 null */
-  offer: z.null(),
+  /** X4 的二选一；X1 建的旧档恒为 null（nullable 保持读得了） */
+  offer: offerSchema.nullable(),
   today: todaySchema,
   record: z.object({ wins: z.number().int().min(0), losses: z.number().int().min(0) }),
 });
@@ -83,7 +92,14 @@ export type CultivationSave = z.infer<typeof saveSchema>;
 export type CultivationEvent =
   | { kind: 'stage-up'; stage: number }
   | { kind: 'full' }
-  | { kind: 'breakthrough'; skill?: SkillId }
+  /** 渡劫成功、进了新大境界（属性加成已到账；招式在下面那条 `offer` / `choose` 里） */
+  | { kind: 'breakthrough' }
+  /** 二选一挂出来了（菜单两项，`until` 前有效） */
+  | { kind: 'offer'; a: SkillId; b: SkillId }
+  /** 领悟了某一门招式（主人点的，或二选一过期随机定的） */
+  | { kind: 'choose'; skill: SkillId }
+  /** 渡劫失败：扣了这么多修为（不掉境界） */
+  | { kind: 'tribulation-fail'; lost: number }
   | { kind: 'rest'; gain: number }
   | { kind: 'pill' }
   | { kind: 'drop'; weapon: WeaponId }
@@ -94,6 +110,18 @@ export type CultivationEvent =
    */
   | { kind: 'xp'; amount: number };
 
+/** `tribulationPlan` 的结论：这一场渡劫的开场条件（§X4） */
+export interface TribulationPlan {
+  /** 喂给引擎 `tribulate` 的境界（渡的是当前这一境圆满，天雷按它涨） */
+  stage: number;
+  /** 要扛几道雷 */
+  strikes: number;
+  /** 有没有破境丹可吃（气血上限 ×1.2，一次最多吃 1 颗） */
+  canPill: boolean;
+  /** 渡过去要进的那一境（菜单、日记用） */
+  nextLabel: string;
+}
+
 /** 设置页和右键菜单用的只读视图 */
 export interface CultivationView {
   stage: number;
@@ -101,12 +129,14 @@ export interface CultivationView {
   label: string;
   /** 当前小境界进度百分比，取整 */
   percent: number;
-  /** 圆满（大境界最后一个小境界修满，可以突破） */
+  /** 圆满（大境界最后一个小境界修满，可以渡劫） */
   full: boolean;
   stats: CultivationStats;
   weapons: string[];
   skills: string[];
   pills: number;
+  /** 渡劫成功后待选的二选一（菜单的「领悟：X」两项）；没有就 null */
+  offer: { a: SkillId; b: SkillId } | null;
   record: { wins: number; losses: number };
 }
 
@@ -131,6 +161,16 @@ const DROP_CHANCE = 0.3;
 const SPAR_DAILY_MAX = 3;
 const SPAR_WIN_XP = 20;
 const SPAR_LOSE_XP = 10;
+/**
+ * 渡劫（X4）：失败扣当前小境界 20% 的修为，最多 300（设计 §4.3：封顶以后任何境界失败最多耽误一天左右）。
+ * 扣完就不再是圆满，攒回来才能再渡劫——这本身就是冷却，**不另设冷却计时**。
+ */
+const TRIBULATION_LOSS_SHARE = 0.2;
+const TRIBULATION_LOSS_MAX = 300;
+/** 破境丹：渡劫这一场气血上限 ×1.2，每次渡劫最多吃 1 颗 */
+const PILL_HP_FACTOR = 1.2;
+/** 二选一挂 10 分钟（设计 §4.3：这是「完全不能控制」那条差评的最小补救，不加别的操作） */
+const OFFER_MS = 10 * 60_000;
 /**
  * 单拍最多计入多长的「在电脑前」：接线每 5 秒（TICK_MS）喂一拍，正常间隔远小于这个数；
  * 睡眠 / 合盖后醒来的那一拍间隔会很长，不封顶就会把整段睡眠当成在场，一下攒满当天的 240
@@ -161,9 +201,18 @@ export function stageReq(stage: number): number {
   return MAJORS[majorBreaks(stage)].req;
 }
 
-/** 是不是本大境界的最后一个小境界（修满 = 圆满，等突破） */
+/** 是不是本大境界的最后一个小境界（修满 = 圆满，等渡劫） */
 export function isFullStage(stage: number): boolean {
   return stage < MAX_STAGE ? majorBreaks(stage + 1) > majorBreaks(stage) : true;
+}
+
+/**
+ * 渡劫要扛几道雷（§X4）：进筑基、金丹 3 道，进元婴、化神 6 道，之后 9 道。
+ * @param nextStage 要进的那个小境界（圆满时是 `stage + 1`）
+ */
+export function tribulationStrikes(nextStage: number): number {
+  const big = majorBreaks(nextStage);
+  return big <= 2 ? 3 : big <= 4 ? 6 : 9;
 }
 
 /**
@@ -208,6 +257,8 @@ export class Cultivation {
   private weapons: WeaponId[];
   private skills: SkillId[];
   private pills = 0;
+  /** 渡劫成功后待选的二选一（§X4）：10 分钟有效，过期在 tick 里随机定一个 */
+  private offer: CultivationOffer | null = null;
   private today: z.infer<typeof todaySchema> = emptyToday('');
   private record = { wins: 0, losses: 0 };
   /** 心浮气躁（久坐提醒到主人离开电脑为止）；不落盘，重启就不躁了 */
@@ -246,6 +297,7 @@ export class Cultivation {
       this.weapons = saved.weapons;
       this.skills = saved.skills;
       this.pills = saved.pills;
+      this.offer = saved.offer;
       this.today = saved.today;
       this.record = saved.record;
     } else {
@@ -325,7 +377,8 @@ export class Cultivation {
   /** 在电脑前每满 1 分钟 +1（心浮气躁时攒 2 分钟才 +1）；本地 0–4 点不涨；每天封顶 240 */
   tick(now: number, present: boolean): CultivationEvent[] {
     this.rollDay(now);
-    const events: CultivationEvent[] = [];
+    // 二选一挂到点：没人挑就随机定一个（§X4）
+    const events: CultivationEvent[] = this.expireOffer(now);
     const raw = this.lastTickAt === null ? 0 : Math.max(0, now - this.lastTickAt);
     // 睡眠 / 合盖后的那一拍间隔很长：最多只计入 maxTickElapsedMs（见常量注释）
     const elapsed = Math.min(raw, this.maxTickElapsedMs);
@@ -429,22 +482,111 @@ export class Cultivation {
     return events;
   }
 
-  /** 圆满时进下一个大境界：三项各 +1、气血 +20、随机得一个还没有的招式（X4 会换成渡劫加二选一） */
-  breakthrough(now: number): CultivationEvent[] {
+  /**
+   * 渡劫的开场条件（§X4）：圆满时给「要扛几道雷、有没有丹可吃」；不能渡（没圆满、已经修到头）返回 null。
+   * `stage` 是喂给引擎 `tribulate` 的境界（渡的是当前这一境圆满，天雷按它涨）。
+   */
+  tribulationPlan(now: number): TribulationPlan | null {
     this.rollDay(now);
-    if (this.stage >= MAX_STAGE || !isFullStage(this.stage) || this.progress < stageReq(this.stage)) return [];
+    if (this.stage >= MAX_STAGE) return null;
+    if (!isFullStage(this.stage) || this.progress < stageReq(this.stage)) return null;
+    return {
+      stage: this.stage,
+      strikes: tribulationStrikes(this.stage + 1),
+      canPill: this.pills > 0,
+      /** 渡过去要进的那一境（菜单和日记用得上） */
+      nextLabel: stageLabel(this.stage + 1),
+    };
+  }
+
+  /**
+   * 渡劫收场（§X4）：扛过全部天雷 = 成功，进下一个大境界（属性照 X1 的大境界加成），
+   * 再从还没有的招式里随机挑两个挂成二选一；失败只扣修为（不掉境界），攒回来才能再渡。
+   * 只有开打前 `tribulationPlan` 放行过（还圆满着）的这一场才结算；不圆满时调用是空操作（连丹都不扣），
+   * 免得重复结算把境界推上去。接线在 run() 前后各查一次 plan 就够，这里不另设「渡劫进行中」的状态。
+   * @param usedPill 这一场吃了破境丹（气血上限 ×1.2 由调用方在开打前加到 Fighter 上）：丹数 −1
+   */
+  tribulationDone(now: number, survived: boolean, usedPill: boolean): CultivationEvent[] {
+    this.rollDay(now);
+    const events: CultivationEvent[] = [];
+    const able = this.stage < MAX_STAGE && isFullStage(this.stage) && this.progress >= stageReq(this.stage);
+    if (!able) {
+      this.save();
+      return events;
+    }
+    // 丹是开打前生效的（气血上限 ×1.2 已经喂给引擎），扛没扛住都算吃了
+    if (usedPill && this.pills > 0) {
+      this.pills -= 1;
+      this.dirty = true;
+    }
+    if (!survived) {
+      // 扣当前小境界 20% 的修为，最多 300；扣完就不再是圆满（攒回来才能再渡，不设冷却计时）
+      const lost = Math.min(
+        Math.floor(stageReq(this.stage) * TRIBULATION_LOSS_SHARE),
+        this.progress,
+        TRIBULATION_LOSS_MAX,
+      );
+      if (lost > 0) {
+        this.progress -= lost;
+        this.dirty = true;
+      }
+      events.push({ kind: 'tribulation-fail', lost });
+      this.save();
+      return events;
+    }
     this.stage += 1;
     this.progress = 0;
     this.stats.power += 1;
     this.stats.agility += 1;
     this.stats.speed += 1;
     this.stats.hp += 20;
+    this.dirty = true;
+    events.push({ kind: 'breakthrough' });
+    // 二选一：在还没有的招式里随机挑两个（10 分钟有效）
     const missing = SKILL_IDS.filter((id) => !this.skills.includes(id));
-    const skill = missing.length > 0 ? missing[Math.floor(this.rng() * missing.length)] : undefined;
-    if (skill) this.skills.push(skill);
+    if (missing.length >= 2) {
+      const first = Math.floor(this.rng() * missing.length);
+      const second = (first + 1 + Math.floor(this.rng() * (missing.length - 1))) % missing.length;
+      this.offer = { a: missing[first], b: missing[second], until: now + OFFER_MS };
+      this.dirty = true;
+      events.push({ kind: 'offer', a: this.offer.a, b: this.offer.b });
+    } else if (missing.length === 1) {
+      // 只剩一个还没学的（正常成长走不到这一步，图鉴扩充以后才会）：直接给它，不挂二选一
+      const skill = missing[0];
+      this.skills.push(skill);
+      this.dirty = true;
+      events.push({ kind: 'choose', skill });
+    }
+    this.save();
+    return events;
+  }
+
+  /**
+   * 二选一里挑一个领悟（菜单「修炼/领悟：X」）。不在待选里（没挂出来、过期被随机定了、编号不对）
+   * 就什么都不做，返回空事件。
+   */
+  choose(now: number, skill: SkillId): CultivationEvent[] {
+    this.rollDay(now);
+    const events = this.expireOffer(now);
+    const offer = this.offer;
+    if (!offer || (skill !== offer.a && skill !== offer.b)) return events;
+    this.offer = null;
+    if (!this.skills.includes(skill)) this.skills.push(skill);
     this.dirty = true;
     this.save();
-    return [{ kind: 'breakthrough', ...(skill ? { skill } : {}) }];
+    return [...events, { kind: 'choose', skill }];
+  }
+
+  /** 二选一到期：没人挑就随机定一个（§X4，tick 每拍查一次） */
+  private expireOffer(now: number): CultivationEvent[] {
+    const offer = this.offer;
+    if (!offer || now < offer.until) return [];
+    this.offer = null;
+    const skill = this.rng() < 0.5 ? offer.a : offer.b;
+    if (!this.skills.includes(skill)) this.skills.push(skill);
+    this.dirty = true;
+    this.save();
+    return [{ kind: 'choose', skill }];
   }
 
   /** 给引擎的 Fighter（心魔、切磋、渡劫都用它） */
@@ -460,6 +602,16 @@ export class Cultivation {
     };
   }
 
+  /**
+   * 渡劫用的 Fighter（§X4）：吃了破境丹就把气血上限 ×1.2，其余照旧。
+   * ×1.2 的口径放在这里，接线只管「吃没吃」，不重复一份数学（向下取整，和心魔的 ×0.9 同口径）。
+   */
+  tribulationFighter(name: string, usedPill: boolean): Fighter {
+    const f = this.fighter(name);
+    if (usedPill) f.hp = Math.floor(f.hp * PILL_HP_FACTOR);
+    return f;
+  }
+
   view(): CultivationView {
     const full = isFullStage(this.stage) && this.progress >= stageReq(this.stage);
     return {
@@ -471,6 +623,7 @@ export class Cultivation {
       weapons: this.weapons.map((id) => WEAPONS[id].name),
       skills: this.skills.map((id) => SKILLS[id].name),
       pills: this.pills,
+      offer: this.offer ? { a: this.offer.a, b: this.offer.b } : null,
       record: { ...this.record },
     };
   }
@@ -495,7 +648,7 @@ export class Cultivation {
       weapons: this.weapons,
       skills: this.skills,
       pills: this.pills,
-      offer: null,
+      offer: this.offer,
       today: this.today,
       record: this.record,
     };

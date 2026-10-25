@@ -8,10 +8,11 @@
  *   - 把 Claude Code 与串门合成为一个外部工作状态（桌宠只有一个外部槽）；
  *   - 把一天里的事记进宠物日记（diary.ts），第二天回到电脑前时补写前一天的日记；
  *   - 修炼（cultivation.ts）：在电脑前就涨修为，久坐提醒后离开会「调息」，Claude 干完活偶尔炼出破境丹；
- *     升级冒泡、记日记，右键「修炼」看境界和进度，圆满时点「突破」进下一个大境界；
+ *     升级冒泡、记日记，右键「修炼」看境界和进度，圆满时点「渡劫」：扛天雷（X4）——成功进下一个大境界、
+ *     挂 10 分钟两项「领悟」二选一（没人挑就随机定一个），失败只扣修为（封顶 300，不设冷却）；有丹能先吃一颗；
  *     右键「心魔试炼」打一场：心魔是暗色的客人窗口（visit-windows.ts），两边按引擎事件依次出招、
  *     挨打、闪避（battle-show.ts 排时间线与执行器），头顶两条气血条（arena-window.ts），
- *     演完照结果拿奖励、说一句赛后感言；
+ *     演完照结果拿奖励、说一句赛后感言；渡劫复用同一套演出，只是没有对手窗口；
  *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口、visit-talk.ts 管怎么聊）：设置里开了才发信标、开接待端口；
  *     出门时自家宠物变半透明、把别人家的聊天转播回来，客人来了在自家宠物旁边开个小窗（能摸、能一起玩）；
  *     两边接着前文聊、主人家也会起话题；串门的台词只按人设生成，不带「主人此刻」；
@@ -37,7 +38,7 @@ import type { StandaloneAiService } from '../standalone/ai-provider';
 import { ActivityTracker, describeActivity, durationText } from './activity';
 import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
-import { SKILLS, WEAPONS, fight, shadowOf } from './battle';
+import { SKILLS, WEAPONS, fight, shadowOf, tribulate } from './battle';
 import { BattleShow, timeline } from './battle-show';
 import { arenaScoreboard, openArenaWindow } from './arena-window';
 import { ClaudeSessions } from './claude-hooks';
@@ -116,8 +117,12 @@ const MENU_CULTIVATION_GROUP = '修炼';
 /** 平时打坐的间隔：40–60 分钟随机一次（在电脑前、没出门、没在说话时） */
 const MEDITATE_GAP_MIN = 40;
 const MEDITATE_JITTER_MIN = 20;
-/** 插件每个 owner 最多 20 项：根上固定 2 项，邻居最多列这么多（回访项也算在内；家里有客时换成送客 + 一起玩 + 请吃零食，至多 16 项） */
-const MENU_NEIGHBORS_MAX = 15;
+/** 插件每个 owner 最多 20 项（`>` 就整份拒掉、菜单从此不再更新）：根上固定 2 项，修炼最多 4 项
+ * （信息 + 渡劫 + 服丹后渡劫 + 心魔试炼／快进；待选二选一那两项只在没圆满时出现），邻居最多列这么多
+ * （回访占名额）= 恰好 20。家里有客时换成送客 + 一起玩 + 请吃零食，至多 16 项。 */
+const MENU_NEIGHBORS_MAX = 14;
+/** 宿主每个 owner 的菜单项上限（src/host/menu.ts 的 ITEMS_MAX，`>` 才拒） */
+const MENU_ITEMS_MAX = 20;
 /** 做客时转播回自家的气泡显示多久（窗口同时调亮这么久） */
 const RELAY_MS = 8_000;
 /** 转播的气泡每条至少显示这么久才换下一条：对方回话快时，自己说的那句也看得清 */
@@ -1591,17 +1596,24 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         void sayLine(`修为精进，到${stageLabel(event.stage)}啦～`, options);
         diary.note(now, 'cultivate', `修为精进，到了${stageLabel(event.stage)}`);
       } else if (event.kind === 'full') {
-        void speak('修为刚修满一个大境界（圆满），可以突破了。跟主人说一声。', '可以突破了～', options);
-        diary.note(now, 'cultivate', '修为圆满，可以突破了');
+        void speak('修为刚修满一个大境界（圆满），可以渡劫了。跟主人说一声。', '可以渡劫了～', options);
+        diary.note(now, 'cultivate', '修为圆满，可以渡劫了');
       } else if (event.kind === 'breakthrough') {
-        void playExtra('修炼-突破');
-        // anim: false：气泡照出，但不联动说话动画——那会顶掉正在播的突破动画
-        void speak('刚刚突破进了下一个大境界。跟主人说一声。', '突破啦～', { ...options, anim: false });
-        diary.note(
-          now,
-          'cultivate',
-          `突破到${view?.label ?? '下一个大境界'}${event.skill ? `，领悟了${SKILLS[event.skill].name}` : ''}`,
-        );
+        // 突破的 `修炼-突破` 动画与那句感言都在渡劫的演出里（battle-show 的收场 + runTribulation 的结果感言），
+        // 这里只记日记——再播一遍、再说一句就是重复（§X4 每次渡劫只 +1 次模型调用）
+        diary.note(now, 'cultivate', `渡劫成功，突破到${view?.label ?? '下一个大境界'}`);
+      } else if (event.kind === 'offer') {
+        // 二选一挂出来了（菜单两项，10 分钟）：模板句，不调模型（§X4 每次渡劫只 +1 次）
+        void sayLine(`有两个新招式可以领悟：${SKILLS[event.a].name}和${SKILLS[event.b].name}，右键「修炼」里挑一个～`, {
+          ...options,
+          anim: false,
+        });
+      } else if (event.kind === 'choose') {
+        void sayLine(`我领悟了${SKILLS[event.skill].name}～`, options);
+        diary.note(now, 'cultivate', `领悟了${SKILLS[event.skill].name}`);
+      } else if (event.kind === 'tribulation-fail') {
+        void sayLine(event.lost > 0 ? `没扛住，修为退了 ${event.lost}` : '没扛住天雷，修为一点没退', options);
+        diary.note(now, 'cultivate', `渡劫没扛住，修为退了 ${event.lost}`);
       } else if (event.kind === 'rest') {
         void sayLine(`调息回来，修为 +${event.gain}`, options);
         diary.note(now, 'cultivate', `调息，修为 +${event.gain}`);
@@ -1638,6 +1650,19 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         if (result.ok !== true) log(`播放动画失败（${name}）：${JSON.stringify(result)}`);
       })
       .catch((error: unknown) => log(`播放动画失败（${name}）：${errorText(error)}`));
+  }
+
+  /**
+   * 播一段**动画池里的现有素材**（`/anim` 的名字形态；§X4 渡劫失败播「工作状态-垂头叹气冒汗」）。
+   * 池里的名字由用户的 main-config.jsonc 整段替换（animations.events.workStatus 那一档），
+   * 名字不在池里宿主回 unknown-animation——只是那一下没动画，气泡和气血条照旧（§2.3 的素材缺失口径）。
+   */
+  function playPooled(name: string, rate: number): Promise<void> {
+    return petRequest('POST', '/anim', { name, rate })
+      .then((result) => {
+        if (result.ok !== true) log(`播放池内动画失败（${name}）：${JSON.stringify(result)}`);
+      })
+      .catch((error: unknown) => log(`播放池内动画失败（${name}）：${errorText(error)}`));
   }
 
   // ---------- 心魔试炼（X3 演出） ----------
@@ -1724,12 +1749,87 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     closing.arena.close(afterMs);
   }
 
-  /** 快进：停掉剩下的步骤，直接看结果（菜单「修炼/快进」，有人敲门时也用它收场） */
+  /** 快进：停掉剩下的步骤，直接看结果（菜单「修炼/快进」，有人敲门时也用它收场；渡劫同样用它） */
   function skipTrial(): void {
     battle?.skip();
   }
 
-  /** 修炼的右键项（开关开着才有）：信息项带境界和百分比（变了才重新注册）；圆满时多一项「突破」 */
+  // ---------- 渡劫（X4） ----------
+
+  /**
+   * 开一场渡劫：扛天雷 → 成功进下一个大境界并挂出二选一，失败扣修为（不掉境界，不设冷却）。
+   * 演出复用 X3 的执行器，**没有对手窗口**（`foe: null`，也不开擂台：只有一只宠物一道一道挨雷，
+   * 气泡报「第 i/N 道天雷 -25」）；吃丹先播 `修炼-服丹`，每道雷 `修炼-挨雷`，
+   * 成功播 `修炼-突破`、失败播池里的 `工作状态-垂头叹气冒汗`。
+   * @param wantPill 主人点的是「服丹后渡劫」：气血上限 ×1.2，这一颗丹在 tribulationDone 里扣掉
+   */
+  async function runTribulation(wantPill: boolean): Promise<void> {
+    const practice = cultivationOn();
+    if (!practice || battle || trip || hosting) return;
+    const plan = practice.tribulationPlan(Date.now());
+    if (!plan) {
+      void say('还没修到圆满，先不急～');
+      return;
+    }
+    if (wantPill && !plan.canPill) {
+      void say('手里没有破境丹，炼成了再吃～');
+      return;
+    }
+    const you = practice.tribulationFighter(petName(), wantPill);
+    const events = tribulate(you, plan.strikes, plan.stage, `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+    // 台词报「第 i/N 道」的 N 用 plan 的雷数：没扛住时引擎提前收尾，事件里只有前几道雷
+    const steps = timeline(events, [you.name, '天雷'], Math.random, [you.skills, []], {
+      tribulation: { pill: wantPill, strikes: plan.strikes },
+    });
+    battle = new BattleShow(steps, {
+      self: {
+        // 渡劫没有对手，不指定朝向（素材朝左原样播即可，天雷在头顶）
+        play: (anim, rate, from) => void (from === 'pool' ? playPooled(anim, rate) : playExtra(anim, { rate })),
+        say: (line, durationMs) => void say(line, { anim: false, durationMs }),
+      },
+      foe: null,
+      // 渡劫不开擂台：没有对手，两条血没得画
+      arena: () => undefined,
+    });
+    void refreshMenu();
+    const end = events[events.length - 1];
+    const survived = end.kind === 'end' && end.winner === 0;
+    await battle.run();
+    battle = null;
+    // 中途退出了（dispose）：这场不算，境界与修为都不动
+    if (disposed) return;
+    // 结果进存档（属性加成、扣修为、丹数、二选一都在这一步）；冒泡与日记在 onCultivation
+    onCultivation(Date.now(), practice.tribulationDone(Date.now(), survived, wantPill), { anim: false });
+    // 结果感言走 compose（只带人设，口径同 X3 的赛后感言），生成不了用模板；anim: false 别顶掉收场动画
+    const instruction =
+      `你刚渡了一次劫（${plan.strikes} 道天雷，${wantPill ? '吃了破境丹' : '没吃丹'}），` +
+      `${survived ? `成功突破到${plan.nextLabel}` : '没扛住，被天雷劈回原形'}。跟主人说一句感言。` +
+      (survived ? '别提境界和招式。' : '渡劫失败不掉境界，歇一歇还能再渡，别灰心。');
+    const text = cleanText(
+      await compose(instruction, survived ? '渡劫成功啦，呼～' : '天雷太猛了，我没扛住……再来一次！'),
+      LINE_MAX,
+    );
+    void say(text, { anim: false });
+    void refreshMenu();
+  }
+
+  /**
+   * 渡劫的右键项（圆满时替换 X1 的「突破」）：直接渡；有丹时多一项「服丹后渡劫」
+   * （气血上限 ×1.2，一次最多吃 1 颗）。没在打、没出门、家里没客人时才有，和「心魔试炼」同一口径。
+   */
+  function tribulationActions(practice: Cultivation, actions: Map<string, () => unknown>): void {
+    if (battle || trip !== null || hosting !== null) return;
+    const plan = practice.tribulationPlan(Date.now());
+    if (!plan) return;
+    actions.set(`${MENU_CULTIVATION_GROUP}/渡劫`, () => void runTribulation(false));
+    if (plan.canPill) actions.set(`${MENU_CULTIVATION_GROUP}/服丹后渡劫`, () => void runTribulation(true));
+  }
+
+  /**
+   * 修炼的右键项（开关开着才有）：信息项带境界和百分比（变了才重新注册）；
+   * 圆满时是「渡劫」（有丹再多一项「服丹后渡劫」，§X4 替换掉 X1 的「突破」）；
+   * 渡劫成功后挂 10 分钟两项「领悟：X」；演一场时换成「快进」。
+   */
   function cultivationActions(): Map<string, () => unknown> {
     const actions = new Map<string, () => unknown>();
     const practice = cultivationOn();
@@ -1742,16 +1842,15 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
           `身法 ${now.stats.agility}、遁速 ${now.stats.speed}，有 ${now.weapons.length} 件法宝～`,
       );
     });
-    if (view.full) {
-      actions.set(`${MENU_CULTIVATION_GROUP}/突破`, () => {
-        const now = practice.view();
-        if (!now.full) {
-          void say('还没修到圆满，先不急～');
-          return;
-        }
-        onCultivation(Date.now(), practice.breakthrough(Date.now()));
-        void refreshMenu();
-      });
+    if (view.full) tribulationActions(practice, actions);
+    // 二选一：两项「领悟：X」（点了才消失；10 分钟没人挑就由 cultivation 在 tick 里随机定一个）
+    if (view.offer) {
+      for (const skill of [view.offer.a, view.offer.b]) {
+        actions.set(`${MENU_CULTIVATION_GROUP}/领悟：${SKILLS[skill].name}`, () => {
+          onCultivation(Date.now(), practice.choose(Date.now(), skill));
+          void refreshMenu();
+        });
+      }
     }
     // 心魔试炼：没在打、没出门、家里没客人时才有；打的时候换成「快进」
     if (battle) actions.set(`${MENU_CULTIVATION_GROUP}/快进`, skipTrial);
@@ -1762,8 +1861,14 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   // ---------- 右键菜单 ----------
 
+  /**
+   * 要注册的菜单项。宿主每个 owner 最多 20 项（`>` 就整份拒了，菜单从此不再更新），
+   * 所以这里按优先级兜底截断：固定的两项 + 修炼（最多 4：信息、渡劫、服丹后渡劫、领悟×2 中的一种组合）
+   * 在前，串门项在后——挤不下时先少列几个邻居 / 少几样一起玩和零食，「送客」「心魔试炼」「渡劫」这些都要留。
+   */
   function wantedLabels(): string[] {
-    return [MENU_LOOK, MENU_DIARY, ...cultivationActions().keys(), ...visitActions().keys()];
+    const labels = [MENU_LOOK, MENU_DIARY, ...cultivationActions().keys(), ...visitActions().keys()];
+    return labels.length > MENU_ITEMS_MAX ? labels.slice(0, MENU_ITEMS_MAX) : labels;
   }
 
   async function refreshMenu(force = false): Promise<void> {
