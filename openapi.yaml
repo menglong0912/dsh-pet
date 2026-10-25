@@ -551,7 +551,9 @@ paths:
         - `name` 给了就必须在该宠物的动画池内；`url` 给了就必须是 http/https 的完整地址；
         - `pet` **必填**，且必须是一只真实存在的桌宠（没给 → `pet-required`，不存在 → `unknown-pet`）；
         - `facing` **可选**，给了就必须是 `left` / `right` 之一，否则 → `bad-request`
-          （非法值**不静默忽略**，与 `POST /position` 的 `mode` 同一口径）。
+          （非法值**不静默忽略**，与 `POST /position` 的 `mode` 同一口径）；
+        - `rate` **可选**，给了就必须是 0.5–3 的有限数，否则 → `bad-request`
+          （非法值**不静默忽略**，与 `facing` 同一口径）。
 
         **朝向（`facing`，可选）**
 
@@ -564,6 +566,17 @@ paths:
         - `name` 与 `url` 两种形态**都适用**（`url` 形态虽然不走菜单语义，但镜像一样会贴）；
         - **显式值优先于渲染端"文字类动画（`noMirror` 分类）点播前强制朝左"那条镜像修正**：
           明确要 `right` 就给 `right`——代价是文字类动画里的文字会跟着镜像。
+
+        **倍速（`rate`，可选，0.5–3）**
+
+        播放这一段时渲染端设的 `video.playbackRate`。
+
+        - **不传就是常速**：`S` 的叶子里连这个字段都不写（"没要求"与形状上的默认在消费端是
+          可区分的，不会把缺省当成某个倍数写进渲染端）；
+        - 只对**这一段**生效：这一段播完、或被打断（点击 / 拖拽 / 下一次点播 / 回到动画链），
+          都会随消费端的下一次换源恢复常速，不需要单独的复位调用；
+        - `name` 与 `url` 两种形态**都适用**。用途是把第三方自带的 4–6 秒整段素材正好压进
+          调用方自己的演出节奏（比如对战的每一拍）。
 
         **跨域不由本插件解决**：两端消费端都是 `fetch` + blob（为了绕开流式加载的 stall），
         所以**跨域地址要求对方自己带 `Access-Control-Allow-Origin`**。插件与第三方插件在同一个
@@ -628,6 +641,16 @@ paths:
                     之一，否则 `ok: false` + `reason: bad-request`（非法值不静默忽略）。
                     显式值优先于"文字类动画点播前强制朝左"那条镜像修正。
                   example: right
+                rate:
+                  type: number
+                  minimum: 0.5
+                  maximum: 3
+                  description: |
+                    播放这一段的**倍速**（可选，0.5–3）：渲染端对这一段设 `video.playbackRate`，
+                    这一段播完或被打断就随下一次换源恢复常速。**不传 = 常速**；给了就必须是
+                    区间内的有限数，否则 `ok: false` + `reason: bad-request`（非法值不静默忽略）。
+                    `name` 与 `url` 两种形态都适用。
+                  example: 2
             examples:
               turn:
                 summary: 播一段转向动画（池内名字）
@@ -638,6 +661,11 @@ paths:
                 value:
                   name: 东张西望
                   facing: right
+              rate:
+                summary: 指定倍速（这一段 2 倍速播）
+                value:
+                  name: 东张西望
+                  rate: 2
               move:
                 summary: 播一段移动动画（会真的走过去，与菜单一致）
                 value:
@@ -650,7 +678,7 @@ paths:
         "200":
           description: |
             恒为 200（除 405/400）。失败通过 `ok: false` 表达，`reason` 可能是
-            `bad-request`（名字为空 / `facing` 非法 / `surface` 缺省或非法）、`pet-required`（没给 pet）、
+            `bad-request`（名字为空 / `facing` / `rate` 非法 / `surface` 缺省或非法）、`pet-required`（没给 pet）、
             `unknown-pet`、`unknown-animation`、`generate-error`（配置不可读等）、
             `pet-not-displayed`（带 `display`）。
           content:
@@ -2850,6 +2878,7 @@ components:
       description: |
         要播的一段动画。`name` 与 `url` **恰好一个**（由 `POST /anim` 在写入前保证）。
         `facing` **可选**：字段缺席 = 调用方没指定朝向，消费端**不动朝向**（不是回落 `left`）。
+        `rate` **可选**（0.5–3）：字段缺席 = 常速。
       properties:
         name:
           type: string
@@ -2875,6 +2904,13 @@ components:
             **不动朝向**（保持宠物当前朝向，不是回落 `left`）——所以"没要求"与"要求 `left`"在形状上
             就是可区分的。`name` / `url` 两种形态都可能有这个字段。
           example: right
+        rate:
+          type: number
+          description: |
+            调用方**显式指定**的倍速（`POST /anim` 的 `rate`，0.5–3）。**字段缺席 = 没指定** →
+            消费端按**常速**播这一段（不是回落某个倍数）。只对这一段生效：这一段播完或被打断，
+            消费端随下一次换源恢复常速。`name` / `url` 两种形态都可能有这个字段。
+          example: 2
 
     PositionLeaf:
       type: object

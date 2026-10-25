@@ -7,6 +7,7 @@
  *   POST /app/claude-hook   Claude Code hook 的 stdin JSON 原样转进来
  *   GET  /app/guest         串门客人窗口的页面（visit-windows.ts 开的窗口加载它）
  *   GET  /app/note          捎话小输入窗的页面（note-window.ts 开的窗口加载它）
+ *   GET  /app/arena         擂台小窗的页面（arena-window.ts 开的窗口加载它，对战演出时的两条气血条）
  *
  * 与插件路由同一条安全线：拒绝网页来源（带 Origin 且不是 null 的请求），本机程序直接调用。
  * 端口每次启动随机，写在 `$DSH_HOME/dsh-pet/app.json`（见 discovery.ts）。
@@ -14,6 +15,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { saveAppConfig } from './app-config';
+import { arenaPage } from './arena-window';
 import type { AppConfig } from './app-config';
 import type { AppFeatures } from './features';
 import { notePage } from './note-window';
@@ -71,9 +73,9 @@ async function handle(
     if (method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
     return send(res, 200, { snapshot: features.activity(), context: features.activityContext() });
   }
-  if (pathname === '/app/guest' || pathname === '/app/note') {
+  if (pathname === '/app/guest' || pathname === '/app/note' || pathname === '/app/arena') {
     if (method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
-    const page = pathname === '/app/guest' ? guestPage : notePage;
+    const page = pathname === '/app/guest' ? guestPage : pathname === '/app/note' ? notePage : arenaPage;
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'content-length': Buffer.byteLength(page),

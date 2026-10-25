@@ -12,7 +12,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { animationNames, decideAnim } from './anim.ts';
+import { ANIM_RATE_MAX, ANIM_RATE_MIN, animationNames, decideAnim } from './anim.ts';
 
 /** 与 assets/config.jsonc 同形状的动画配置：覆盖菜单树取的全部 7 个池 */
 const ANIMATIONS = {
@@ -272,5 +272,70 @@ describe('decideAnim —— facing（朝向，可选）', () => {
   test('facing 不影响 name / url 二选一那条校验', () => {
     assert.equal(decide({ name: '东张西望', url: 'https://x/y.webm', facing: 'left' }).ok, false);
     assert.equal(decide({ name: undefined, url: undefined, facing: 'left' }).ok, false);
+  });
+});
+
+describe('decideAnim —— rate（倍速，可选）', () => {
+  test('不传 / null → 通过且 rate 缺席（= 渲染端**常速**，不是回落某个倍数）', () => {
+    for (const over of [{}, { rate: undefined }, { rate: null }]) {
+      const d = decide(over);
+      assert.equal(d.ok, true, JSON.stringify(over) + ' 应通过');
+      assert.equal(d.ok === true && d.rate, undefined);
+    }
+  });
+
+  test('区间内（含两端）原样透出', () => {
+    for (const r of [ANIM_RATE_MIN, 1, 1.5, ANIM_RATE_MAX]) {
+      const d = decide({ rate: r });
+      assert.equal(d.ok, true, String(r) + ' 应通过');
+      assert.equal(d.ok === true && d.rate, r);
+    }
+  });
+
+  test('非法值 → bad-request（不静默忽略，与 facing 同一口径）', () => {
+    for (const bad of [
+      ANIM_RATE_MIN - 0.01,
+      ANIM_RATE_MAX + 0.01,
+      0,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      '1.5',
+      true,
+      {},
+      [],
+    ]) {
+      const d = decide({ rate: bad });
+      assert.equal(d.ok, false, String(bad) + ' 不应通过');
+      assert.equal(d.ok === false && d.reason, 'bad-request');
+      assert.match(d.ok === false ? d.message : '', /rate/);
+    }
+  });
+
+  test('name 与 url 两种形态都带 rate（演出要倍速播的就是那几段 url 素材）', () => {
+    const byName = decide({ rate: 2 });
+    assert.equal(byName.ok === true && byName.rate, 2);
+    const byUrl = decide({ name: undefined, url: 'https://cdn.example.com/x.webm', rate: 0.5 });
+    assert.equal(byUrl.ok, true);
+    assert.equal(byUrl.ok === true && byUrl.url, 'https://cdn.example.com/x.webm');
+    assert.equal(byUrl.ok === true && byUrl.rate, 0.5);
+  });
+
+  test('rate 非法先于宠物解析报错（参数是调用方的错，先纠它）', () => {
+    const d = decide({ rate: 9, requested: 'ghost' });
+    assert.equal(d.ok, false);
+    assert.equal(d.ok === false && d.reason, 'bad-request');
+  });
+
+  test('rate 不影响 name / url 二选一那条校验', () => {
+    assert.equal(decide({ name: '东张西望', url: 'https://x/y.webm', rate: 2 }).ok, false);
+    assert.equal(decide({ name: undefined, url: undefined, rate: 2 }).ok, false);
+  });
+
+  test('facing 与 rate 可以同时给', () => {
+    const d = decide({ facing: 'right', rate: 1.25 });
+    assert.equal(d.ok, true);
+    assert.equal(d.ok === true && d.facing, 'right');
+    assert.equal(d.ok === true && d.rate, 1.25);
   });
 });

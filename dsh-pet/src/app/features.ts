@@ -9,6 +9,9 @@
  *   - 把一天里的事记进宠物日记（diary.ts），第二天回到电脑前时补写前一天的日记；
  *   - 修炼（cultivation.ts）：在电脑前就涨修为，久坐提醒后离开会「调息」，Claude 干完活偶尔炼出破境丹；
  *     升级冒泡、记日记，右键「修炼」看境界和进度，圆满时点「突破」进下一个大境界；
+ *     右键「心魔试炼」打一场：心魔是暗色的客人窗口（visit-windows.ts），两边按引擎事件依次出招、
+ *     挨打、闪避（battle-show.ts 排时间线与执行器），头顶两条气血条（arena-window.ts），
+ *     演完照结果拿奖励、说一句赛后感言；
  *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口、visit-talk.ts 管怎么聊）：设置里开了才发信标、开接待端口；
  *     出门时自家宠物变半透明、把别人家的聊天转播回来，客人来了在自家宠物旁边开个小窗（能摸、能一起玩）；
  *     两边接着前文聊、主人家也会起话题；串门的台词只按人设生成，不带「主人此刻」；
@@ -34,7 +37,9 @@ import type { StandaloneAiService } from '../standalone/ai-provider';
 import { ActivityTracker, describeActivity, durationText } from './activity';
 import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
-import { SKILLS, WEAPONS } from './battle';
+import { SKILLS, WEAPONS, fight, shadowOf } from './battle';
+import { BattleShow, timeline } from './battle-show';
+import { arenaScoreboard, openArenaWindow } from './arena-window';
 import { ClaudeSessions } from './claude-hooks';
 import { Cultivation, stageLabel } from './cultivation';
 import type { CultivationEvent, CultivationView } from './cultivation';
@@ -93,6 +98,7 @@ import {
 } from './visit-talk';
 import type { PlayThing } from './visit-talk';
 import { AWAY_OPACITY, fadeHome, openGuestWindow, RELAY_OPACITY, watchHomePet } from './visit-windows';
+import type { ArenaWindow } from './arena-window';
 import type { GuestWindow, Rect, WindowElectron } from './visit-windows';
 
 const run = promisify(execFile);
@@ -124,6 +130,8 @@ const NOTE_RELAY_MS = 15_000;
 const SCREEN_ACTIVE_IDLE_SEC = 60;
 /** 应用刚说过话这么久内，自动碎碎念让一让（气泡默认显示 10 秒） */
 const SPOKE_HOLD_MS = 15_000;
+/** 打完到关掉心魔窗口 / 擂台之间的停顿（§X3：3 秒） */
+const CLOSE_HOLD_MS = 3_000;
 /** 前台是这些应用时视为「取不到」（桌宠自己的窗口被点到前台） */
 const SELF_APP_NAMES = new Set(['dsh-pet', 'Electron']);
 const SCREEN_SETTINGS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
@@ -354,22 +362,26 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return (await response.json()) as Record<string, unknown>;
   }
 
-  /** 说一句话的选项：配图（表情包池里的名称，插件按池校验）；要不要联动播一段说话动画 */
+  /** 说一句话的选项：配图（表情包池里的名称，插件按池校验）；要不要联动播一段说话动画；气泡显示多久 */
   interface SayOptions {
     image?: string;
     /** false = 只冒气泡不打断正在播的动画（突破这类演出期间的台词用） */
     anim?: boolean;
+    /** 气泡显示时长（毫秒）：演出的台词给成一步那么长，下一句自然顶替上一句 */
+    durationMs?: number;
   }
 
   async function say(text: string, options: SayOptions = {}): Promise<boolean> {
     // 出门在外时家里有话要说（提醒、看屏幕、Claude……）：先回家再说
     if (trip) await comeHome('called');
     const image = options.image;
+    const duration = options.durationMs;
     try {
       const result = await petRequest('POST', '/broadcast', {
         text,
         anim: options.anim ?? true,
         ...(image ? { image } : {}),
+        ...(duration === undefined ? {} : { duration }),
       });
       if (result.ok !== true) log(`说话失败：${JSON.stringify(result)}`);
       else lastSpokeAt = Date.now();
@@ -592,7 +604,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       if (!text) return { ok: false, reason: 'empty' };
       const meme = await memeFor(text);
       // 宠物被隐藏时插件不让说（pet-not-displayed）：如实报失败，别让调用方以为说出来了
-      if (!(await say(text, { image: meme?.name }))) return { ok: false, text, reason: 'say-failed' };
+      // 正在演一场（心魔）时也不联动说话动画：手动看屏幕照样能看，只是别顶掉演出的动画
+      if (!(await say(text, { image: meme?.name, ...(battle ? { anim: false } : {}) })))
+        return { ok: false, text, reason: 'say-failed' };
       diary.note(Date.now(), 'screen', `看了一眼主人的屏幕，说：「${text}」`);
       return { ok: true, text, ...(meme ? { image: meme.name } : {}) };
     } catch (error) {
@@ -682,7 +696,14 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const practice = cultivationOn();
     if (practice) {
       onCultivation(now, practice.tick(now, snap?.present ?? false));
-      if (snap?.present && trip === null && now >= meditateAt && !generating && now - lastSpokeAt >= SPOKE_HOLD_MS) {
+      if (
+        snap?.present &&
+        trip === null &&
+        battle === null &&
+        now >= meditateAt &&
+        !generating &&
+        now - lastSpokeAt >= SPOKE_HOLD_MS
+      ) {
         meditateAt = now + meditateGapMs();
         void playExtra('修炼-打坐');
       }
@@ -696,7 +717,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   }
 
   /**
-   * 到点该自动看屏幕：开着、没出门、人在且 activeIdleSec 内碰过键鼠、离上次够间隔、能看（本机模型 + 已授权）
+   * 到点该自动看屏幕：开着、没出门、没在演一场、人在且 activeIdleSec 内碰过键鼠、离上次够间隔、
+   * 能看（本机模型 + 已授权）
    * @param activeIdleSec 「最近碰过键鼠」的窗口（秒）
    */
   function screenDue(now: number, activeIdleSec = SCREEN_ACTIVE_IDLE_SEC): boolean {
@@ -704,6 +726,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return (
       config.screen.enabled &&
       trip === null &&
+      battle === null &&
       tracker.snapshot()?.present === true &&
       electron.powerMonitor.getSystemIdleTime() < activeIdleSec &&
       now - lastScreenAt >= config.screen.intervalMin * 60_000 &&
@@ -729,6 +752,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     lastWhisperTurnAt = now;
     // 出门在外：家里只剩个半透明的影子，不碎碎念
     if (trip) return true;
+    // 正在演一场（心魔试炼）：气泡按时间线一句一句走，碎碎念别来抢
+    if (battle) return true;
     // 拍与拍之间可能隔好几分钟，「碰过键鼠」放宽到这一拍以来：看视频 / 发呆一整拍仍然不看，
     // 但不会因为恰好在这一拍的瞬间停手了一分钟就错过（只按 60 秒卡，长间隔下几乎轮不到看屏幕）
     if (screenDue(now, Math.max(SCREEN_ACTIVE_IDLE_SEC, whisperPeriodSec()))) {
@@ -948,6 +973,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     canHost: () => trip === null && knockingOn === null,
     knocked(visitor) {
       log(`串门：${visitor.owner}（${visitor.address}）家的 ${visitor.pet} 来敲门`);
+      // 正在演一场（心魔）：照常接待，先把这场快进结束——客人窗口要站在宠物旁边，不能让两只叠着
+      skipTrial();
       // 熟人 + 开了「直接请进」 + 主人在电脑前：不用主人点头（VisitHost.knock 调这里之前就挂好了 pending，同步让进是安全的）
       if (shouldAutoAdmit(neighbors, visitor, deps.appConfig().visit.autoAdmitFriends, tracker.snapshot()?.present)) {
         void say(`熟人 ${visitor.owner} 家的 ${visitor.pet} 来啦，直接请它进来～`);
@@ -1012,6 +1039,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       return;
     }
     log(`串门：${visitor.owner} 家的 ${visitor.pet} 进门了`);
+    // 刚打完一场、窗口还没收摊：立刻关掉——客人窗口和心魔窗口都按同一套位置规则摆在宠物旁边，叠着不像话
+    closeTrial(0);
     const now = Date.now();
     // 进门时先把「记这次之前」的上次见面备忘算好，整趟都用它；再记这次见面（只记验证过身份的）
     const memory = visitor.id
@@ -1530,6 +1559,13 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /** 修炼（X2）：开关开着才建档；状态、修为来源都在 Cultivation 里，这里只接线 */
   let cultivation: Cultivation | null = null;
+  /**
+   * 正在演的一场（心魔试炼；X5 的切磋复用同一套）。非 null 时：菜单换成「快进」、
+   * 碎碎念与自动看屏幕让一让、平时打坐不播、有人来敲门先把这场快进结束、修炼冒泡不联动动画。
+   */
+  let battle: BattleShow | null = null;
+  /** 这场的心魔窗口与擂台（演完 3 秒关掉） */
+  let trialWindows: { guest: GuestWindow; arena: ArenaWindow } | null = null;
   /** 下次平时打坐最早什么时候（40–60 分钟一次） */
   let meditateAt = Date.now() + meditateGapMs();
 
@@ -1541,50 +1577,156 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return cultivation;
   }
 
-  /** 修炼事件：冒泡（排进现有的说话队列）+ 记日记 */
-  function onCultivation(now: number, events: CultivationEvent[]): void {
+  /**
+   * 修炼事件：冒泡（排进现有的说话队列）+ 记日记。
+   * @param options 冒空气泡的选项：X3 演完一场时的奖励冒泡要传 `{ anim: false }`——
+   *   收场的胜利 / 倒地动画还在播，带 anim 的气泡会把它顶掉（X2 真机踩过的坑）
+   */
+  function onCultivation(now: number, events: CultivationEvent[], options: SayOptions = {}): void {
     const view = cultivation?.view();
+    // 正在演一场：冒泡一律 anim: false——升级、炼丹这些气泡撞上演出，会把正在播的动画顶掉（X2 真机的坑）
+    if (battle) options = { ...options, anim: false };
     for (const event of events) {
       if (event.kind === 'stage-up') {
-        void sayLine(`修为精进，到${stageLabel(event.stage)}啦～`);
+        void sayLine(`修为精进，到${stageLabel(event.stage)}啦～`, options);
         diary.note(now, 'cultivate', `修为精进，到了${stageLabel(event.stage)}`);
       } else if (event.kind === 'full') {
-        void speak('修为刚修满一个大境界（圆满），可以突破了。跟主人说一声。', '可以突破了～');
+        void speak('修为刚修满一个大境界（圆满），可以突破了。跟主人说一声。', '可以突破了～', options);
         diary.note(now, 'cultivate', '修为圆满，可以突破了');
       } else if (event.kind === 'breakthrough') {
         void playExtra('修炼-突破');
         // anim: false：气泡照出，但不联动说话动画——那会顶掉正在播的突破动画
-        void speak('刚刚突破进了下一个大境界。跟主人说一声。', '突破啦～', { anim: false });
+        void speak('刚刚突破进了下一个大境界。跟主人说一声。', '突破啦～', { ...options, anim: false });
         diary.note(
           now,
           'cultivate',
           `突破到${view?.label ?? '下一个大境界'}${event.skill ? `，领悟了${SKILLS[event.skill].name}` : ''}`,
         );
       } else if (event.kind === 'rest') {
-        void sayLine(`调息回来，修为 +${event.gain}`);
+        void sayLine(`调息回来，修为 +${event.gain}`, options);
         diary.note(now, 'cultivate', `调息，修为 +${event.gain}`);
       } else if (event.kind === 'pill') {
-        void sayLine('炼成一颗破境丹～');
+        void sayLine('炼成一颗破境丹～', options);
         diary.note(now, 'cultivate', '炼成一颗破境丹');
+      } else if (event.kind === 'xp') {
+        // 一场的进账（心魔试炼 / 切磋）：只在真的进了账时才发（圆满、当天不算收益的场次都没有这条）
+        void sayLine(`这一场修为 +${event.amount}`, options);
       } else {
+        // 打赢心魔掉了一件还没有的法宝
+        void sayLine(`得到法宝：${WEAPONS[event.weapon].name}～`, options);
         diary.note(now, 'cultivate', `得到法宝：${WEAPONS[event.weapon].name}`);
       }
     }
   }
 
   /**
-   * 播一段修炼 / 战斗的新素材（修炼-打坐、修炼-突破 等）。这些素材不注册进动画池
+   * 播一段修炼 / 战斗的新素材（修炼-打坐、战斗-起手、法宝-水枪 等）。这些素材不注册进动画池
    * （用户的 main-config.jsonc 会整段替换 animations），一律走 /anim 的 url 形态；
    * 素材缺了只是那一下没动画，播之前不查文件在不在。
    * 注意：之后任何带 anim 的气泡（/broadcast 默认联动说话动画）都会把它顶掉——
    * 要边播边说话就用 anim: false 的气泡（X3 的对战演出都得这样）。
+   * @param facing 对战要面朝对手（素材统一画成朝左，宠物朝右站时整段镜像）
+   * @param rate 倍速（0.5–3）：让一段 4–6 秒的素材正好占满时间线上的一步（battle-show 算好传进来）
    */
-  function playExtra(name: string): Promise<void> {
-    return petRequest('POST', '/anim', { url: `${deps.petBase}/thumb/main/${encodeURIComponent(name)}.webm` })
+  function playExtra(name: string, options: { facing?: 'left' | 'right'; rate?: number } = {}): Promise<void> {
+    return petRequest('POST', '/anim', {
+      url: `${deps.petBase}/thumb/main/${encodeURIComponent(name)}.webm`,
+      ...(options.facing ? { facing: options.facing } : {}),
+      ...(options.rate === undefined ? {} : { rate: options.rate }),
+    })
       .then((result) => {
         if (result.ok !== true) log(`播放动画失败（${name}）：${JSON.stringify(result)}`);
       })
       .catch((error: unknown) => log(`播放动画失败（${name}）：${errorText(error)}`));
+  }
+
+  // ---------- 心魔试炼（X3 演出） ----------
+
+  /**
+   * 开一场心魔试炼：心魔窗口 + 擂台 → 引擎算一场 → 按时间线演 → 算奖励、记日记、说赛后感言。
+   * 演法（§X3）：每句台词走 /broadcast 的 anim: false、时长和一步相当，下一句自然顶替上一句；
+   * 台词不进说话队列（它们按时间线走），但碎碎念与自动看屏幕在这期间让路。
+   */
+  async function runTrial(): Promise<void> {
+    const practice = cultivationOn();
+    if (!practice || battle || trip || hosting) return;
+    const you = practice.fighter(petName());
+    const foe = shadowOf(you);
+    const events = fight(you, foe, `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+    const steps = timeline(events, [you.name, foe.name], Math.random, [you.skills, foe.skills]);
+    const guest = openGuestWindow(
+      electron,
+      `${new URL(deps.petBase).origin}/app/guest`,
+      foe.name,
+      homePet.box,
+      () => undefined, // 心魔不响应戳一下的反应
+      { tint: 'shadow' },
+    );
+    const arena = openArenaWindow(
+      electron,
+      `${new URL(deps.petBase).origin}/app/arena`,
+      homePet.box,
+      () => trialWindows?.guest.bounds() ?? null,
+    );
+    trialWindows = { guest, arena };
+    const scoreboard = arenaScoreboard({
+      self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
+      foe: { label: foe.name, maxHp: foe.hp },
+    });
+    // 自家宠物面朝对手：素材统一画成朝左，心魔站左边就原样播、站右边就镜像
+    battle = new BattleShow(steps, {
+      self: {
+        play: (anim, rate) => void playExtra(anim, { facing: guest.side === 'left' ? 'left' : 'right', rate }),
+        // 演出台词：anim 一律 false（带 anim 的气泡会顶掉正在播的动画），时长跟着时间线的一步
+        say: (line, durationMs) => void say(line, { anim: false, durationMs }),
+      },
+      foe: {
+        play: (anim, rate) => guest.play(anim, rate),
+        say: (line, durationMs) => guest.say(line, durationMs),
+      },
+      arena: (hp) => {
+        arena.place(homePet.box(), guest.bounds());
+        // 左右跟着两只的实际位置：心魔站在自家宠物左边时它那条在左
+        arena.update(scoreboard(hp, guest.side === 'left'));
+      },
+    });
+    void refreshMenu();
+    const end = events[events.length - 1];
+    const won = end.kind === 'end' && end.winner === 0;
+    await battle.run();
+    battle = null;
+    // 中途退出了（dispose）：别再把这场算进存档
+    if (disposed) return;
+    // 奖励（修为进账、掉法宝、战绩都在 trialDone 里；冒泡与日记在 onCultivation）
+    onCultivation(Date.now(), practice.trialDone(Date.now(), won), { anim: false });
+    diary.note(Date.now(), 'cultivate', won ? '心魔试炼打赢了' : '心魔试炼没打赢');
+    // 赛后感言：走 compose（只带人设，§2.2 的口径），生成不了用模板；anim: false 别顶掉收场动画
+    const instruction =
+      `你刚跟自己的心魔打了一架（${you.name} 对 ${foe.name}），${won ? '你赢了' : '你输了'}。` +
+      '跟主人说一句赛后感言。' +
+      (won ? '别提修为和法宝的数字。' : '输了不丢人，放平心态，下次再来。');
+    const text = cleanText(
+      await compose(instruction, won ? '心魔被打跑了，呼～' : '心魔太强了，我输了，下次再来～'),
+      LINE_MAX,
+    );
+    void say(text, { anim: false });
+    void refreshMenu();
+    // 3 秒后关心魔窗口和擂台
+    closeTrial(CLOSE_HOLD_MS);
+  }
+
+  /** 关掉这场的心魔窗口与擂台（3 秒后收尾用；有人来敲门、退出时立刻关） */
+  function closeTrial(afterMs: number): void {
+    const closing = trialWindows;
+    if (!closing) return;
+    trialWindows = null;
+    closing.guest.close(afterMs);
+    closing.arena.close(afterMs);
+  }
+
+  /** 快进：停掉剩下的步骤，直接看结果（菜单「修炼/快进」，有人敲门时也用它收场） */
+  function skipTrial(): void {
+    battle?.skip();
   }
 
   /** 修炼的右键项（开关开着才有）：信息项带境界和百分比（变了才重新注册）；圆满时多一项「突破」 */
@@ -1611,6 +1753,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         void refreshMenu();
       });
     }
+    // 心魔试炼：没在打、没出门、家里没客人时才有；打的时候换成「快进」
+    if (battle) actions.set(`${MENU_CULTIVATION_GROUP}/快进`, skipTrial);
+    else if (trip === null && hosting === null)
+      actions.set(`${MENU_CULTIVATION_GROUP}/心魔试炼`, () => void runTrial());
     return actions;
   }
 
@@ -1734,6 +1880,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       disposed = true;
       if (tickTimer !== null) clearTimeout(tickTimer);
       noteOpener.dispose();
+      // 正在演一场：停掉剩下的步骤、立刻收窗口（不留下空转的心魔与擂台）
+      battle?.dispose();
+      battle = null;
+      closeTrial(0);
       // 在别人家做客：告个辞（不等）；家里的客人窗口关掉
       void comeHome('called');
       if (hosting && hosting.openerTimer !== null) clearTimeout(hosting.openerTimer);

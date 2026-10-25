@@ -208,12 +208,14 @@ export type PetFacing = 'left' | 'right';
  * `facing`：调用方**显式指定**的朝向（可选）。`undefined` = 没指定 → 消费端**不动朝向**，
  * 保持宠物当前朝向——**不是**"回落 left"（叶子写端只在显式给了时才写这个字段，所以"没要求"
  * 与"要求 left"在形状上就是可区分的）。两种形态都适用。
+ * `rate`：调用方**显式指定**的倍速（可选，宿主已卡在 0.5–3）。`undefined` = 常速；消费端播这一段
+ * 时设 `video.playbackRate`，这一段结束或被打断就恢复 1。两种形态都适用，形状非法当"没给"。
  */
 export function readAnim(
   leaf: StateLeaf,
-): { name?: string; url?: string; playbackId?: string; facing?: PetFacing } | null {
+): { name?: string; url?: string; playbackId?: string; facing?: PetFacing; rate?: number } | null {
   if (!leaf.data || typeof leaf.data !== 'object') return null;
-  const d = leaf.data as { name?: unknown; url?: unknown; playbackId?: unknown; facing?: unknown };
+  const d = leaf.data as { name?: unknown; url?: unknown; playbackId?: unknown; facing?: unknown; rate?: unknown };
   const name = typeof d.name === 'string' && d.name ? d.name : undefined;
   const url = typeof d.url === 'string' && d.url ? d.url : undefined;
   // 两个都缺席 = 形状非法（宿主写端保证恰好一个，这里不替它猜）
@@ -224,6 +226,8 @@ export function readAnim(
     playbackId: typeof d.playbackId === 'string' && d.playbackId ? d.playbackId : undefined,
     // 朝向：只认两个字面量，其余（含缺省、老 host、脏值）一律 undefined = 不动朝向
     facing: d.facing === 'left' || d.facing === 'right' ? d.facing : undefined,
+    // 倍速：只认正的有限数，其余（含缺省、老 host、脏值）一律 undefined = 常速（写端已校验，这里只是防御）
+    rate: typeof d.rate === 'number' && Number.isFinite(d.rate) && d.rate > 0 ? d.rate : undefined,
   };
 }
 

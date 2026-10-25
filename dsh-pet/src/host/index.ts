@@ -1946,7 +1946,9 @@ export function apply(ctx: any): void {
     //   pet **必填**（空串 → pet-required），且须真实存在（否则 unknown-pet）；
     //   facing **可选**（left / right）：给了就必须合法（非法 → bad-request），**没给就不动朝向**
     //     ——叶子里连字段都不写，渲染端保持宠物当前朝向（不是"回落 left"）。显式值优先于渲染端
-    //     "文字类动画点播前强制朝左"那条镜像修正（调用方明确要哪个朝向就给哪个）。
+    //     "文字类动画点播前强制朝左"那条镜像修正（调用方明确要哪个朝向就给哪个）；
+    //   rate **可选**（0.5–3）：给了就写进叶子，渲染端播这一段时设 video.playbackRate，
+    //     这一段结束或被打断就恢复常速；没给时行为一字不变（叶子里不写字段）。
     if (rest === 'anim') {
       if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
       let parsed: unknown;
@@ -1964,6 +1966,7 @@ export function apply(ctx: any): void {
           name: o.name,
           url: o.url,
           facing: o.facing,
+          rate: o.rate,
         });
         if (!d.ok) return { kind: 'json', status: 200, obj: { ok: false, reason: d.reason, message: d.message } };
         // 显示端对齐：不满足 → pet-not-displayed（+ 实际 display），早于锁门禁
@@ -1976,13 +1979,14 @@ export function apply(ctx: any): void {
         // 记录里的标识：name 形态是动画名，url 形态就是那个地址（纯记录，不参与任何判定）。
         // 叶子形状：name 与 url **恰好一个**（判定层保证），消费端按字段名决定走不走菜单语义
         // ——url 是裸地址，没有"文字类要镜像修正 / 移动类走真实位移"这些属性。
-        // `facing` 只在调用方**显式给了**时才进叶子：没给 = 不动朝向，叶子里连字段都没有
-        //（消费端据此区分"没要求"和"要求 left"，不会把缺省当成 left）。
+        // `facing` / `rate` 只在调用方**显式给了**时才进叶子：没给 = 不动朝向 / 常速，
+        // 叶子里连字段都没有（消费端据此区分"没要求"和"要求 left / 要求倍速"）。
         const record = playback.create(d.petId, d.url ?? d.name ?? '');
         state.writePet(d.petId, 'anim', {
           ...(d.url !== undefined ? { url: d.url } : { name: d.name }),
           playbackId: record.playbackId,
           ...(d.facing === undefined ? {} : { facing: d.facing }),
+          ...(d.rate === undefined ? {} : { rate: d.rate }),
         });
         return { kind: 'json', status: 200, obj: { ok: true, playbackId: record.playbackId } };
       } catch (e) {

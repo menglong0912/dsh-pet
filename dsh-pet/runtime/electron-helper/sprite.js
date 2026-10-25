@@ -545,8 +545,13 @@ class PetSprite {
   }
 
   // 双缓冲切换（与浏览器同一套：前台 opacity 切换 + 降级视频清 handler 并停播，防残留 ended 雪崩）
-  switchTo(next, nextOnce, playbackId, url) {
+  // `rate`（可选）= 这一次点播要的倍速（POST /anim 的 rate，宿主已卡在 0.5–3）。**每次换源都写一遍**：
+  // 没给就写 1，所以上一段的倍速不会漏进下一段——这一段播完或被打断（点击 / 拖拽 / 碎碎念 / 顶掉 /
+  // 解冻回 idle）都会走下一次换源，恢复常速不需要单独的复位时机。
+  switchTo(next, nextOnce, playbackId, url, rate) {
     if (!next) return;
+    // 形状不正（老 host、脏值）当常速：读取端已归一过一次，这里只是渲染端自己的兜底
+    const playRate = typeof rate === 'number' && Number.isFinite(rate) && rate > 0 ? rate : 1;
     const pending = this.pending;
     if (pending && pending.anim === next && pending.once === nextOnce) {
       // 防重命中（单动画点击时目标=当前动画，不重播）：仍消费 Q 弹标记，压当前前台视频，
@@ -554,6 +559,12 @@ class PetSprite {
       if (this.pendingSquash) {
         this.pendingSquash = false;
         this.startSquash(this.front === 0 ? this.videoA : this.videoB);
+      }
+      // 没换源也要照办调用方**显式给了**的倍速（同一段动画连着点播两次、第二次要更快）；
+      // 没给就不动，免得把正在播的那一段凭空恢复成常速。
+      if (rate !== undefined) {
+        const front = this.front === 0 ? this.videoA : this.videoB;
+        if (front) front.playbackRate = playRate;
       }
       // 这次点播的目标**本来就在播**（没换源，但确实在播）→ 如实回 playing，
       // 否则调用方只能干等到 timeout（host 对终态幂等，重复上报无害）
@@ -572,6 +583,7 @@ class PetSprite {
     // scheme 卡在 http/https，这里**不经 bridge、也不拼 BASE**（地址本身就与本页 origin 无关）；
     // name 形态照旧按「素材根 + 名字」拼（名字即文件名）。
     el.src = url || this.assetBase + encodeURIComponent(next) + (S.ANIMATION_EXT || '.webm');
+    el.playbackRate = playRate;
     el.loop = !nextOnce;
     el.muted = true;
     el.autoplay = true;
@@ -618,6 +630,9 @@ class PetSprite {
       this.pending = null;
       this.playback = playbackId || null;
       el.style.transform = this.facing === 'right' ? 'scaleX(-1)' : '';
+      // 换源与 load() 之后 Chrome 可能把倍速打回默认值（见 HTMLMediaElement 的 load 算法），
+      // 就位时再写一次，保证播出去的这一段就是调用方要的速度。
+      el.playbackRate = playRate;
       el.play()
         .then(() => {
           // 只有 play() 兑现才代表"确实开始出画"（loadeddata 只代表可解码）
@@ -640,10 +655,10 @@ class PetSprite {
     if (el.readyState >= 2) onReady();
   }
 
-  playOnce(name, playbackId, url) {
+  playOnce(name, playbackId, url, rate) {
     this.anim = name;
     this.once = true;
-    this.switchTo(name, true, playbackId, url);
+    this.switchTo(name, true, playbackId, url, rate);
   }
 
   // 直接播一个**外部地址**（POST /anim 的 url 参数，issue #122 第 1 条）。
@@ -651,9 +666,9 @@ class PetSprite {
   // 移动类走真实位移），裸地址没有"是不是文字类 / 是不是移动类"这些属性。这里只做"插播一段"
   // ——停掉漫游/移动，换源播一次，播完由 handleEnded 回到正常动画链（与菜单点一下的 once 同义）。
   // `name` 位置传地址本身：它同时是 pending 的防重键与日志里的标识，地址天然唯一。
-  playUrlOnce(url, playbackId) {
+  playUrlOnce(url, playbackId, rate) {
     this.stopMove();
-    this.playOnce(url, playbackId, url);
+    this.playOnce(url, playbackId, url, rate);
   }
 
   /**
@@ -756,6 +771,10 @@ class PetSprite {
   }
 
   handleEnded() {
+    // 倍速只属于刚播完的这一段（POST /anim 的 rate，X3 的演出用）：这里恢复常速，
+    // 下面的随机链 / 档位动画照旧 1 倍。「被打断」那一半由 switchTo 兜着——换源每次都重写。
+    const endedEl = this.front === 0 ? this.videoA : this.videoB;
+    if (endedEl && endedEl.playbackRate !== 1) endedEl.playbackRate = 1;
     // 播放回执：前台视频真的播完了 → 如实回 ended。放在拖拽守卫**之前**：
     // "播完了"是既成事实，拖拽守卫管的是动画链怎么推进，不该影响回执的准确性。
     if (this.playback) {
@@ -842,7 +861,7 @@ class PetSprite {
 
   // ---- 漫游（rAF 驱动，动画首尾各 leadSec/tailSec 秒原地不动；几何在 shared/planMove） ----
   // preferredName 传入时固定使用该动画（右键菜单点播移动动画），否则与随机链一致随机选
-  tryMove(preferredName, playbackId) {
+  tryMove(preferredName, playbackId, rate) {
     if (this.moveRef !== null || this.pendingMove || this.throwRef !== null) return true;
     const moves = this.animations.moves;
     const actions = moves.actions;
@@ -884,7 +903,8 @@ class PetSprite {
     this.pendingMove = { ...plan, dir, leadSec: mp.leadSec, tailSec: mp.tailSec };
     this.anim = chosen.name;
     this.once = true;
-    this.switchTo(chosen.name, true, playbackId);
+    // rate（POST /anim 点播移动动画时给的倍速）跟着换源一起走：/anim 的 name 形态两条路都要生效
+    this.switchTo(chosen.name, true, playbackId, undefined, rate);
     return chosen.name;
   }
 
@@ -1787,6 +1807,8 @@ class PetSprite {
     if (!leaf.anim) return;
     // 回执归属：这一段动画若来自第三方点播，编号要跟着换源一起走（自播动画传 null）
     const playbackId = typeof leaf.playbackId === 'string' && leaf.playbackId ? leaf.playbackId : null;
+    // 倍速同理（POST /anim 的 rate，events.js 原样带进这个 leaf）：undefined = 常速
+    const rate = typeof leaf.rate === 'number' ? leaf.rate : undefined;
     // 文字类（noMirror）朝右站姿是镜像的：点播前强制朝左，避免文字镜像（与浏览器随机链"朝右不选文字"同语义）。
     // `keepFacing` 时跳过：调用方已显式指定朝向，显式值优先（要 right 就给 right，哪怕文字会镜像）。
     if (!keepFacing && S.isNoMirrorAnimation(this.animations.categories, leaf.anim) && this.facing === 'right') {
@@ -1795,14 +1817,14 @@ class PetSprite {
     // 点播移动动画：走真实移动（与随机游走同一套：边界检查 / 随机距离 / leadSec·tailSec / dir），
     // 仅"选哪个动画"由菜单决定；挪不动（false）退化纯播放
     if (this.animations.moves.actions.some((a) => a.name === leaf.anim)) {
-      const moved = this.tryMove(leaf.anim, playbackId);
-      if (moved === false) this.playOnce(leaf.anim, playbackId);
+      const moved = this.tryMove(leaf.anim, playbackId, rate);
+      if (moved === false) this.playOnce(leaf.anim, playbackId, undefined, rate);
       // moved === true = 已有移动/抛掷在进行中（tryMove 提前返回，**根本没换源**）：
       // 本段点播不会真的播起来 → 如实回 failed/busy，而不是让调用方干等到 timeout
       else if (moved === true && playbackId) this.reportPlayback(playbackId, 'failed', 'busy');
       return;
     }
-    this.playOnce(leaf.anim, playbackId);
+    this.playOnce(leaf.anim, playbackId, undefined, rate);
   }
 
   closeMenu() {

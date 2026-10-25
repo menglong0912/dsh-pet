@@ -1157,6 +1157,17 @@
             </div>
 
             <div class="row">
+              <label for="anim-rate">倍速</label>
+              <div class="ctl">
+                <input id="anim-rate" type="number" min="0.5" max="3" step="0.1" placeholder="不填 = 常速" />
+                <span class="hint">
+                  可选（0.5–3）。只对<b>这一段</b>生效：渲染端设 video.playbackRate，这一段播完或被打断
+                  就随下一次换源恢复常速。超区间的值会被拒（bad-request），不会静默忽略。
+                </span>
+              </div>
+            </div>
+
+            <div class="row">
               <label></label>
               <div class="ctl">
                 <button type="button" class="btn primary" id="anim-play">播放</button>
@@ -3238,6 +3249,17 @@
       // 朝向（可选）：空值 = 不指定，**连字段都不发**——宿主据此区分"没要求"与"要求 left"
       const facing = $("anim-facing").value;
       if (facing) body.facing = facing;
+      // 倍速（可选）：空值 = 常速，同样连字段都不发；只在 0.5–3 内才发，超区间交给宿主拒
+      // 反而看不清校验——本地先拦一道并提示
+      const rateText = $("anim-rate").value.trim();
+      if (rateText !== "") {
+        const rate = Number(rateText);
+        if (!Number.isFinite(rate) || rate < 0.5 || rate > 3) {
+          res.textContent = "倍速必须是 0.5–3 的数（留空 = 常速）";
+          return;
+        }
+        body.rate = rate;
+      }
       stopPlaybackWatch("重新点播"); // 新的一次点播：先停掉上一次的回执轮询
       res.textContent = "点播中…";
       const r = await POST("/anim" + actQuery(petId), { body });

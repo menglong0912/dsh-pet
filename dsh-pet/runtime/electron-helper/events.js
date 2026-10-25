@@ -335,6 +335,8 @@ function applyWorkStatusLeaf(leaf) {
  *  `facing`（可选）= 调用方显式指定的朝向：**换源之前**赋给 sprite——switchTo 是在 onReady 里按
  *  this.facing 贴 scaleX(-1) 的，晚一步就赶不上这一趟。没给就一个字都不动（保持宠物当前朝向，
  *  而不是回落 left）；给了就跳过"文字类动画点播前强制朝左"那条修正（显式值优先）。
+ *  `rate`（可选）= 调用方显式指定的倍速（宿主已卡在 0.5–3）：跟着换源一起写进那一段视频元素，
+ *  这一段播完或被打断就随下一次换源恢复常速（见 sprite.switchTo）。没给 = 常速。
  *  petId 由路径解析出来（pets.<id>.anim）；本窗口只装一只宠物，按 id 命中即可。 */
 function applyAnimLeaf(petId, leaf) {
   const hit = S.readAnim(leaf);
@@ -343,9 +345,9 @@ function applyAnimLeaf(petId, leaf) {
     if (s.pet.id !== petId) continue;
     const explicitFacing = hit.facing !== undefined;
     if (explicitFacing) s.facing = hit.facing; // 必须在换源前：switchTo 里按它贴 scaleX(-1)
-    if (hit.url !== undefined) s.playUrlOnce(hit.url, hit.playbackId);
+    if (hit.url !== undefined) s.playUrlOnce(hit.url, hit.playbackId, hit.rate);
     else if (hit.name !== undefined)
-      s.onMenuAction({ label: hit.name, anim: hit.name, playbackId: hit.playbackId }, explicitFacing);
+      s.onMenuAction({ label: hit.name, anim: hit.name, playbackId: hit.playbackId, rate: hit.rate }, explicitFacing);
   }
 }
 

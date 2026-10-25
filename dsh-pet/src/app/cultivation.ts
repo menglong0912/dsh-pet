@@ -86,7 +86,13 @@ export type CultivationEvent =
   | { kind: 'breakthrough'; skill?: SkillId }
   | { kind: 'rest'; gain: number }
   | { kind: 'pill' }
-  | { kind: 'drop'; weapon: WeaponId };
+  | { kind: 'drop'; weapon: WeaponId }
+  /**
+   * 这一笔实际进了账的修为（X3 打完一场要照它冒泡「修为 +30」）。
+   * 只在真的加进去时发（amount > 0）：圆满之后多出来的不要、当天不算收益的场次，都不发——
+   * 冒泡「+30」而存档一点没动是骗人。一次升级跨两个小境界会发多条。
+   */
+  | { kind: 'xp'; amount: number };
 
 /** 设置页和右键菜单用的只读视图 */
 export interface CultivationView {
@@ -280,10 +286,14 @@ export class Cultivation {
     this.dirty = true;
   }
 
-  /** 修为进账：满一个小境界就升下一个、余下带过去；圆满（大境界最后一段修满）就停住，多出来的不要 */
-  private addXp(amount: number): CultivationEvent[] {
+  /**
+   * 修为进账：满一个小境界就升下一个、余下带过去；圆满（大境界最后一段修满）就停住，多出来的不要。
+   * @returns events = 升级 / 圆满；added = **实际进了账**的数（圆满之后是 0）——
+   *   trialDone / sparDone 拿它发一条 `xp` 事件，X3 打完才敢照实冒泡「修为 +30」
+   */
+  private addXp(amount: number): { events: CultivationEvent[]; added: number } {
     const events: CultivationEvent[] = [];
-    if (isFullStage(this.stage) && this.progress >= stageReq(this.stage)) return events; // 已经圆满：不再涨
+    if (isFullStage(this.stage) && this.progress >= stageReq(this.stage)) return { events, added: 0 }; // 已经圆满：不再涨
     const beforeStage = this.stage;
     const beforeProgress = this.progress;
     let left = amount;
@@ -309,7 +319,7 @@ export class Cultivation {
       events.push({ kind: 'stage-up', stage: this.stage });
     }
     if (this.stage !== beforeStage || this.progress !== beforeProgress) this.dirty = true;
-    return events;
+    return { events, added: amount - left };
   }
 
   /** 在电脑前每满 1 分钟 +1（心浮气躁时攒 2 分钟才 +1）；本地 0–4 点不涨；每天封顶 240 */
@@ -329,7 +339,9 @@ export class Cultivation {
         this.minuteDebtMs -= perPoint;
         this.today.presence += 1;
         this.dirty = true;
-        events.push(...this.addXp(1));
+        // 在场涨的这点修为不另发 xp 事件：tick 一分钟一条会把冒泡刷满，
+        // 需要照实报进账的地方（心魔、切磋）自己有收益
+        events.push(...this.addXp(1).events);
       }
       if (this.today.presence >= PRESENCE_DAILY_MAX) this.minuteDebtMs = 0;
     }
@@ -355,8 +367,9 @@ export class Cultivation {
       if (now - this.lastSitAt < REST_WINDOW_MS && this.today.rests < REST_DAILY_MAX) {
         this.today.rests += 1;
         this.dirty = true;
+        // rest 事件本来就带 gain（加了多少修为），不再另发一条 xp
         events.push({ kind: 'rest', gain: REST_GAIN });
-        events.push(...this.addXp(REST_GAIN));
+        events.push(...this.addXp(REST_GAIN).events);
       }
     }
     this.save();
@@ -385,7 +398,9 @@ export class Cultivation {
     let events: CultivationEvent[] = [];
     if (this.today.trial < 1) {
       this.today.trial = 1;
-      events = this.addXp(won ? TRIAL_WIN_XP : TRIAL_LOSE_XP);
+      const gained = this.addXp(won ? TRIAL_WIN_XP : TRIAL_LOSE_XP);
+      events = gained.events;
+      if (gained.added > 0) events.unshift({ kind: 'xp', amount: gained.added });
       if (won && this.rng() < DROP_CHANCE) {
         const weapon = drawDropWeapon(this.weapons, this.rng);
         if (weapon) {
@@ -406,7 +421,9 @@ export class Cultivation {
     let events: CultivationEvent[] = [];
     if (!this.today.spars.includes(id) && this.today.spars.length < SPAR_DAILY_MAX) {
       this.today.spars.push(id);
-      events = this.addXp(won ? SPAR_WIN_XP : SPAR_LOSE_XP);
+      const gained = this.addXp(won ? SPAR_WIN_XP : SPAR_LOSE_XP);
+      events = gained.events;
+      if (gained.added > 0) events.unshift({ kind: 'xp', amount: gained.added });
     }
     this.save();
     return events;

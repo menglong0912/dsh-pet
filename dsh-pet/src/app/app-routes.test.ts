@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { appNeighborsHandler, petSettingsHandler } from './app-routes.ts';
+import { appNeighborsHandler, createAppRoutes, petSettingsHandler } from './app-routes.ts';
 import type { AppFeatures } from './features.ts';
 
 /** 起一个 HTTP 服务，跑完 fn 关掉 */
@@ -149,6 +149,57 @@ test('app neighbors route serves the book, applies each action, and guards ident
       // 功能还没起来（app ready 之前）：503
       current = null;
       assert.equal((await fetch(base)).status, 503);
+    },
+  );
+});
+
+test('/app/arena 回擂台页面（X3）：与 /app/guest、/app/note 同一口径', async () => {
+  const handler = createAppRoutes(
+    () => ({ say: async () => true }) as unknown as AppFeatures,
+    () => undefined,
+  );
+  await serve(
+    (req, res) => {
+      const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+      if (!handler(req, res, pathname)) {
+        res.writeHead(404);
+        res.end();
+      }
+    },
+    async (base) => {
+      for (const page of ['/app/guest', '/app/note', '/app/arena']) {
+        const got = await fetch(base + page);
+        assert.equal(got.status, 200, page);
+        assert.match(got.headers.get('content-type') ?? '', /text\/html/, page);
+        assert.equal(got.headers.get('cache-control'), 'no-store', page);
+        assert.match(await got.text(), /^<!doctype html>/, page);
+        // 非 GET 不发明新的读端点
+        assert.equal((await fetch(base + page, { method: 'POST' })).status, 405, page);
+      }
+      // 网页来源照旧拒绝（这三个页面都不例外）
+      const web = await fetch(`${base}/app/arena`, { headers: { origin: 'https://evil.example' } });
+      assert.equal(web.status, 403);
+      // 功能还没起来：/app/* 一律 503（包括擂台页）
+      let ready = false;
+      const later = createAppRoutes(
+        () => (ready ? ({ say: async () => true } as unknown as AppFeatures) : null),
+        () => undefined,
+      );
+      assert.equal(ready, false);
+      await serve(
+        (req, res) => {
+          const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+          if (!later(req, res, pathname)) {
+            res.writeHead(404);
+            res.end();
+          }
+        },
+        async (other) => {
+          assert.equal((await fetch(`${other}/app/arena`)).status, 503);
+          ready = true;
+          assert.equal((await fetch(`${other}/app/arena`)).status, 200);
+        },
+      );
     },
   );
 });

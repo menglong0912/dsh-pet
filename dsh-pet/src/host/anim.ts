@@ -30,10 +30,15 @@ export type AnimFailure = 'bad-request' | 'pet-required' | 'unknown-pet' | 'unkn
  */
 export type PetFacing = 'left' | 'right';
 
+/** 倍速的合法区间（X3 的演出用：让一段素材正好占满时间线上的一步） */
+export const ANIM_RATE_MIN = 0.5;
+export const ANIM_RATE_MAX = 3;
+
 /** 决策结论：通过则给出最终要写进 S 的内容（`name` 与 `url` **恰好一个**），否则给出显式原因。
- *  `facing` **可选**：undefined = 调用方没指定，渲染端**不动朝向**（不是"回落 left"）。 */
+ *  `facing` **可选**：undefined = 调用方没指定，渲染端**不动朝向**（不是"回落 left"）。
+ *  `rate` **可选**：undefined = 常速；给了就是渲染端这一段要设的 `video.playbackRate`。 */
 export type AnimDecision =
-  | { ok: true; petId: string; name?: string; url?: string; facing?: PetFacing }
+  | { ok: true; petId: string; name?: string; url?: string; facing?: PetFacing; rate?: number }
   | { ok: false; reason: AnimFailure; message: string };
 
 /** 字符串数组收窄（配置里的池子；非数组/空串 → 空数组） */
@@ -132,6 +137,7 @@ export function normalizeHttpUrl(v: unknown): string | null {
  * @param name 外部给的动画名（未规范化）
  * @param url 外部给的素材地址（未规范化）
  * @param facing 外部给的朝向（**可选**：没给 → 渲染端不动朝向）
+ * @param rate 外部给的倍速（**可选**：没给 → 常速）
  */
 export function decideAnim(args: {
   cfg: Record<string, Record<string, unknown>>;
@@ -139,6 +145,7 @@ export function decideAnim(args: {
   name: unknown;
   url: unknown;
   facing?: unknown;
+  rate?: unknown;
 }): AnimDecision {
   const { cfg, requested } = args;
 
@@ -155,6 +162,21 @@ export function decideAnim(args: {
     const f = petFacing(args.facing);
     if (f === null) return { ok: false, reason: 'bad-request', message: 'facing 必须是 left / right' };
     facing = f;
+  }
+
+  // rate **可选**（0.5–3）：没给（undefined / null）→ 常速，叶子里连字段都不写；给了就必须是区间内的
+  // 有限数，非法值不静默忽略（与 facing 同一口径）。同样放在宠物解析之前——参数是调用方的错，先纠它。
+  let rate: number | undefined;
+  if (args.rate !== undefined && args.rate !== null) {
+    if (
+      typeof args.rate !== 'number' ||
+      !Number.isFinite(args.rate) ||
+      args.rate < ANIM_RATE_MIN ||
+      args.rate > ANIM_RATE_MAX
+    ) {
+      return { ok: false, reason: 'bad-request', message: `rate 必须是 ${ANIM_RATE_MIN}–${ANIM_RATE_MAX} 的数` };
+    }
+    rate = args.rate;
   }
 
   // pet **必填**且必须真实存在（与 /broadcast、/position 同一口径）。收紧前这里是
@@ -175,7 +197,7 @@ export function decideAnim(args: {
     if (url === null) {
       return { ok: false, reason: 'bad-request', message: 'url 必须是 http/https 的完整地址' };
     }
-    return { ok: true, petId, url, facing };
+    return { ok: true, petId, url, facing, rate };
   }
 
   // name 形态：名字必须是该宠物菜单里点得到的动画。播放端"名字即文件名"，播不存在的动画只会静默失败，
@@ -185,5 +207,5 @@ export function decideAnim(args: {
     return { ok: false, reason: 'unknown-animation', message: '没有这个动画：' + name };
   }
 
-  return { ok: true, petId, name, facing };
+  return { ok: true, petId, name, facing, rate };
 }

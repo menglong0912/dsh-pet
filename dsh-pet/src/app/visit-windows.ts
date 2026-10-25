@@ -162,6 +162,31 @@ export function pinkPixels(data: Uint8ClampedArray): void {
 }
 
 /**
+ * 心魔的配色：压暗 + 去饱和（只留亮度）+ 统一偏紫，一只暗色影子。
+ * 和 pinkPixels 一样只在页面里逐帧处理——它跟客人不同的是**所有像素一起改**（影子不分蓝的粉的），
+ * 所以按亮度转灰再乘一组紫色系数就够，不用挑色相。
+ * 透明像素照原样留着（抠像的边缘不能变成实心紫块）。
+ *
+ * **所有常数必须写死在函数体里**（和 pinkPixels 同一口径）：本函数经 `toString()` 内联进
+ * guest 页面的 `<script>`，页面里没有模块作用域——引用外面的常量，页面里逐帧就是
+ * `ReferenceError`（X3 真机踩过：`SHADOW_LEVEL is not defined`，心魔整只画不出来）。
+ */
+export function shadowPixels(data: Uint8ClampedArray): void {
+  /** 压暗到几成亮度 */
+  const level = 0.45;
+  /** 偏紫的三个系数（绿压得最狠、蓝最高 → 剩下的就是紫）；幅度定在饱和度约 0.3，太艳就不像影子了 */
+  const tint = [0.95, 0.8, 1.15];
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] === 0) continue;
+    // 灰度（Rec.601，跟肉眼亮度接近）→ 压暗 → 偏紫
+    const gray = (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]) * level;
+    data[i] = Math.min(255, gray * tint[0]);
+    data[i + 1] = Math.min(255, gray * tint[1]);
+    data[i + 2] = Math.min(255, gray * tint[2]);
+  }
+}
+
+/**
  * 客人窗口的位置与大小：站在自家宠物左边（左边放不下站右边），脚底对齐，客人小一号；
  * 不知道自家宠物在哪就放到这块屏的左下角。
  */
@@ -231,15 +256,23 @@ export function petHitRect(bounds: Rect): Rect {
 export interface GuestWindow {
   /** 客人站在自家宠物哪一边 */
   side: 'left' | 'right';
+  /** 窗口现在的位置与大小（擂台窗口按它把两条血排左右、盖住两只宠物） */
+  bounds(): Rect;
   /** 客人说一句（气泡默认显示 10 秒；捎话要看得久一点，可另给时长） */
   say(text: string, durationMs?: number): void;
   /** 挥手（进门、告辞时） */
   wave(): void;
-  /** 播一段内置皮肤的动画（一起玩），播完回到待机 */
-  play(anim: string): void;
+  /**
+   * 播一段内置皮肤的动画（一起玩、对战演出）。`rate`（0.5–3）= 这一段的倍速，
+   * 不播了或播完接回待机时自动回到常速（页面里每次 play 都写一遍 playbackRate）。
+   */
+  play(anim: string, rate?: number): void;
   /** 过一会儿关掉（先让告别的话和挥手放完） */
   close(afterMs: number): void;
 }
+
+/** 客人窗口的配色：pink = 客人（蓝转粉），shadow = 心魔（压暗、去饱和、偏紫） */
+export type GuestTint = 'pink' | 'shadow';
 
 /**
  * 开客人窗口
@@ -247,6 +280,7 @@ export interface GuestWindow {
  * @param tag 名牌（「小王家的 小鱼」）
  * @param home 取自家宠物现在的位置（watchHomePet 的 box）；客人跟着它走
  * @param onPoke 主人点了客人一下
+ * @param options.tint 配色，默认 pink；心魔试炼用 shadow（那种窗口不响应点击戳一下的反应）
  */
 export function openGuestWindow(
   electron: WindowElectron,
@@ -254,7 +288,9 @@ export function openGuestWindow(
   tag: string,
   home: () => PetBox | null,
   onPoke: () => void,
+  options: { tint?: GuestTint } = {},
 ): GuestWindow {
+  const tint: GuestTint = options.tint ?? 'pink';
   const homeNow = home();
   const point = homeNow
     ? { x: homeNow.left + homeNow.size / 2, y: homeNow.top + homeNow.size / 4 }
@@ -305,7 +341,8 @@ export function openGuestWindow(
     })
     .catch(() => win.destroy());
   // 窗口没有 preload、不开 IPC：主进程每 HOVER_MS 看一眼光标——在客人身上就让窗口接点击，
-  // 再顺手问页面这段时间被点了几下（页面自己先播被摸的反应动画）
+  // 再顺手问页面这段时间被点了几下（页面自己先播被摸的反应动画）。
+  // 心魔（shadow）不响应戳一下：整窗一直穿透，也不去取点击次数——打的时候点它没有意义。
   let hit = petHitRect(bounds);
   let clickable = false;
   const hover = setInterval(() => {
@@ -313,6 +350,7 @@ export function openGuestWindow(
       clearInterval(hover);
       return;
     }
+    if (tint === 'shadow') return;
     const cursor = electron.screen.getCursorScreenPoint();
     const inside =
       cursor.x >= hit.x && cursor.x < hit.x + hit.width && cursor.y >= hit.y && cursor.y < hit.y + hit.height;
@@ -352,14 +390,18 @@ export function openGuestWindow(
     if (turned) run(`guest.face(${JSON.stringify(side === 'left' ? 'right' : 'left')})`);
   }, FOLLOW_MS);
   // 参数一律 JSON.stringify 成字面量：对方发来的名字和话只当字符串数据，页面里用 textContent 显示
-  run(`guest.arrive(${JSON.stringify(tag)}, ${JSON.stringify(side === 'left' ? 'right' : 'left')})`);
+  run(
+    `guest.arrive(${JSON.stringify(tag)}, ${JSON.stringify(side === 'left' ? 'right' : 'left')}, ${JSON.stringify(tint)})`,
+  );
   return {
     get side() {
       return side;
     },
+    bounds: () => bounds,
     say: (text, durationMs) => run(`guest.say(${JSON.stringify(text)}, ${Number(durationMs) || 10000})`),
     wave: () => run('guest.wave()'),
-    play: (anim) => run(`guest.play(${JSON.stringify(anim)})`),
+    play: (anim, rate) =>
+      run(`guest.play(${JSON.stringify(anim)}, ${Number.isFinite(Number(rate)) ? Number(rate) : 1})`),
     close(afterMs) {
       setTimeout(() => {
         clearInterval(hover);
@@ -395,6 +437,9 @@ const ANIM = '/dsh-pet-7340/thumb/main/';
 const IDLE = '待机呼吸休闲';
 const REACTIONS = ['点击回应-开心跃动', '点击回应-挠痒咯咯笑', '点击回应-害羞惊讶'];
 const pink = ${pinkPixels.toString()};
+const shadow = ${shadowPixels.toString()};
+// 逐帧上的色：客人默认粉色，心魔（arrive 带 tint='shadow'）换成暗色影子
+let paint = pink;
 const video = document.getElementById('src');
 const canvas = document.getElementById('pet');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -402,12 +447,15 @@ const bubble = document.getElementById('bubble');
 let hideTimer = null;
 let pokes = 0;
 let shown = -1;
-function play(name, loop) {
+function play(name, loop, rate) {
   video.loop = loop;
   video.src = ANIM + encodeURIComponent(name) + '.webm';
+  // 倍速要**换源之后**再写：改 src 会走一遍媒体的 load 算法，它把 playbackRate 打回默认值。
+  // 每次换源都写一遍（没给就是 1），所以上一段演出用的倍速不会漏进下一段（接回待机时自动常速）。
+  video.playbackRate = Number.isFinite(Number(rate)) && Number(rate) > 0 ? Number(rate) : 1;
   video.play().catch(() => undefined);
 }
-// 每出一帧新画面就画到画布上、换成粉色
+// 每出一帧新画面就画到画布上、换成这一轮的色
 function draw() {
   requestAnimationFrame(draw);
   if (video.readyState < 2 || video.currentTime === shown) return;
@@ -421,19 +469,21 @@ function draw() {
   ctx.clearRect(0, 0, width, height);
   ctx.drawImage(video, 0, 0, width, height);
   const frame = ctx.getImageData(0, 0, width, height);
-  pink(frame.data);
+  paint(frame.data);
   ctx.putImageData(frame, 0, 0);
 }
 requestAnimationFrame(draw);
-// 挥完手、玩完回到待机
+// 挥完手、玩完回到待机（常速）
 video.addEventListener('ended', () => play(IDLE, true));
 // 被主人摸了一下：先自己笑一下，主进程过会儿来取次数，再让客人家那边回句话
+// （心魔窗口整窗穿透、主进程也不来取次数，所以这一段只有客人会走到）
 canvas.addEventListener('click', () => {
   pokes += 1;
   play(REACTIONS[Math.floor(Math.random() * REACTIONS.length)], false);
 });
 window.guest = {
-  arrive(tag, facing) {
+  arrive(tag, facing, tint) {
+    paint = tint === 'shadow' ? shadow : pink;
     document.getElementById('tag').textContent = tag;
     guest.face(facing);
     play('点击回应-元气挥手', false);
@@ -450,8 +500,8 @@ window.guest = {
   wave() {
     play('点击回应-元气挥手', false);
   },
-  play(name) {
-    play(String(name), false);
+  play(name, rate) {
+    play(String(name), false, rate);
   },
   takePokes() {
     const count = pokes;

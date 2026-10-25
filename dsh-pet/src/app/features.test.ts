@@ -21,6 +21,65 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 /** 假环境里可调的：键鼠空闲秒数、插件碎碎念间隔、挑表情包时模型的回答、看屏幕时模型磨蹭多久（测试改完要还原） */
 const env = { idleSec: 0, whisperSec: 60, memeAnswer: '无', visionDelayMs: 0, visionDone: 0 };
 
+/** 假窗口（客人 / 心魔 / 擂台）：记下页面调用与销毁 */
+interface FakeWin {
+  isDestroyed(): boolean;
+  getBounds(): { x: number; y: number; width: number; height: number };
+  setBounds(rect: { x: number; y: number; width: number; height: number }): void;
+  setOpacity(opacity: number): void;
+  setIgnoreMouseEvents(ignore: boolean): void;
+  setAlwaysOnTop(flag: boolean, level: 'floating'): void;
+  setVisibleOnAllWorkspaces(visible: boolean, options: { visibleOnFullScreen: boolean }): void;
+  loadURL(url: string): Promise<void>;
+  showInactive(): void;
+  show(): void;
+  focus(): void;
+  once(event: 'closed', listener: () => void): void;
+  destroy(): void;
+  webContents: { getURL(): string; executeJavaScript(code: string): Promise<unknown> };
+  url: string;
+  calls: string[];
+  destroyed: boolean;
+}
+
+/** 建窗与页面调用记录（心魔试炼那场用；其他测试不开窗口，看到的一直是空） */
+const windows: FakeWin[] = [];
+
+function fakeWindow(url: string): FakeWin {
+  const win: FakeWin = {
+    calls: [],
+    destroyed: false,
+    url,
+    isDestroyed: () => win.destroyed,
+    getBounds: () => ({ x: 0, y: 0, width: 200, height: 200 }),
+    setBounds: () => undefined,
+    setOpacity: () => undefined,
+    setIgnoreMouseEvents: () => undefined,
+    setAlwaysOnTop: () => undefined,
+    setVisibleOnAllWorkspaces: () => undefined,
+    loadURL: (target) => {
+      win.url = target;
+      return Promise.resolve();
+    },
+    showInactive: () => undefined,
+    show: () => undefined,
+    focus: () => undefined,
+    once: () => undefined,
+    destroy: () => {
+      win.destroyed = true;
+    },
+    webContents: {
+      getURL: () => win.url,
+      executeJavaScript: (code) => {
+        win.calls.push(code);
+        return Promise.resolve(undefined);
+      },
+    },
+  };
+  windows.push(win);
+  return win;
+}
+
 const electron: FeatureElectron = {
   powerMonitor: { getSystemIdleTime: () => env.idleSec, getSystemIdleState: () => 'active' },
   desktopCapturer: {
@@ -33,10 +92,10 @@ const electron: FeatureElectron = {
   },
   systemPreferences: { getMediaAccessStatus: () => 'granted' },
   shell: { openExternal: () => Promise.resolve(), openPath: () => Promise.resolve('') },
-  // 这些测试不开串门（默认关），用不到窗口
+  // 只有心魔试炼那几项会开窗口（客人、擂台），其余测试一个都不建
   BrowserWindow: Object.assign(
     function () {
-      throw new Error('测试里不开窗口');
+      return fakeWindow('');
     },
     { getAllWindows: () => [] },
   ) as unknown as FeatureElectron['BrowserWindow'],
@@ -177,9 +236,10 @@ async function withFeatures(
 const last = <T>(list: T[]): T | undefined => list[list.length - 1];
 
 /** 等条件成立（首拍采样是异步的：要先跑完 lsappinfo） */
-async function until(check: () => boolean): Promise<void> {
-  for (let i = 0; i < 100 && !check(); i += 1) await new Promise((done) => setTimeout(done, 20));
-  assert.ok(check(), '等待超时');
+/** 等条件成立（首拍采样是异步的；演出的台词按时间线走，第一条在 2.4 秒那一刻，tries 要给够） */
+async function until(check: () => boolean, what = '', tries = 100): Promise<void> {
+  for (let i = 0; i < tries && !check(); i += 1) await new Promise((done) => setTimeout(done, 20));
+  assert.ok(check(), `等待超时 ${what}`);
 }
 
 test('看屏幕：说出来了才算成功', async () => {
@@ -402,4 +462,112 @@ test('修炼：圆满时菜单有「突破」，点突破进下一个大境界�
       assert.ok(day.events.some((event) => event.kind === 'cultivate' && event.text.startsWith('突破到筑基初期')));
     },
   );
+});
+
+/** 找某一页的假窗口（按 URL 结尾） */
+const windowOn = (page: string): FakeWin | undefined => windows.find((win) => win.url.endsWith(page));
+
+/** 一层炼气的存档（心魔试炼那几项用：从第一层开始，进账看得清） */
+function cultivationEarly(): Record<string, unknown> {
+  return { ...cultivationSeed(), stage: 0, progress: 0 };
+}
+
+test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线走；打的时候碎碎念让路；快进后奖励进存档', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (features, _said, bodies, home, extras) => {
+    const { menus, anims } = extras;
+    await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), 'trial menu');
+    clicks.push('修炼/心魔试炼');
+    // 心魔窗口（暗色）与擂台窗口都开了
+    await until(() => windowOn('/app/guest') !== undefined && windowOn('/app/arena') !== undefined, 'windows');
+    const guest = windowOn('/app/guest')!;
+    const arena = windowOn('/app/arena')!;
+    assert.ok(
+      guest.calls.some((code) => code.includes('"shadow"')),
+      '心魔窗口是 shadow 配色',
+    );
+    // 开场那一步（t=0）：自家宠物走 /anim 的 url 形态，带朝向（面朝对手）与倍速（正好占满一步）
+    await until(
+      () => anims.some((body) => String(body.url ?? '').includes(encodeURIComponent('战斗-起手'))),
+      'opening anim',
+    );
+    const opening = anims.find((body) => String(body.url ?? '').includes(encodeURIComponent('战斗-起手')))!;
+    assert.equal(opening.facing, 'left');
+    assert.equal(typeof opening.rate, 'number');
+    assert.ok(
+      Number(opening.rate) >= 0.5 && Number(opening.rate) <= 3,
+      `倍速在 /anim 允许的区间：${String(opening.rate)}`,
+    );
+    // 心魔窗口那边同样按时间线播动画（带倍速）
+    await until(
+      () => guest.calls.some((code) => code.startsWith('guest.play(') && !code.endsWith(', 1)')),
+      'guest play rate',
+    );
+    // 擂台按引擎的事件刷血，两条分别是我与心魔
+    await until(() => arena.calls.some((code) => code.startsWith('arena.update(')), 'arena update');
+    assert.ok(
+      arena.calls.some((code) => code.includes('"label":"心魔"')),
+      `对手那条是心魔：${last(arena.calls)}`,
+    );
+    // 演出台词：anim 一律 false，时长跟着时间线的一步（下一句自然顶替上一句）——带 anim 的气泡会顶掉正在播的动画
+    await until(
+      () => bodies.some((body) => body.anim === false && body.duration === 2400),
+      'show line anim:false + duration',
+      400,
+    );
+    // 打的时候：菜单换成快进、没有「心魔试炼」，碎碎念让路
+    await until(() => menus.some((labels) => labels.includes('修炼/快进')), 'fast-forward menu');
+    assert.equal(features.takeWhisperTurn('main'), true, '演出台词按时间线走，碎碎念别来抢');
+    // 快进看结果
+    clicks.push('修炼/快进');
+    await until(() => (cultivationSave(home)?.today as { trial: number }).trial === 1, 'trial counted');
+    const save = cultivationSave(home)!;
+    const record = save.record as { wins: number; losses: number };
+    assert.equal(record.wins + record.losses, 1, '一场的心魔战绩记上了');
+    assert.ok((save.progress as number) > 0, '修为进了账（赢 +30 / 输 +10）');
+    // 赛后感言走 compose（只带人设），指令里说清了对手与胜负
+    await until(() => memeAsks.some((ask) => /心魔/.test(ask)), 'postgame compose');
+    const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+    assert.ok(
+      day.events.some((event) => event.kind === 'cultivate' && /心魔试炼/.test(event.text)),
+      '记了日记',
+    );
+    // 演完收回菜单：又有「心魔试炼」、没有「快进」
+    await until(
+      () => menus.some((labels) => labels.includes('修炼/心魔试炼') && !labels.includes('修炼/快进')),
+      'menu back',
+    );
+  });
+});
+
+test('修炼：演完一场再点第二场，只有第一场加修为（当天只算一场收益）', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const record = (home: string) => cultivationSave(home)?.record as { wins: number; losses: number };
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, _said, _bodies, home, extras) => {
+    const { menus } = extras;
+    let firstRound = -1;
+    for (const round of [1, 2]) {
+      await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), `第 ${round} 场可点`);
+      clicks.push('修炼/心魔试炼');
+      await until(() => menus.some((labels) => labels.includes('修炼/快进')), `第 ${round} 场开打`);
+      clicks.push('修炼/快进');
+      await until(() => record(home).wins + record(home).losses >= round, `第 ${round} 场记账`);
+      if (round === 1) firstRound = (cultivationSave(home)?.progress as number) ?? 0;
+    }
+    const save = cultivationSave(home)!;
+    assert.equal((save.today as { trial: number }).trial, 1, '当天只算一场收益');
+    assert.equal(record(home).wins + record(home).losses, 2, '两场战绩都记');
+    assert.equal(save.progress, firstRound, '第二场一点修为都没进账');
+  });
+});
+
+test('修炼关掉时没有「心魔试炼」这一项', async () => {
+  const config = structuredClone(DEFAULT_APP_CONFIG);
+  config.cultivation.enabled = false;
+  await withFeatures({ config }, async (_features, _said, _bodies, _home, { menus }) => {
+    await until(() => menus.length > 0);
+    assert.ok(menus.every((labels) => !labels.includes('修炼/心魔试炼')));
+  });
 });

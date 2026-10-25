@@ -170,7 +170,13 @@ describe('readBalance —— 余额叶子 → 客户端视图', () => {
 describe('readAnim —— 点播动画叶子（名字或地址 + 回执编号）', () => {
   test('名字与 playbackId 都取到（渲染端据此在四个时机上报真实状态）', () => {
     const hit = readAnim({ counter: 1, data: { name: '拉侧栏-拉拽', playbackId: 'pb-abc-1' } });
-    assert.deepEqual(hit, { name: '拉侧栏-拉拽', url: undefined, playbackId: 'pb-abc-1', facing: undefined });
+    assert.deepEqual(hit, {
+      name: '拉侧栏-拉拽',
+      url: undefined,
+      playbackId: 'pb-abc-1',
+      facing: undefined,
+      rate: undefined,
+    });
   });
 
   test('url 形态（issue #122 第 1 条）：地址取到、name 缺席', () => {
@@ -180,6 +186,7 @@ describe('readAnim —— 点播动画叶子（名字或地址 + 回执编号）
       url: 'https://cdn.example.com/拉侧栏.webm',
       playbackId: undefined,
       facing: undefined,
+      rate: undefined,
     });
   });
 
@@ -233,6 +240,24 @@ describe('readAnim —— 点播动画叶子（名字或地址 + 回执编号）
       const hit = readAnim({ counter: 1, data: { name: 'A', facing: bad } });
       assert.equal(hit?.facing, undefined, JSON.stringify(bad) + ' 不应被当成朝向');
       assert.equal(hit?.name, 'A', '脏 facing 不该让整条指令作废（照样播，只是不动朝向）');
+    }
+  });
+
+  test('rate（POST /anim 的倍速参数）：合法值取到，name / url 两种形态都适用', () => {
+    assert.equal(readAnim({ counter: 1, data: { name: '东张西望', rate: 2.5 } })?.rate, 2.5);
+    assert.equal(readAnim({ counter: 1, data: { url: 'https://x/y.webm', rate: 0.5 } })?.rate, 0.5);
+  });
+
+  test('rate 缺省 → undefined（= 常速，不是回落某个倍数）', () => {
+    assert.equal(readAnim({ counter: 1, data: { name: 'A' } })?.rate, undefined);
+    assert.equal(readAnim({ counter: 1, data: { name: 'A', rate: null } })?.rate, undefined);
+  });
+
+  test('rate 形状非法 → 归一成 undefined，且不影响这条指令本身（写端已校验，这里只防脏数据）', () => {
+    for (const bad of ['1.5', '', 0, -1, Number.NaN, Number.POSITIVE_INFINITY, true, {}]) {
+      const hit = readAnim({ counter: 1, data: { name: 'A', rate: bad } });
+      assert.equal(hit?.rate, undefined, JSON.stringify(bad) + ' 不应被当成倍速');
+      assert.equal(hit?.name, 'A', '脏 rate 不该让整条指令作废（照样播，只是常速）');
     }
   });
 });

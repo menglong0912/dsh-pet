@@ -8,6 +8,7 @@ import { majorBreaks, statCap, WEAPON_IDS, type WeaponId } from './battle.ts';
 import {
   Cultivation,
   drawDropWeapon,
+  type CultivationEvent,
   isFullStage,
   MAX_STAGE,
   stageLabel,
@@ -212,6 +213,40 @@ test('trialDone rewards only the first trial of the day, record counts all', () 
     assert.deepEqual(c.trialDone(at(0, 14), false), []);
     assert.deepEqual(c.view().record, { wins: 2, losses: 1 });
     assert.equal(progressOf(path), 30);
+  });
+});
+
+test('trialDone / sparDone report the xp that actually went in; tick and rest do not', () => {
+  /** 只看 xp 事件（掉法宝是另一回事，随机数决定的，不在这里钉） */
+  const xp = (events: CultivationEvent[]) => events.filter((event) => event.kind === 'xp');
+  withPath((path) => {
+    const c = open(path, 3);
+    // 第 1 场赢：xp 30
+    assert.deepEqual(xp(c.trialDone(at(0), true)), [{ kind: 'xp', amount: 30 }]);
+    // 当天第 2 场：没有任何事件（也就不会冒泡「修为 +10」而存档一点没动）
+    assert.deepEqual(c.trialDone(at(0, 13), true), []);
+    // 切磋：赢 20、输 10
+    assert.deepEqual(xp(c.sparDone(at(1), 'a'.repeat(32), true)), [{ kind: 'xp', amount: 20 }]);
+    assert.deepEqual(xp(c.sparDone(at(1), 'b'.repeat(32), false)), [{ kind: 'xp', amount: 10 }]);
+    // tick 一点滴的进账不另发 xp（一分钟一条会刷满冒泡）；调息自带 gain 也不发
+    const c2 = open(path, 3);
+    c2.onSitReminder(at(2));
+    assert.deepEqual(xp(c2.onLeave(at(2) + 9 * MIN)), []);
+    assert.deepEqual(xp(c2.tick(at(2) + 10 * MIN, true)), []);
+  });
+});
+
+test('no xp event when the gains land on nothing (already 圆满)', () => {
+  withPath((path) => {
+    const c = open(path, 5);
+    for (let day = 0; !c.view().full; day++) {
+      feedDay(c, day);
+      assert.ok(day < 20, 'growth should terminate');
+    }
+    // 圆满：修为一点没进账 → 不发 xp 事件（回归：X3 的「修为 +30」要照实）；法宝照掉
+    assert.equal(c.trialDone(at(9), true).filter((event) => event.kind === 'xp').length, 0);
+    assert.equal(c.sparDone(at(9), 'a'.repeat(32), true).filter((event) => event.kind === 'xp').length, 0);
+    assert.equal(c.view().percent, 100);
   });
 });
 
