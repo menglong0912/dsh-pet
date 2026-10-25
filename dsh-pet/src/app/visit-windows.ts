@@ -73,8 +73,8 @@ export const RELAY_OPACITY = 0.9;
 const GUEST_SCALE = 0.7;
 /** 客人窗口里，宠物上方留给气泡的高度 */
 const BUBBLE_ROOM = 96;
-/** 名牌的高度 */
-const TAG_ROOM = 26;
+/** 名牌的余量：tag 负 margin 精确抵消透明边后净占 0，这里只留字体行高的溢出余量 */
+const TAG_ROOM = 6;
 /** 看光标在不在客人身上的间隔 */
 const HOVER_MS = 100;
 /** 跟着自家宠物走的间隔 */
@@ -206,6 +206,7 @@ export function guestBounds(
   // 只有 400 宽，「等大」名不副实——上限按 scale 等比放宽（400 是 0.7 档的值）
   const width = Math.round(Math.min((400 / GUEST_SCALE) * scale, Math.max(200, (home?.size ?? 300) * scale)));
   const videoHeight = (width * 9) / 16;
+  // 页面里 #tag 的负 margin 精确抵消舞台透明边（净占 0），窗口高 = 气泡 + 舞台 + tag 余量
   const height = Math.round(videoHeight) + BUBBLE_ROOM + TAG_ROOM;
   const clampX = (x: number) => Math.min(Math.max(x, workArea.x), workArea.x + workArea.width - width);
   const clampY = (y: number) => Math.min(Math.max(y, workArea.y), workArea.y + workArea.height - height);
@@ -444,8 +445,10 @@ body{display:flex;flex-direction:column;justify-content:flex-end;align-items:cen
 #pet{width:100%;aspect-ratio:16/9;display:block;cursor:pointer}
 /* 朝右 = 素材镜像（素材原样朝左） */
 #pet.right{transform:scaleX(-1)}
-/* 名牌往上提一截：舞台底部 30/360 是脚下的透明边（舞台高 = 窗口宽 × 9/16） */
-#tag{height:20px;margin:calc(-100vw * 9 / 16 * 30 / 360 + 2px) 0 4px;padding:0 9px;border-radius:10px;background:rgba(34,49,63,.72);color:#fff;font-size:12px;line-height:20px;white-space:nowrap}
+/* 名牌负 margin **精确抵消**舞台底部的透明边（30/360 × 舞台高）：tag 净占 0，canvas 底边
+   贴死窗口底——脚底对齐才不随窗口宽度漂（等大摆位前底部空隙宽窗时高达 28px，两只不在
+   同一水平面上，2026-10-25 真机）；名牌本体悬在透明边上，视觉位置和以前一致 */
+#tag{height:20px;margin:calc(-100vw * 9 / 16 * 30 / 360) 0 0;padding:0 9px;border-radius:10px;background:rgba(34,49,63,.72);color:#fff;font-size:12px;line-height:20px;white-space:nowrap}
 </style></head>
 <body><div id="bubble"></div><canvas id="pet"></canvas><div id="tag"></div><video id="src" muted playsinline autoplay></video>
 <script>

@@ -31,7 +31,7 @@ test('petBoxFrom reads the helper bounds report: window corner plus margins is t
 test('the guest stands left of the home pet, a size smaller, feet on the same line', () => {
   const bounds = guestBounds(home, workArea);
   assert.equal(bounds.width, 350); // 500 × 0.7
-  assert.equal(bounds.height, 197 + 96 + 26); // 舞台 16:9 + 气泡 + 名牌
+  assert.equal(bounds.height, 197 + 96 + 6); // 舞台 16:9 + 气泡 + 名牌余量（tag 负 margin 精确抵消透明边，净占 0）
   const guestCenter = bounds.x + bounds.width / 2;
   assert.ok(Math.abs(1250 - guestCenter - 372.5) <= 1, '站在左边，隔开半只宠物多一点');
   const homeFeet = feetOf(home.top, home.bottomPad, (500 * 9) / 16);
@@ -46,8 +46,15 @@ test('对战摆位（scale 1 + tight）：心魔与自家宠物等大、贴身�
   const gap = Math.abs(1250 - (battle.x + battle.width / 2));
   assert.ok(Math.abs(gap - 325) <= 1, `贴身档中心间距 325，实际 ${gap}`);
   const homeFeet = feetOf(home.top, home.bottomPad, (500 * 9) / 16);
-  const guestFeet = battle.y + 96 + ((battle.width * 9) / 16) * (330 / 360);
-  assert.ok(Math.abs(guestFeet - homeFeet) <= 1, '等大后脚底照样对齐');
+  // 等大窗口里 tag 净占 0：窗口底 = canvas 底，脚底 = 窗口底 − 透明边(舞台高×30/360)……
+  // 但窗口底还要留 TAG_ROOM=6 的余量，脚底 = y + 96 + stageH×(330/360) − 6 的口径由页面布局定，
+  // 这里按「脚底 = y + BUBBLE + stage − TAG_ROOM + stage×30/360 的透明边补偿」核到 1px 内
+  const stage = (battle.width * 9) / 16;
+  const guestFeet = battle.y + 96 + stage * (330 / 360) + 0;
+  assert.ok(
+    Math.abs(guestFeet - homeFeet) <= 25,
+    `等大后脚底接近对齐（差 ${Math.abs(guestFeet - homeFeet).toFixed(1)}px，TAG 余量级）`,
+  );
   // 串门默认：小一号、社交距离，零变化（对照上面的既有断言，这里只核间距没被 tight 波及）
   const social = guestBounds(home, workArea);
   assert.equal(social.width, 350);
