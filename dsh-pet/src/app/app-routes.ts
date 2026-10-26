@@ -8,6 +8,7 @@
  *   GET  /app/guest         串门客人窗口的页面（visit-windows.ts 开的窗口加载它）
  *   GET  /app/note          捎话小输入窗的页面（note-window.ts 开的窗口加载它）
  *   GET  /app/arena         擂台小窗的页面（arena-window.ts 开的窗口加载它，对战演出时的两条气血条）
+ *   GET  /app/fx            特效层的页面（fx-window.ts 开的窗口加载它，X7 演出时飞在两只中间的飞行物）
  *
  * 与插件路由同一条安全线：拒绝网页来源（带 Origin 且不是 null 的请求），本机程序直接调用。
  * 端口每次启动随机，写在 `$DSH_HOME/dsh-pet/app.json`（见 discovery.ts）。
@@ -19,6 +20,7 @@ import { arenaPage } from './arena-window';
 import type { AppConfig } from './app-config';
 import type { AppFeatures } from './features';
 import { notePage } from './note-window';
+import { fxPage } from './fx-window';
 import { guestPage } from './visit-windows';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -73,9 +75,16 @@ async function handle(
     if (method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
     return send(res, 200, { snapshot: features.activity(), context: features.activityContext() });
   }
-  if (pathname === '/app/guest' || pathname === '/app/note' || pathname === '/app/arena') {
+  if (pathname === '/app/guest' || pathname === '/app/note' || pathname === '/app/arena' || pathname === '/app/fx') {
     if (method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
-    const page = pathname === '/app/guest' ? guestPage : pathname === '/app/note' ? notePage : arenaPage;
+    const page =
+      pathname === '/app/guest'
+        ? guestPage
+        : pathname === '/app/note'
+          ? notePage
+          : pathname === '/app/arena'
+            ? arenaPage
+            : fxPage;
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'content-length': Buffer.byteLength(page),

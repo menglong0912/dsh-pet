@@ -41,8 +41,11 @@ import { ActivityTracker, describeActivity, durationText } from './activity';
 import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
 import { SKILLS, WEAPONS, fight, shadowOf, tribulate } from './battle';
-import { BattleShow, LINE_MS, timeline } from './battle-show';
+import { BattleShow, FX_ASSETS, LINE_MS, SHOW_ANIMS, timeline } from './battle-show';
+import type { Shot } from './battle-show';
 import { arenaScoreboard, openArenaWindow } from './arena-window';
+import { foeStage, homeStage, openFxWindow } from './fx-window';
+import type { FxWindow, Stage } from './fx-window';
 import { ClaudeSessions } from './claude-hooks';
 import { Cultivation, stageLabel } from './cultivation';
 import type { CultivationEvent, CultivationView } from './cultivation';
@@ -1622,8 +1625,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
    * 碎碎念与自动看屏幕让一让、平时打坐不播、有人来敲门先把这场快进结束、修炼冒泡不联动动画。
    */
   let battle: BattleShow | null = null;
-  /** 这场的心魔窗口与擂台（演完 3 秒关掉） */
-  let trialWindows: { guest: GuestWindow; arena: ArenaWindow } | null = null;
+  /** 这场的心魔窗口、擂台与特效层（演完 3 秒关掉） */
+  let trialWindows: { guest: GuestWindow; arena: ArenaWindow; fx: FxWindow } | null = null;
+  /** 这场渡劫的特效层（X7 第二步：乌云与闪电；演完 3 秒关掉） */
+  let tribulationFx: FxWindow | null = null;
   /** 下次平时打坐最早什么时候（40–60 分钟一次） */
   let meditateAt = Date.now() + meditateGapMs();
 
@@ -1718,6 +1723,39 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       .catch((error: unknown) => log(`播放池内动画失败（${name}）：${errorText(error)}`));
   }
 
+  /**
+   * 开这一场的**特效窗口**（X7）：盖住两只宠物，把飞行物从出手方手里画到对方身上。
+   * 两只的舞台：自家宠物从 `homePet.box()` 推、对手从它窗口的 bounds 推（都在 fx-window.ts 的纯函数里）；
+   * 朝向跟着「对手在哪一边」——自家宠物面朝对手、对手面朝自家宠物，`hand` 才落在挥出的那只手上。
+   * 摆不了（还没收到宠物位置）时那边打一行 warn、回一个空操作的窗口：时间线、台词、气血条照常走。
+   */
+  function openShowFx(foeBounds: () => Rect | null, foeOnLeft: () => boolean, foeShadow = false): FxWindow {
+    return openFxWindow(
+      electron,
+      `${new URL(deps.petBase).origin}/app/fx`,
+      { base: `${deps.petBase}/pic/fx/`, names: FX_ASSETS },
+      (): [Stage | null, Stage | null] => {
+        const box = homePet.box();
+        if (!box) return [null, null];
+        // 两只面对面：自家宠物面朝对手（口径同 runTrial / runHostSparShow 的 playExtra facing），
+        // 对手窗口面朝自家宠物（`GuestWindow` 的 face 也是这一套）
+        const selfFacing: 'left' | 'right' = foeOnLeft() ? 'left' : 'right';
+        const foeRect = foeBounds();
+        const foe = foeRect ? foeStage(foeRect, selfFacing === 'left' ? 'right' : 'left') : null;
+        return [homeStage(box, selfFacing), foe];
+      },
+      () => {
+        const box = homePet.box();
+        const point = box
+          ? { x: box.left + box.size / 2, y: box.top + box.size / 2 }
+          : electron.screen.getCursorScreenPoint();
+        return electron.screen.getDisplayNearestPoint(point).workArea;
+      },
+      (message) => log(`修炼：${message}`),
+      { foeShadow },
+    );
+  }
+
   // ---------- 心魔试炼（X3 演出） ----------
 
   /**
@@ -1747,7 +1785,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       homePet.box,
       () => trialWindows?.guest.bounds() ?? null,
     );
-    trialWindows = { guest, arena };
+    // 心魔要播的动画先取到窗口里（X7：换源不等网络，出手才和飞行物对得上）
+    guest.preload(SHOW_ANIMS);
+    // 特效层（X7）：飞行物从出手方手里飞到对方身上，命中那一刻对方才开始反应
+    // 心魔放出来的飞行物和命中特效也用它的暗紫配色（手里那只暗气球出手时才不突然变鲜红）
+    const fx = openShowFx(
+      () => trialWindows?.guest.bounds() ?? null,
+      () => guest.side === 'left',
+      true,
+    );
+    trialWindows = { guest, arena, fx };
     const scoreboard = arenaScoreboard({
       self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
       foe: { label: foe.name, maxHp: foe.hp },
@@ -1767,7 +1814,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         arena.place(homePet.box(), guest.bounds());
         // 左右跟着两只的实际位置：心魔站在自家宠物左边时它那条在左
         arena.update(scoreboard(hp, guest.side === 'left'));
+        // 特效层跟着两只挪（放一发时也会自己挪一次）
+        fx.place();
       },
+      shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
     });
     void refreshMenu();
     const end = events[events.length - 1];
@@ -1790,17 +1840,18 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     );
     void say(text, { anim: false });
     void refreshMenu();
-    // 3 秒后关心魔窗口和擂台
+    // 3 秒后关心魔窗口、擂台与特效层
     closeTrial(CLOSE_HOLD_MS);
   }
 
-  /** 关掉这场的心魔窗口与擂台（3 秒后收尾用；有人来敲门、退出时立刻关） */
+  /** 关掉这场的心魔窗口、擂台与特效层（3 秒后收尾用；有人来敲门、退出时立刻关） */
   function closeTrial(afterMs: number): void {
     const closing = trialWindows;
     if (!closing) return;
     trialWindows = null;
     closing.guest.close(afterMs);
     closing.arena.close(afterMs);
+    closing.fx.close(afterMs);
   }
 
   /** 快进：停掉剩下的步骤，直接看结果（菜单「修炼/快进」，有人敲门时也用它收场；渡劫同样用它） */
@@ -1835,6 +1886,12 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const steps = timeline(events, [you.name, '天雷'], Math.random, [you.skills, []], {
       tribulation: { pill: wantPill, strikes: plan.strikes },
     });
+    // 特效层（X7 第二步）：每道雷的乌云与闪电画在渡劫者头顶（没有对手；朝向按素材原样朝左）
+    const fx = openShowFx(
+      () => null,
+      () => true,
+    );
+    tribulationFx = fx;
     battle = new BattleShow(steps, {
       self: {
         // 渡劫没有对手，不指定朝向（素材朝左原样播即可，天雷在头顶）
@@ -1843,13 +1900,15 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       },
       foe: null,
       // 渡劫不开擂台：没有对手，两条血没得画
-      arena: () => undefined,
+      arena: () => fx.place(),
+      shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
     });
     void refreshMenu();
     const end = events[events.length - 1];
     const survived = end.kind === 'end' && end.winner === 0;
     await battle.run();
     battle = null;
+    closeTribulationFx(CLOSE_HOLD_MS);
     // 中途退出了（dispose）：这场不算，境界与修为都不动
     if (disposed) return;
     // 结果进存档（属性加成、扣修为、丹数、二选一都在这一步）；冒泡与日记在 onCultivation
@@ -1865,6 +1924,14 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     );
     void say(text, { anim: false });
     void refreshMenu();
+  }
+
+  /** 关掉渡劫的特效层（演完 3 秒收尾；退出时立刻关） */
+  function closeTribulationFx(afterMs: number): void {
+    const closing = tribulationFx;
+    if (!closing) return;
+    tribulationFx = null;
+    closing.close(afterMs);
   }
 
   /**
@@ -1903,6 +1970,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let spar: SparState | null = null;
   /** 这场切磋的擂台（演完 3 秒关掉；客人家那边没有窗口） */
   let sparArena: ArenaWindow | null = null;
+  /** 这场切磋的特效层（X7；客人走了 / 退出时和擂台一起关） */
+  let sparFx: FxWindow | null = null;
 
   /** 收摊一场切磋（客人走了 / 回家了 / 退出）：定时器停掉、擂台关掉、演出立刻收尾 */
   function cancelSpar(): void {
@@ -1916,6 +1985,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     battle = null;
     sparArena?.close(0);
     sparArena = null;
+    sparFx?.close(0);
+    sparFx = null;
   }
 
   /** 主人家发起切磋（菜单「串门/和客人切磋」）：把 spar-invite 捎给客人，等它应战（§X5 第 1 步） */
@@ -1999,12 +2070,18 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return { ok: true };
   }
 
-  /** 关掉这场的擂台（演完 3 秒收尾，同 X3 的心魔窗口；客人走了 / 退出时立刻关） */
+  /** 关掉这场的擂台与特效层（演完 3 秒收尾，同 X3 的心魔窗口；客人走了 / 退出时立刻关） */
   function closeSparArena(afterMs: number): void {
     const closing = sparArena;
-    if (!closing) return;
-    sparArena = null;
-    closing.close(afterMs);
+    if (closing) {
+      sparArena = null;
+      closing.close(afterMs);
+    }
+    const fx = sparFx;
+    if (fx) {
+      sparFx = null;
+      fx.close(afterMs);
+    }
   }
 
   /**
@@ -2036,6 +2113,14 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       current.window.bounds(),
     );
     sparArena = arena;
+    // 客人要播的动画先取到窗口里（X7：换源不等网络，出手才和飞行物对得上）
+    current.window.preload(SHOW_ANIMS);
+    // 特效层（X7）：客人窗口就是这一场的对手（照旧粉色；体型进门时就定了，跟随切磋复用串门的客人窗口）
+    const fx = openShowFx(
+      () => current.window.bounds(),
+      () => current.window.side === 'left',
+    );
+    sparFx = fx;
     const scoreboard = arenaScoreboard({
       self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
       foe: { label: `${foe.name} · ${stageLabel(guestCard.stage)}`, maxHp: foe.hp },
@@ -2054,7 +2139,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         arena.place(homePet.box(), current.window.bounds());
         // 左右跟着两只的实际位置：客人站在自家宠物左边时它那条在左
         arena.update(scoreboard(hp, current.window.side === 'left'));
+        fx.place();
       },
+      shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
     });
     void refreshMenu();
     await battle.run();
@@ -2144,6 +2231,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       self: { play: () => undefined, say: (line, durationMs) => showRelay(line, durationMs) },
       foe: { play: () => undefined, say: (line, durationMs) => showRelay(line, durationMs) },
       arena: () => undefined,
+      // 客人这一侧不播动画、也不放飞行物（转播本来就没有画面，§X7 范围）
+      shoot: () => undefined,
     });
     void refreshMenu();
     await battle.run();
@@ -2400,6 +2489,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       battle?.dispose();
       battle = null;
       closeTrial(0);
+      closeTribulationFx(0);
       // 在别人家做客：告个辞（不等）；家里的客人窗口关掉
       void comeHome('called');
       if (hosting && hosting.openerTimer !== null) clearTimeout(hosting.openerTimer);

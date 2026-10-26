@@ -223,6 +223,14 @@ export function guestBounds(
   const x = prefer === 'right' && rightFits ? right : leftFits ? left : right;
   // 客人的脚：窗口顶 + 气泡空间 + 舞台里脚底的位置
   const y = feet - BUBBLE_ROOM - videoHeight * FEET_RATIO;
+  if (y < workArea.y) {
+    // 自家宠物贴着屏幕顶：整窗往下夹会让两只脚底不齐（2026-10-26 真机心魔试炼差了约 77pt）。
+    // 改为窗口顶贴住工作区顶、多出来的那截从气泡空间里扣（页面是 flex-end，舞台照样贴窗口底；
+    // 气泡只是少点地方，往舞台顶的透明边里压）。气泡空间扣光了还不够才整窗往下挪。
+    const top = Math.min(workArea.y, y + BUBBLE_ROOM);
+    const bottom = Math.round(top - y >= BUBBLE_ROOM ? top + height - BUBBLE_ROOM : y + height);
+    return { x: Math.round(clampX(x)), y: Math.round(top), width, height: bottom - Math.round(top) };
+  }
   return { x: Math.round(clampX(x)), y: Math.round(clampY(y)), width, height };
 }
 
@@ -259,12 +267,14 @@ export function followGuest(
 /** 客人窗口里宠物身体那一块（屏幕坐标）：光标在这里时窗口才接点击，别处照样穿透 */
 export function petHitRect(bounds: Rect): Rect {
   const videoHeight = (bounds.width * 9) / 16;
-  const top = bounds.y + BUBBLE_ROOM + videoHeight * 0.15;
+  // 舞台贴窗口底（页面 flex-end，底下只有名牌的行高余量）：从底往上算，贴屏幕顶时气泡空间被压缩也不偏
+  const stageTop = bounds.y + bounds.height - TAG_ROOM - videoHeight;
+  const top = stageTop + videoHeight * 0.15;
   return {
     x: Math.round(bounds.x + bounds.width * 0.32),
     y: Math.round(top),
     width: Math.round(bounds.width * 0.36),
-    height: Math.round(bounds.y + BUBBLE_ROOM + videoHeight * FEET_RATIO - top),
+    height: Math.round(stageTop + videoHeight * FEET_RATIO - top),
   };
 }
 
@@ -282,6 +292,11 @@ export interface GuestWindow {
    * 不播了或播完接回待机时自动回到常速（页面里每次 play 都写一遍 playbackRate）。
    */
   play(anim: string, rate?: number): void;
+  /**
+   * 先把这些动画取到页面里（对战开演前叫一次，X7）：之后 `play` 直接用本地副本，不再走一遍网络加载——
+   * 换源要等加载的话，出手动作会比特效窗口里的飞行物晚上屏，手还没伸出去东西先飞了。取不到的照旧现取。
+   */
+  preload(anims: string[]): void;
   /** 过一会儿关掉（先让告别的话和挥手放完） */
   close(afterMs: number): void;
 }
@@ -420,6 +435,7 @@ export function openGuestWindow(
     wave: () => run('guest.wave()'),
     play: (anim, rate) =>
       run(`guest.play(${JSON.stringify(anim)}, ${Number.isFinite(Number(rate)) ? Number(rate) : 1})`),
+    preload: (anims) => run(`guest.preload(${JSON.stringify(anims)})`),
     close(afterMs) {
       setTimeout(() => {
         clearInterval(hover);
@@ -467,9 +483,11 @@ const bubble = document.getElementById('bubble');
 let hideTimer = null;
 let pokes = 0;
 let shown = -1;
+// 预取好的动画（名字 → 本地 blob 地址）：对战开演前取一遍，换源时不用再等网络
+const cached = {};
 function play(name, loop, rate) {
   video.loop = loop;
-  video.src = ANIM + encodeURIComponent(name) + '.webm';
+  video.src = cached[name] || ANIM + encodeURIComponent(name) + '.webm';
   // 倍速要**换源之后**再写：改 src 会走一遍媒体的 load 算法，它把 playbackRate 打回默认值。
   // 每次换源都写一遍（没给就是 1），所以上一段演出用的倍速不会漏进下一段（接回待机时自动常速）。
   video.playbackRate = Number.isFinite(Number(rate)) && Number(rate) > 0 ? Number(rate) : 1;
@@ -522,6 +540,18 @@ window.guest = {
   },
   play(name, rate) {
     play(String(name), false, rate);
+  },
+  preload(names) {
+    for (const raw of Array.isArray(names) ? names : []) {
+      const name = String(raw);
+      if (cached[name]) continue;
+      fetch(ANIM + encodeURIComponent(name) + '.webm')
+        .then((res) => (res.ok ? res.blob() : null))
+        .then((blob) => {
+          if (blob) cached[name] = URL.createObjectURL(blob);
+        })
+        .catch(() => undefined);
+    }
   },
   takePokes() {
     const count = pokes;

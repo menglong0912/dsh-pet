@@ -1,12 +1,14 @@
 /**
- * 演出时间线与执行器的单测（X3）。
+ * 演出时间线与执行器的单测（X3、X7）。
  *
- * 时间线是纯函数：喂进引擎事件序列，直接核对排出来的每一步（映射、rate、反应延迟、快进）。
+ * 时间线是纯函数：喂进引擎事件序列，直接核对排出来的每一步（出手动作、飞行物、命中时刻、受击、快进）。
+ * 时刻一律用 battle-show 导出的口径算（releaseOffset / windupOf / animLength），不抄死数字——
+ * 出手时刻表、前摇表随素材重量，断言跟着走。
  * 执行器注入假的手 + mock timers 拨时间，不真等（X2 的口径）。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fighterAt } from './battle-testkit.ts';
@@ -15,27 +17,34 @@ import {
   fight,
   shadowOf,
   tribulate,
-  SKILLS,
   WEAPONS,
   type Action,
   type BattleEvent,
   type Fighter,
   type SkillId,
+  type WeaponId,
 } from './battle.ts';
 import {
+  ATTACK_SHOW,
   BEAT_MS,
   BattleShow,
+  FX_ASSETS,
   LINE_MS,
   OPEN_MS,
-  rateFor,
-  reactDelayOf,
-  REACT_MS,
+  REACT_WINDOW_MS,
+  RELEASE,
+  SHOW_ANIMS,
   SLOT_MS,
-  timeline,
+  TRIBULATION_FLY,
   TRIBULATION_LOSS_ANIM,
   TRIBULATION_PILL_ANIM,
-  TRIBULATION_STRIKE_ANIM,
   TRIBULATION_WIN_ANIM,
+  animLength,
+  rateFor,
+  releaseOffset,
+  timeline,
+  windupOf,
+  type Shot,
   type ShowSides,
   type Step,
 } from './battle-show.ts';
@@ -50,6 +59,8 @@ function seq(start = 0): () => number {
 
 const NAMES: [string, string] = ['小鱼', '心魔'];
 const hp: [number, number] = [100, 90];
+const HIT = '受击-正面';
+const BUBBLE = '招式-泡泡护体';
 
 const start = (actor: 0 | 1): BattleEvent => ({ actor, kind: 'start', hp });
 const decide = (actor: 0 | 1, action: Action, after: [number, number] = hp): BattleEvent => ({
@@ -58,14 +69,13 @@ const decide = (actor: 0 | 1, action: Action, after: [number, number] = hp): Bat
   action,
   hp: after,
 });
-const hit = (actor: 0 | 1, damage = 20, after: [number, number] = [100, 70], blocked = false): BattleEvent => ({
-  actor,
-  kind: 'hit',
-  damage,
-  crit: false,
-  blocked,
-  hp: after,
-});
+const hit = (
+  actor: 0 | 1,
+  damage = 20,
+  after: [number, number] = [100, 70],
+  blocked = false,
+  weapon?: WeaponId,
+): BattleEvent => ({ actor, kind: 'hit', damage, crit: false, blocked, hp: after, ...(weapon ? { weapon } : {}) });
 const combo = (actor: 0 | 1, damage = 15, after: [number, number] = [100, 55], blocked = false): BattleEvent => ({
   actor,
   kind: 'combo',
@@ -88,6 +98,7 @@ const beast = (actor: 0 | 1, damage = 6, after: [number, number] = [100, 74], bl
   blocked,
   hp: after,
 });
+const dodge = (actor: 0 | 1, after: [number, number] = hp): BattleEvent => ({ actor, kind: 'dodge', hp: after });
 const strike = (index = 0, damage = 30, after: [number, number] = [70, 0], blocked = false): BattleEvent => ({
   actor: 0,
   kind: 'strike',
@@ -99,14 +110,22 @@ const strike = (index = 0, damage = 30, after: [number, number] = [70, 0], block
 
 /** 只用空手：出手次数可控（自动出招还会放招式、用法宝，格子数不好核） */
 const unarmed: { decide(): Action } = { decide: () => ({ kind: 'unarmed' }) };
+const UNARMED: Action = { kind: 'unarmed' };
 
-test('rateFor：素材时长 ÷ 步长，夹在 /anim 允许的 0.5–3', () => {
-  // 战斗-出拳 5 秒要占满 2.4 秒的一步 → 2.083
-  assert.equal(rateFor('战斗-出拳', SLOT_MS), 2.083);
-  // 表里没列的（法宝都是 4 秒）
-  assert.equal(rateFor(WEAPONS['water-gun'].anim, SLOT_MS), 1.667);
-  // 反应动画的窗口 = 一格减去那 0.9 秒
-  assert.equal(rateFor(SKILLS.dove.anim, SLOT_MS - REACT_MS), 2.667);
+const shotsOf = (steps: Step[]): Array<Step & { shot: Shot }> =>
+  steps.filter((step): step is Step & { shot: Shot } => step.shot !== undefined);
+const animsOf = (steps: Step[], anim: string): Step[] => steps.filter((step) => step.anim === anim);
+const impactOf = (step: Step & { shot: Shot }): number => step.at + step.shot.flightMs;
+/** 反应素材的倍速（时间线固定按 REACT_WINDOW_MS 算） */
+const reactRate = (anim: string): number => rateFor(anim, REACT_WINDOW_MS);
+
+test('rateFor：素材时长 ÷ 窗口，夹在 /anim 允许的 0.5–3', () => {
+  // 战斗-倒地 5 秒要占满 2.4 秒的一步 → 2.083
+  assert.equal(rateFor('战斗-倒地', SLOT_MS), 2.083);
+  // 表里没列的（出手素材都是 4 秒）
+  assert.equal(rateFor('出手-水枪', SLOT_MS), 1.667);
+  // 反应素材按反应窗口算
+  assert.equal(rateFor('招式-化鸽遁', REACT_WINDOW_MS), 2.222);
   // 6 秒的打坐摊到 2 秒 → 3，再长也夹到上限（越界宿主直接拒，那一下就没动画了）
   assert.equal(rateFor('修炼-打坐', 2_000), 3);
   // 4 秒的素材摊到 12 秒 → 0.333，夹到下限
@@ -125,233 +144,308 @@ test('开场：两边各一段起手式，都在 t=0', () => {
   assert.deepEqual(steps[0].hp, hp);
 });
 
-test('出手 → 台词 → 挨打反应：反应比出手晚到攻击素材的打击时刻，落在对方那一边', () => {
-  const steps = timeline([start(0), decide(0, { kind: 'unarmed' }), hit(0)], NAMES, seq());
+test('出手 → 飞行物 → 命中 → 受击（X7）：飞行物在离手那一刻放出，受击对准命中、扣掉前摇，台词和掉血都在命中', () => {
+  const steps = timeline([start(0), decide(0, UNARMED), hit(0, 20, [100, 70])], NAMES, seq());
+  const action = animsOf(steps, '战斗-直拳');
   assert.deepEqual(
-    steps.filter((step) => step.anim).map((step) => [step.at, step.who, step.anim]),
-    [
-      [0, 0, '战斗-起手'],
-      [0, 1, '战斗-起手'],
-      [OPEN_MS, 0, '战斗-出拳'],
-      [OPEN_MS + reactDelayOf('战斗-出拳'), 1, '战斗-受击'],
-    ],
+    action.map((step) => [step.at, step.who, step.rate]),
+    [[OPEN_MS, 0, rateFor('战斗-直拳', SLOT_MS)]],
   );
-  const line = steps.find((step) => step.line);
-  assert.ok(line && line.who === 0 && line.at === OPEN_MS, `台词挂在出手那一方：${JSON.stringify(line)}`);
-  assert.match(line?.line ?? '', /小鱼/);
+  const [shot] = shotsOf(steps);
+  assert.equal(shot.at, OPEN_MS + releaseOffset('战斗-直拳'), '离手 = 起播 + 原速出手时刻 ÷ 倍速');
+  assert.equal(shot.who, 0);
+  assert.deepEqual([shot.shot.kind, shot.shot.track, shot.shot.hitFx, shot.shot.count], ['拳风', 'line', '命中-星', 1]);
+  assert.deepEqual(shot.shot.hand, RELEASE['战斗-直拳'].hand, '起点是出手素材里那只手');
+  assert.deepEqual(shot.hp, hp, '飞行物放出那一刻血还没掉');
+  const impact = impactOf(shot);
+  const react = animsOf(steps, HIT);
+  assert.deepEqual(
+    react.map((step) => [step.at, step.who, step.rate]),
+    [[impact - windupOf(HIT), 1, reactRate(HIT)]],
+    '挨打方在命中那一刻开始后仰',
+  );
+  assert.deepEqual(react[0].hp, hp, '受击起播比命中早一点点：那一刻血也还没掉');
+  const landed = steps.find((step) => step.at === impact && step.line);
+  assert.ok(landed && landed.who === 0, `结算台词在命中那一刻、出手方那边：${JSON.stringify(landed)}`);
+  assert.match(landed.line ?? '', /小鱼/);
+  assert.deepEqual(landed.hp, [100, 70], '命中那一刻掉血');
 });
 
-test('reactDelayOf：反应延迟 = 命中时刻 ÷ 倍速 + 受击前摇补偿（真机两次反馈：打击时刻该标「飞到身上」而非「特效出手」）', () => {
-  // 出拳 5s：冲击波命中 2.0s，倍速 2.083 → 960ms，+240ms 前摇补偿 → 1200ms
-  assert.equal(reactDelayOf('战斗-出拳'), 1_200);
-  // 水枪 4s：水柱首次命中 1.6s，倍速 1.667 → 960 + 240
-  assert.equal(reactDelayOf('法宝-水枪'), 1_200);
-  // 毽子 4s：毽子飞到身上 1.9s（不是踢出的 1.4s），→ 1140 + 240
-  assert.equal(reactDelayOf('法宝-毽子'), 1_380);
-  // 蓝鲸 5s：俯冲撞上 2.5s，倍速 2.083 → 1200 + 240
-  assert.equal(reactDelayOf('招式-蓝鲸现世'), 1_440);
-  // 表里没有的 / 没有攻击动画：退回固定 REACT_MS
-  assert.equal(reactDelayOf('战斗-胜利'), REACT_MS);
-  assert.equal(reactDelayOf(null), REACT_MS);
-});
-
-test('映射：法宝攻击用 法宝-<名>，招式用 招式-<名>，空手用 战斗-出拳', () => {
-  const steps = timeline(
-    [
-      start(0),
-      decide(0, { kind: 'weapon', weapon: 'whale-tail' }),
-      { actor: 1, kind: 'dodge', hp } as BattleEvent,
-      decide(0, { kind: 'skill', skill: 'blue-whale' }),
-      { actor: 0, kind: 'skill', skill: 'blue-whale', damage: 40, hp: [100, 50] } as BattleEvent,
-    ],
+test('每一招都有自己的出手、飞行物、命中特效和受击（§X7 第三步那张表）', () => {
+  const cases: Array<[string, Action, BattleEvent[]]> = [
+    ...(Object.keys(WEAPONS) as WeaponId[]).map((id): [string, Action, BattleEvent[]] => [
+      id,
+      { kind: 'weapon', weapon: id },
+      Array.from({ length: WEAPONS[id].hits }, (_, i) => hit(0, 5, [100, 90 - 5 * (i + 1)], false, id)),
+    ]),
+    ...(['lion-roar', 'blue-whale'] as SkillId[]).map((id): [string, Action, BattleEvent[]] => [
+      id,
+      { kind: 'skill', skill: id },
+      [{ actor: 0, kind: 'skill', skill: id, damage: 20, hp: [100, 70] }],
+    ]),
+    ['unarmed', UNARMED, [hit(0)]],
+  ];
+  for (const [key, action, landed] of cases) {
+    const show = ATTACK_SHOW[key];
+    const fly = show.fly;
+    assert.ok(fly, `${key} 有飞行物`);
+    const steps = timeline([start(0), decide(0, action), ...landed], NAMES, seq());
+    assert.deepEqual(
+      steps.filter((step) => step.anim && step.who === 0 && step.at >= OPEN_MS).map((step) => step.anim),
+      [show.action],
+      `${key}：出手方播自己的出手素材`,
+    );
+    const shots = shotsOf(steps);
+    assert.equal(shots.length, landed.length, `${key}：每一段伤害一发飞行物`);
+    for (const step of shots) {
+      assert.equal(step.shot.kind, fly.kind, key);
+      assert.equal(step.shot.hitFx, fly.hitFx, key);
+      assert.equal(step.shot.track, fly.track, key);
+    }
+    const react = fly.react ?? HIT;
+    const reactions = steps.filter((step) => step.who === 1 && step.anim && step.at >= OPEN_MS);
+    assert.deepEqual(
+      reactions.map((step) => [step.anim, step.at]),
+      [[react, impactOf(shots[0]) - windupOf(react)]],
+      `${key}：挨打方按这一招的受击方式反应一次`,
+    );
+    assert.ok(RELEASE[show.action], `${key}：出手素材 ${show.action} 量过出手时刻`);
+  }
+  // 回血：作用在自己身上，照旧整段素材，没有飞行物也没有挨打
+  const bloom = timeline(
+    [start(0), decide(0, { kind: 'skill', skill: 'bloom' }), { actor: 0, kind: 'skill', skill: 'bloom', heal: 20, hp }],
     NAMES,
     seq(),
   );
   assert.deepEqual(
-    steps.filter((step) => step.anim).map((step) => step.anim),
-    ['战斗-起手', '战斗-起手', WEAPONS['whale-tail'].anim, '战斗-闪避', SKILLS['blue-whale'].anim, '战斗-受击'],
+    bloom.filter((step) => step.anim && step.at >= OPEN_MS).map((step) => [step.who, step.anim]),
+    [[0, '招式-凭空生花']],
+  );
+  assert.equal(shotsOf(bloom).length, 0);
+});
+
+test('齐发：水枪三发对准三下扳机、狮子吼三道声波，都是一步里的 count / gapMs', () => {
+  const water = shotsOf(timeline([start(0), decide(0, { kind: 'weapon', weapon: 'water-gun' }), hit(0)], NAMES, seq()));
+  assert.deepEqual(
+    water.map((step) => [step.shot.count, step.shot.gapMs]),
+    [[3, ATTACK_SHOW['water-gun'].fly?.gapMs]],
+  );
+  const roar = shotsOf(
+    timeline(
+      [
+        start(0),
+        decide(0, { kind: 'skill', skill: 'lion-roar' }),
+        { actor: 0, kind: 'skill', skill: 'lion-roar', damage: 12, hp },
+      ],
+      NAMES,
+      seq(),
+    ),
+  );
+  assert.equal(roar[0].shot.count, 3);
+});
+
+test('多段法宝一把撒出去：几段紧挨着飞，三球逐段换色，对方只演一次反应', () => {
+  const poker = timeline(
+    [start(0), decide(0, { kind: 'weapon', weapon: 'poker' }), hit(0, 6, [100, 84]), hit(0, 6, [100, 78])],
+    NAMES,
+    seq(),
+  );
+  const release = OPEN_MS + releaseOffset('出手-扑克牌');
+  const gap = ATTACK_SHOW.poker.fly?.gapMs ?? 0;
+  assert.deepEqual(
+    shotsOf(poker).map((step) => [step.at, step.shot.count]),
+    [
+      [release, 1],
+      [release + gap, 1],
+    ],
+  );
+  assert.equal(animsOf(poker, HIT).length, 1, '第二张牌打在还在后仰的人身上，不重新起播');
+  // 两次掉血各在自己的命中时刻
+  assert.deepEqual(
+    poker.filter((step) => step.line).map((step) => step.at),
+    shotsOf(poker).map(impactOf),
+  );
+  const juggle = timeline(
+    [start(0), decide(0, { kind: 'weapon', weapon: 'juggle' }), hit(0), hit(0), hit(0)],
+    NAMES,
+    seq(),
+  );
+  assert.deepEqual(
+    shotsOf(juggle).map((step) => step.shot.hue ?? 0),
+    [0, 120, 240],
   );
 });
 
-test('闪避：只有真有化鸽遁那一方播「招式-化鸽遁」', () => {
-  const dodge = { actor: 1, kind: 'dodge', hp } as BattleEvent;
-  const dove: [SkillId[], SkillId[]] = [[], ['dove']];
-  const none: [SkillId[], SkillId[]] = [[], []];
-  const anims = (skillSets: [SkillId[], SkillId[]]) =>
-    timeline([start(0), dodge], NAMES, seq(), skillSets)
-      .filter((step) => step.anim)
-      .map((step) => [step.who, step.anim]);
-  assert.deepEqual(anims(dove), [
-    [0, '战斗-起手'],
-    [1, '战斗-起手'],
-    [1, SKILLS.dove.anim],
-  ]);
-  assert.deepEqual(anims(none), [
-    [0, '战斗-起手'],
-    [1, '战斗-起手'],
-    [1, '战斗-闪避'],
-  ]);
+test('多段里有的躲开有的打中：只演打中的那一下，躲开的那张只掠过去；全躲开才演闪避', () => {
+  const mixed = timeline(
+    [start(0), decide(0, { kind: 'weapon', weapon: 'poker' }), dodge(1), hit(0, 6, [100, 84])],
+    NAMES,
+    seq(),
+  );
+  const shots = shotsOf(mixed);
+  assert.deepEqual(
+    shots.map((step) => step.shot.miss ?? false),
+    [true, false],
+  );
+  assert.deepEqual(
+    mixed.filter((step) => step.who === 1 && step.anim && step.at >= OPEN_MS).map((step) => [step.anim, step.at]),
+    [[HIT, impactOf(shots[1]) - windupOf(HIT)]],
+    '先躲后挨会来回抽搐：只演挨的那一下',
+  );
+  const missed = timeline([start(0), decide(0, { kind: 'weapon', weapon: 'poker' }), dodge(1), dodge(1)], NAMES, seq());
+  const missedShots = shotsOf(missed);
+  assert.ok(missedShots.every((step) => step.shot.miss));
+  assert.deepEqual(
+    missed.filter((step) => step.who === 1 && step.anim && step.at >= OPEN_MS).map((step) => [step.anim, step.at]),
+    [['战斗-闪避', impactOf(missedShots[0]) - windupOf('战斗-闪避')]],
+  );
+});
+
+test('闪避：飞行物掠过（miss），闪避对准它掠过的时刻提前躲开；只有真有化鸽遁那一方化成鸽子', () => {
+  const events = [start(0), decide(0, { kind: 'weapon', weapon: 'shuttlecock' }), dodge(1)];
+  const anims = (skillSets: [SkillId[], SkillId[]]) => {
+    const steps = timeline(events, NAMES, seq(), skillSets);
+    const [shot] = shotsOf(steps);
+    assert.equal(shot.shot.miss, true);
+    return steps
+      .filter((step) => step.who === 1 && step.anim && step.at >= OPEN_MS)
+      .map((step) => [step.anim, step.at - impactOf(shot)]);
+  };
+  assert.deepEqual(anims([[], ['dove']]), [['招式-化鸽遁', -windupOf('招式-化鸽遁')]]);
+  assert.deepEqual(anims([[], []]), [['战斗-闪避', -windupOf('战斗-闪避')]]);
   // 台词那边同样只看 skillSets（lineOf 的第四参数）
-  const lines = timeline([start(0), dodge], NAMES, seq(), dove)
+  const lines = timeline(events, NAMES, seq(), [[], ['dove']])
     .filter((step) => step.line)
     .map((step) => step.line);
   assert.ok(
     lines.some((line) => line?.includes('鸽子')),
     `化鸽遁的句子：${lines.join(' / ')}`,
   );
+  // 手喂的序列里没有出手格子：只是自己一闪，排在那一拍
+  const bare = timeline([start(0), dodge(1)], NAMES, seq(), [[], []]);
+  assert.deepEqual(
+    bare.filter((step) => step.anim && step.at >= OPEN_MS).map((step) => [step.at, step.who, step.anim]),
+    [[OPEN_MS, 1, '战斗-闪避']],
+  );
 });
 
-test('同一格里的第二、三段错开 BEAT_MS；下一件事另起一格', () => {
+test('挡下：飞行物打在泡泡上（blocked），挨打方播泡泡护体（先吹好、命中那一刻被撞凹），不播受击', () => {
+  const sets: [SkillId[], SkillId[]] = [[], ['bubble']];
   const steps = timeline(
-    [
-      start(0),
-      decide(0, { kind: 'unarmed' }),
-      hit(0, 20, [100, 70]),
-      combo(0, 15, [100, 55]),
-      decide(1, { kind: 'unarmed' }, [100, 55]),
-      hit(1, 12, [88, 55]),
-    ],
+    [start(0), decide(0, { kind: 'weapon', weapon: 'firework' }), hit(0, 20, [100, 80], true, 'firework')],
     NAMES,
     seq(),
+    sets,
   );
+  const [shot] = shotsOf(steps);
+  assert.equal(shot.shot.blocked, true);
   assert.deepEqual(
-    steps.filter((step) => step.line).map((step) => step.at),
-    [OPEN_MS, OPEN_MS + BEAT_MS, OPEN_MS + SLOT_MS],
+    steps.filter((step) => step.who === 1 && step.anim && step.at >= OPEN_MS).map((step) => [step.anim, step.at]),
+    [[BUBBLE, impactOf(shot) - windupOf(BUBBLE)]],
+    '挡下了就不炸黑',
   );
-});
-
-test('挡下的那一下：挨打方播招式-泡泡护体（代替战斗-受击），时刻跟着攻击素材的打击时刻', () => {
-  const delay = reactDelayOf('战斗-出拳');
-  const stepMaps = (blocked: boolean) => {
-    const sets: [SkillId[], SkillId[]] = [[], ['bubble']];
-    return timeline([start(0), decide(0, { kind: 'unarmed' }), hit(0, 20, [100, 80], blocked)], NAMES, seq(), sets)
-      .filter((step) => step.anim && step.at >= OPEN_MS)
-      .map((step) => [step.at, step.who, step.anim, step.rate]);
-  };
-  assert.deepEqual(
-    stepMaps(true),
-    [
-      [OPEN_MS, 0, '战斗-出拳', rateFor('战斗-出拳', SLOT_MS)],
-      [OPEN_MS + delay, 1, SKILLS.bubble.anim, rateFor(SKILLS.bubble.anim, SLOT_MS - delay)],
-    ],
-    '泡泡护体是防御方（挨打那一方）的动画',
-  );
-  assert.deepEqual(
-    stepMaps(false),
-    [
-      [OPEN_MS, 0, '战斗-出拳', rateFor('战斗-出拳', SLOT_MS)],
-      [OPEN_MS + delay, 1, '战斗-受击', rateFor('战斗-受击', SLOT_MS - delay)],
-    ],
-    '没挡下照旧战斗-受击',
-  );
-  // combo / beast / counter 也一样看 blocked：挡下就是对面那一边吹泡泡
+  // combo / beast / counter 也一样看 blocked：挡下就是挨打那一边吹泡泡
   const blockedCases: Array<[string, BattleEvent, 0 | 1, [SkillId[], SkillId[]]]> = [
     ['combo', combo(0, 10, [100, 90], true), 1, [[], ['bubble']]],
-    ['beast', beast(0, 5, [100, 95], true), 1, [[], ['bubble']]],
-    ['counter', counter(1, 8, [92, 90], true), 0, [['bubble'], []]],
+    ['beast', beast(0, 5, [100, 95], true), 1, [['spirit-beast'], ['bubble']]],
+    ['counter', counter(1, 8, [92, 90], true), 0, [['bubble'], ['sixth-sense']]],
   ];
-  for (const [label, event, reactWho, sets] of blockedCases) {
-    const steps = timeline([start(0), decide(0, { kind: 'unarmed' }), event], NAMES, seq(), sets);
-    const react = steps.filter((step) => step.anim === SKILLS.bubble.anim);
-    assert.equal(react.length, 1, `${label} 挡下时只有一步泡泡护体`);
-    assert.equal(react[0].who, reactWho, `${label}：泡泡护体播在挨打那一方`);
-    assert.equal(steps.filter((step) => step.anim === '战斗-受击').length, 0, `${label}：挡下了就不播战斗-受击`);
+  for (const [label, event, reactWho, skillSets] of blockedCases) {
+    const got = timeline([start(0), decide(0, UNARMED), event], NAMES, seq(), skillSets);
+    const bubbles = animsOf(got, BUBBLE);
+    assert.equal(bubbles.length, 1, `${label} 挡下时只有一步泡泡护体`);
+    assert.equal(bubbles[0].who, reactWho, `${label}：泡泡护体播在挨打那一方`);
+    assert.equal(animsOf(got, HIT).length, 0, `${label}：挡下了就不播受击`);
+    assert.ok(
+      shotsOf(got).some((step) => step.shot.blocked),
+      `${label}：那一发打在泡泡上`,
+    );
   }
 });
 
-test('灵兽助阵：beast 那一拍出兽方加播招式-灵兽助阵，和台词同拍', () => {
-  const steps = timeline([start(0), decide(0, { kind: 'unarmed' }), hit(0), beast(0, 6, [100, 64])], NAMES, seq());
-  const atBeast = OPEN_MS + BEAT_MS;
+test('灵兽助阵：主攻的动作收势后再召唤，灵兽从指尖游过去；被躲开时照样召出来扑个空', () => {
+  const sets: [SkillId[], SkillId[]] = [['spirit-beast'], []];
+  const steps = timeline([start(0), decide(0, UNARMED), hit(0), beast(0, 6, [100, 64])], NAMES, seq(), sets);
+  const main = animLength('战斗-直拳', rateFor('战斗-直拳', SLOT_MS));
+  const summon = animsOf(steps, '出手-召唤灵兽');
   assert.deepEqual(
-    steps.filter((step) => step.anim && step.at >= OPEN_MS).map((step) => [step.at, step.who, step.anim]),
-    [
-      [OPEN_MS, 0, '战斗-出拳'],
-      [atBeast, 0, SKILLS['spirit-beast'].anim],
-      [OPEN_MS + reactDelayOf('战斗-出拳'), 1, '战斗-受击'],
-      [atBeast + reactDelayOf(SKILLS['spirit-beast'].anim), 1, '战斗-受击'],
-    ],
-    '出手方自己那拍追加灵兽（顶掉攻击动画的尾巴）；挨打方各跟各的打击时刻（灵兽那一下跟灵兽素材的冲撞时刻）',
+    summon.map((step) => [step.at, step.who]),
+    [[OPEN_MS + main, 0]],
+    '排在直拳播完之后（不把直拳从中间切断）',
   );
-  const beastLine = steps.find((step) => step.at === atBeast && step.line);
-  assert.ok(beastLine && beastLine.who === 0, '灵兽那句台词和动画同拍、在出手方');
-  assert.equal(
-    steps.find((step) => step.anim === SKILLS['spirit-beast'].anim)?.rate,
-    rateFor(SKILLS['spirit-beast'].anim, SLOT_MS),
-    '灵兽助阵占满出手那一格',
+  const beastShot = shotsOf(steps).find((step) => step.shot.kind === '灵兽');
+  assert.ok(beastShot);
+  assert.equal(beastShot.at, summon[0].at + releaseOffset('出手-召唤灵兽'));
+  assert.equal(animsOf(steps, HIT).length, 2, '直拳一下、灵兽一下，各演一次（第二次在上一段受击播完之后）');
+  const beastLine = steps.find((step) => step.at === impactOf(beastShot) && step.line);
+  assert.ok(beastLine && beastLine.who === 0, '灵兽那句台词在它撞上的那一刻、出手方那边');
+  // 灵兽被躲开（引擎只记一条 dodge，且是这一格最后一件事）
+  const dodged = timeline([start(0), decide(0, UNARMED), hit(0), dodge(1)], NAMES, seq(), sets);
+  const dodgedShots = shotsOf(dodged);
+  const last = dodgedShots[dodgedShots.length - 1];
+  assert.equal(animsOf(dodged, '出手-召唤灵兽').length, 1);
+  assert.deepEqual([last?.shot.kind, last?.shot.miss], ['灵兽', true]);
+  // 没有灵兽助阵时，同样的序列是追击被躲开：飞的是同一格的拳风，不召唤
+  const plain = timeline([start(0), decide(0, UNARMED), hit(0), dodge(1)], NAMES, seq(), [[], []]);
+  assert.equal(animsOf(plain, '出手-召唤灵兽').length, 0);
+  assert.deepEqual(
+    shotsOf(plain).map((step) => step.shot.kind),
+    ['拳风', '拳风'],
   );
 });
 
-test('第六感：反击方贴着自己挨的那一下之后加播招式-第六感（先挨一下、再反手劈）', () => {
+test('第六感：反击方先挨完那一下、回到站姿，再闭眼感应反劈；掌劈飞回去，原攻击方在它到达时受击', () => {
   const steps = timeline(
-    [start(0), decide(0, { kind: 'unarmed' }), hit(0, 20, [100, 70]), counter(1, 12, [88, 70])],
+    [start(0), decide(0, UNARMED), hit(0, 20, [100, 70]), counter(1, 12, [88, 70])],
     NAMES,
     seq(),
+    [[], ['sixth-sense']],
   );
-  const atCounter = OPEN_MS + BEAT_MS;
-  const hitDelay = reactDelayOf('战斗-出拳');
-  const senseDelay = hitDelay + 300;
+  const [first, chop] = shotsOf(steps);
+  const firstReact = animsOf(steps, HIT).find((step) => step.who === 1);
+  assert.ok(firstReact);
+  assert.equal(firstReact.at, impactOf(first) - windupOf(HIT));
+  const sense = animsOf(steps, '出手-第六感');
   assert.deepEqual(
-    steps.filter((step) => step.anim && step.at >= OPEN_MS).map((step) => [step.at, step.who, step.anim]),
-    [
-      [OPEN_MS, 0, '战斗-出拳'],
-      [OPEN_MS + hitDelay, 1, '战斗-受击'],
-      [atCounter + REACT_MS, 0, '战斗-受击'],
-      [atCounter + senseDelay, 1, SKILLS['sixth-sense'].anim],
-    ],
-    '反击方挨的（hit 的受击）跟着攻击素材的打击时刻；第六感再晚 300ms（贴着挨完再反劈）；' +
-      '出手方挨的反击是徒手快打，维持固定 REACT_MS',
+    sense.map((step) => [step.at, step.who]),
+    [[firstReact.at + animLength(HIT, reactRate(HIT)), 1]],
+    '先挨后反：受击播完才反劈',
   );
-  const sense = steps.find((step) => step.anim === SKILLS['sixth-sense'].anim);
-  assert.equal(sense?.rate, rateFor(SKILLS['sixth-sense'].anim, SLOT_MS - senseDelay), '反应窗口算倍速');
-  const counterLine = steps.find((step) => step.at === atCounter && step.line);
-  assert.ok(counterLine && counterLine.who === 1, '反击的台词还在反击方那一拍');
-  // 反击打回去那一下被泡泡挡了：出手方照上一条播泡泡护体
-  const blockedCounter = timeline(
-    [start(0), decide(0, { kind: 'unarmed' }), hit(0, 20, [100, 70]), counter(1, 12, [76, 70], true)],
-    NAMES,
-    seq(),
-    [['bubble'], []],
-  );
-  assert.deepEqual(
-    blockedCounter.filter((step) => step.anim && step.at >= OPEN_MS).map((step) => [step.at, step.who, step.anim]),
-    [
-      [OPEN_MS, 0, '战斗-出拳'],
-      [OPEN_MS + hitDelay, 1, '战斗-受击'],
-      [atCounter + REACT_MS, 0, SKILLS.bubble.anim],
-      [atCounter + senseDelay, 1, SKILLS['sixth-sense'].anim],
-    ],
-  );
+  assert.deepEqual([chop.who, chop.shot.kind, chop.at], [1, '手刀', sense[0].at + releaseOffset('出手-第六感')]);
+  const backReact = animsOf(steps, HIT).find((step) => step.who === 0);
+  assert.equal(backReact?.at, impactOf(chop) - windupOf(HIT), '原攻击方在掌劈到达时受击');
+  const counterLine = steps.find((step) => step.at === impactOf(chop) && step.line);
+  assert.ok(counterLine && counterLine.who === 1, '反击的台词在反击方那边、命中那一刻');
 });
 
-test('无影手：combo 那一拍出手方加播招式-无影手，没有 shadow-fists 时只有台词', () => {
-  const events = [start(0), decide(0, { kind: 'unarmed' }), hit(0), combo(0, 12, [100, 43])];
-  const anims = (skillSets: [SkillId[], SkillId[]]) =>
-    timeline(events, NAMES, seq(), skillSets)
-      .filter((step) => step.anim && step.at >= OPEN_MS)
-      .map((step) => [step.at, step.who, step.anim]);
-  const atCombo = OPEN_MS + BEAT_MS;
-  const delay = reactDelayOf('战斗-出拳');
+test('无影手：主攻收势后接一段连拳，拳影齐发；没有无影手的追击只再放一发、不另播动作也不重新受击', () => {
+  const events = [start(0), decide(0, UNARMED), hit(0), combo(0, 12, [100, 43])];
+  const main = animLength('战斗-直拳', rateFor('战斗-直拳', SLOT_MS));
+  const fists = timeline(events, NAMES, seq(), [['shadow-fists'], []]);
+  const flurry = animsOf(fists, '战斗-连拳');
   assert.deepEqual(
-    anims([['shadow-fists'], []]),
-    [
-      [OPEN_MS, 0, '战斗-出拳'],
-      [atCombo, 0, SKILLS['shadow-fists'].anim],
-      [OPEN_MS + delay, 1, '战斗-受击'],
-      [atCombo + delay, 1, '战斗-受击'],
-    ],
-    '一拳接连续拳影（和 combo 台词同拍），挨打方两段攻击各反应一次',
+    flurry.map((step) => [step.at, step.who]),
+    [[OPEN_MS + main, 0]],
   );
+  const fistShot = shotsOf(fists).find((step) => step.shot.kind === '拳影');
+  assert.ok(fistShot);
   assert.deepEqual(
-    anims([[], []]),
-    [
-      [OPEN_MS, 0, '战斗-出拳'],
-      [OPEN_MS + delay, 1, '战斗-受击'],
-      [atCombo + delay, 1, '战斗-受击'],
-    ],
-    '连击来自身法 / 毽子这些加成，出手方没无影手就不配拳影',
+    [fistShot.at, fistShot.shot.count, fistShot.shot.gapMs],
+    [flurry[0].at + releaseOffset('战斗-连拳'), 5, 100],
   );
+  assert.equal(animsOf(fists, HIT).length, 2, '连拳到的时候上一段受击已经播完，重新挨一下');
+
+  const plain = timeline(events, NAMES, seq(), [[], []]);
+  assert.equal(animsOf(plain, '战斗-连拳').length, 0);
+  const [, again] = shotsOf(plain);
+  assert.deepEqual(
+    [again.shot.kind, again.at],
+    ['拳风', OPEN_MS + releaseOffset('战斗-直拳') + BEAT_MS],
+    '手还伸着，再放一发同一格的拳风',
+  );
+  assert.equal(animsOf(plain, HIT).length, 1, '追击打在还在后仰的人身上：不重新起播');
   // 无影手只看出手方，不是挨打方
-  assert.deepEqual(anims([[], ['shadow-fists']]), anims([[], []]));
+  assert.deepEqual(timeline(events, NAMES, seq(), [[], ['shadow-fists']]), plain);
 });
 
 test('收场：赢的播胜利、输的播倒地，结果台词和它们一起标 closing（快进跳到这几步）', () => {
@@ -369,17 +463,26 @@ test('收场：赢的播胜利、输的播倒地，结果台词和它们一起�
       [OPEN_MS, 0, 'line'],
     ],
   );
-  assert.deepEqual(
-    closing.map((step) => step.hp),
-    [
-      [55, 0],
-      [55, 0],
-      [55, 0],
-    ],
-  );
+  assert.ok(closing.every((step) => step.hp[0] === 55 && step.hp[1] === 0));
 });
 
-test('假死遁：救回来那一下自己播招式-假死遁；被定住只有台词没动画', () => {
+test('收场等两只都回到站姿：最后一下的受击播完才庆祝 / 倒地', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, UNARMED),
+      hit(0, 90, [100, 0]),
+      { actor: 0, kind: 'end', winner: 0, reason: 'ko', hp: [100, 0] } as BattleEvent,
+    ],
+    NAMES,
+    seq(),
+  );
+  const react = animsOf(steps, HIT)[0];
+  const fall = animsOf(steps, '战斗-倒地')[0];
+  assert.ok(fall.at >= react.at + animLength(HIT, reactRate(HIT)), '倒地不切断受击');
+});
+
+test('假死遁：救回来那一下自己播招式-假死遁（对准致命那一下）；被定住只有台词没动画', () => {
   const steps = timeline(
     [
       start(0),
@@ -392,30 +495,46 @@ test('假死遁：救回来那一下自己播招式-假死遁；被定住只有�
   );
   assert.deepEqual(
     steps.filter((step) => step.anim && step.at >= OPEN_MS).map((step) => [step.who, step.anim]),
-    [[1, SKILLS['play-dead'].anim]],
+    [[1, '招式-假死遁']],
     '这一拳被打倒又爬起来，不播受击（假死遁自己播）',
   );
   const skip = steps.find((step) => step.line?.includes('定在原地') || step.line?.includes('愣在原地'));
   assert.ok(skip && skip.who === 1, 'skip 有一句、出现在被定住那一方');
+  // 有出手格子时：假死遁对准那一下的命中时刻
+  const slotted = timeline(
+    [start(0), decide(0, UNARMED), hit(0, 200, [100, 0]), { actor: 1, kind: 'play-dead', hp: [100, 1] } as BattleEvent],
+    NAMES,
+    seq(),
+  );
+  const [shot] = shotsOf(slotted);
+  assert.equal(animsOf(slotted, '招式-假死遁')[0]?.at, impactOf(shot) - windupOf('招式-假死遁'));
 });
 
-test('渡劫：一道雷一格，没有对手的反应；雷被泡泡挡了改播渡劫者自己的护体', () => {
+test('渡劫：每道雷是一发天上来的飞行物（乌云 + 闪电），劈中那一刻触电；下一道等触电播完；挡下打在泡泡上', () => {
   const steps = timeline([start(0), strike(0), strike(1)], ['小鱼', '天雷'], seq());
-  const strikes = steps.filter((step) => step.anim === '修炼-挨雷');
+  const shots = shotsOf(steps);
   assert.deepEqual(
-    strikes.map((step) => step.at),
-    [OPEN_MS, OPEN_MS + SLOT_MS],
+    shots.map((step) => [step.who, step.shot.kind, step.shot.track, step.shot.sky, step.shot.hitFx]),
+    [
+      [0, '闪电', 'bolt', true, TRIBULATION_FLY.hitFx],
+      [0, '闪电', 'bolt', true, TRIBULATION_FLY.hitFx],
+    ],
   );
+  assert.equal(shots[0].at, OPEN_MS);
+  const shocks = animsOf(steps, '修炼-触电');
   assert.deepEqual(
-    strikes.map((step) => step.who),
-    [0, 0],
+    shocks.map((step) => [step.who, step.at]),
+    shots.map((step) => [0, impactOf(step) - windupOf('修炼-触电')]),
   );
-  assert.equal(steps.filter((step) => step.anim === '战斗-受击').length, 0);
-  // 挡下的那道：同一拍换成招式-泡泡护体（渡劫只有自家这一边，没有对手的反应）
+  assert.ok(shots[1].at >= shocks[0].at + animLength('修炼-触电', reactRate('修炼-触电')), '第二道等触电播完');
+  assert.equal(animsOf(steps, HIT).length, 0);
+  // 挡下的那道：渡劫者自己的泡泡护体，飞行物打在泡泡上（渡劫只有自家这一边）
   const blockedSteps = timeline([start(0), strike(0, 30, [85, 0], true)], ['小鱼', '天雷'], seq(), [['bubble'], []]);
+  const [blockedShot] = shotsOf(blockedSteps);
+  assert.equal(blockedShot.shot.blocked, true);
   assert.deepEqual(
     blockedSteps.filter((step) => step.anim && step.at >= OPEN_MS).map((step) => [step.at, step.who, step.anim]),
-    [[OPEN_MS, 0, SKILLS.bubble.anim]],
+    [[impactOf(blockedShot) - windupOf(BUBBLE), 0, BUBBLE]],
   );
 });
 
@@ -433,20 +552,20 @@ const TRIB_PILL = { tribulation: { pill: true } };
 test('渡劫形态：没有对手窗口就不排起手式；吃丹先播一段 修炼-服丹', () => {
   const plain = timeline([start(0), strike(0), tribEnd(true)], ['小鱼', '天雷'], seq(), undefined, TRIB);
   assert.deepEqual(
-    plain.filter((step) => step.at === 0).map((step) => [step.who, step.anim]),
+    plain.filter((step) => step.at === 0 && step.anim).map((step) => [step.who, step.anim]),
     [],
-    '不吃丹：开场什么都没有（第一道雷自己就是开头）',
+    '不吃丹：开场没有动画（第一道雷自己就是开头）',
   );
-  assert.equal(plain.filter((step) => step.anim === '战斗-起手').length, 0, '没有对手，不播两个起手式');
+  assert.equal(animsOf(plain, '战斗-起手').length, 0, '没有对手，不播两个起手式');
 
   const fed = timeline([start(0), strike(0), tribEnd(true)], ['小鱼', '天雷'], seq(), undefined, TRIB_PILL);
   assert.deepEqual(
-    fed.filter((step) => step.at === 0).map((step) => [step.who, step.anim, step.rate]),
+    fed.filter((step) => step.at === 0 && step.anim).map((step) => [step.who, step.anim, step.rate]),
     [[0, '修炼-服丹', rateFor('修炼-服丹', OPEN_MS)]],
   );
 });
 
-test('渡劫形态：台词报第几道雷（第 i/N 道），一道雷一句', () => {
+test('渡劫形态：台词报第几道雷（第 i/N 道），一道雷一句，出在劈中那一刻', () => {
   const steps = timeline(
     [start(0), strike(0), strike(1), strike(2), tribEnd(false)],
     ['小鱼', '天雷'],
@@ -454,14 +573,18 @@ test('渡劫形态：台词报第几道雷（第 i/N 道），一道雷一句', 
     undefined,
     TRIB,
   );
-  const lines = steps.filter((step) => step.line).map((step) => step.line ?? '');
+  const lines = steps.filter((step) => step.line);
   assert.equal(lines.length, 3, '三道雷三句');
   assert.ok(
-    lines.every((line) => line.startsWith('第 ') && line.includes('/3 道：')),
-    `都报第几道：${lines}`,
+    lines.every((step) => (step.line ?? '').startsWith('第 ') && (step.line ?? '').includes('/3 道：')),
+    `都报第几道：${lines.map((step) => step.line)}`,
   );
-  assert.match(lines[0], /^第 1\/3 道：/);
-  assert.match(lines[2], /^第 3\/3 道：/);
+  assert.match(lines[0].line ?? '', /^第 1\/3 道：/);
+  assert.match(lines[2].line ?? '', /^第 3\/3 道：/);
+  assert.deepEqual(
+    lines.map((step) => step.at),
+    shotsOf(steps).map(impactOf),
+  );
   // 被挡的那道照旧带「（泡泡挡掉一半）」
   const blocked = timeline([start(0), strike(0, 20, [80, 0], true)], ['小鱼', '天雷'], seq(2), [['bubble'], []], TRIB);
   assert.match(blocked.find((step) => step.line)?.line ?? '', /第 1\/1 道：.*（泡泡挡掉一半）$/);
@@ -502,13 +625,45 @@ test('渡劫形态：收场成功播 修炼-突破，失败播池里的 工作�
     lose.filter((step) => step.closing).every((step) => step.line === undefined),
     '收场只有动画，台词交给结果感言',
   );
-  assert.equal(lose.filter((step) => step.anim === '战斗-倒地').length, 0);
+  assert.equal(animsOf(lose, '战斗-倒地').length, 0);
 });
 
-test('气血：每一步都带上它之后的两条血（擂台照它刷新）', () => {
-  const steps = timeline([start(0), decide(0, { kind: 'unarmed' }), hit(0, 20, [100, 70])], NAMES, seq());
+test('气血：每一步都带上两条血（擂台照它刷新），最后停在结果', () => {
+  const steps = timeline([start(0), decide(0, UNARMED), hit(0, 20, [100, 70])], NAMES, seq());
   assert.ok(steps.every((step) => step.hp.length === 2));
   assert.deepEqual(steps[steps.length - 1].hp, [100, 70]);
+});
+
+/** 每只宠物的动画按时间排开：下一段起播不早于上一段播完（假死遁可以打断——装死倒下那一下必须演出来） */
+function assertNoCut(steps: Step[], label: string): void {
+  for (const who of [0, 1] as const) {
+    const anims = steps.filter((step) => step.who === who && step.anim);
+    for (let i = 1; i < anims.length; i += 1) {
+      const prev = anims[i - 1];
+      const next = anims[i];
+      if (next.anim === '招式-假死遁') continue;
+      const ends = prev.at + animLength(prev.anim ?? '', prev.rate ?? 1);
+      assert.ok(
+        next.at >= ends - 1,
+        `${label}：${who} 号的「${next.anim}」(${next.at}) 切断了「${prev.anim}」(${prev.at}–${ends})`,
+      );
+    }
+  }
+}
+
+test('衔接（用户要求丝滑）：真引擎扫遍境界，同一只宠物的动画从不被下一段从中间切断', () => {
+  for (let stage = 0; stage <= MAX_STAGE; stage += 1) {
+    const you = fighterAt(stage, seq(stage));
+    const foe = shadowOf(you);
+    for (const [label, events] of [
+      [`空手 ${stage}`, fight(you, foe, `cut-u-${stage}`, [unarmed, unarmed])],
+      [`自动出招 ${stage}`, fight(you, foe, `cut-a-${stage}`)],
+    ] as const) {
+      assertNoCut(timeline(events, [you.name, foe.name], seq(), [you.skills, foe.skills]), label);
+    }
+    const tribulated = tribulate(you, tribulationStrikes(stage + 1), stage, `cut-t-${stage}`);
+    assertNoCut(timeline(tribulated, [you.name, '天雷'], seq(), [you.skills, []], TRIB), `渡劫 ${stage}`);
+  }
 });
 
 test('真引擎的一场：时间线按时间递增，整场长度可控（一场别拖太久）', () => {
@@ -520,8 +675,7 @@ test('真引擎的一场：时间线按时间递增，整场长度可控（一�
     steps.every((step, i) => i === 0 || steps[i - 1].at <= step.at),
     '时间线按时间递增',
   );
-  // 出手封顶 30 次（引擎的兜底），也就 30 格 + 开场 + 收场
-  assert.ok(steps[steps.length - 1].at < 90_000, `整场不超过 90 秒：实际 ${steps[steps.length - 1].at / 1000} 秒`);
+  assert.ok(steps[steps.length - 1].at < 120_000, `整场不超过 2 分钟：实际 ${steps[steps.length - 1].at / 1000} 秒`);
 });
 
 /** 执行器用的假手：记下每次调用（`from = 'pool'` 的素材走名字形态，这里一并记下来核对） */
@@ -553,20 +707,28 @@ const timers = {
 };
 
 const stepAt = (at: number, who: 0 | 1, over: Partial<Step> = {}): Step => ({ at, who, hp: [10, 10], ...over });
+const SHOT: Shot = { kind: '拳风', track: 'line', flightMs: 380, count: 1, gapMs: 0, hitFx: '命中-星', hand: [1, 2] };
 
-/** 一边演一边核对：各边的记录本 + 擂台推过的值 */
-function makeShow(steps: Step[], foe: FakeSide | null = fakeSide()) {
+/** 一边演一边核对：各边的记录本 + 擂台推过的值 + 特效窗口收到的飞行物 */
+function makeShow(steps: Step[], foe: FakeSide | null = fakeSide(), lead?: [number, number]) {
   const self = fakeSide();
   const arena: number[] = [];
-  const sides: ShowSides = { self, foe, arena: (pair) => void arena.push(pair[0]) };
-  return { self, foe, arena, show: new BattleShow(steps, sides, timers) };
+  const shots: Array<[Shot, 0 | 1]> = [];
+  const sides: ShowSides = {
+    self,
+    foe,
+    arena: (pair) => void arena.push(pair[0]),
+    shoot: (shot, who) => void shots.push([shot, who]),
+  };
+  return { self, foe, arena, shots, show: new BattleShow(steps, sides, timers, lead) };
 }
 
-test('执行器：按 at 依次播，台词按 LINE_MS 显示，最后一步放完才 resolve', async (t) => {
+test('执行器：按 at 依次播，台词按 LINE_MS 显示，飞行物交给特效窗口，最后一步放完才 resolve', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
-  const { self, foe, arena, show } = makeShow([
+  const { self, foe, arena, shots, show } = makeShow([
     stepAt(0, 0, { anim: '战斗-起手', rate: 1.5 }),
     stepAt(0, 1, { line: '起手' }),
+    stepAt(500, 0, { shot: SHOT }),
     stepAt(SLOT_MS, 0, { line: '一拳', hp: [10, 3] }),
   ]);
   let settled = false;
@@ -576,10 +738,14 @@ test('执行器：按 at 依次播，台词按 LINE_MS 显示，最后一步放�
   t.mock.timers.tick(0);
   assert.deepEqual(self.played, [['战斗-起手', 1.5]]);
   assert.deepEqual(foe?.said, [['起手', LINE_MS]]);
+  assert.deepEqual(shots, []);
 
-  t.mock.timers.tick(SLOT_MS);
+  t.mock.timers.tick(500);
+  assert.deepEqual(shots, [[SHOT, 0]], '飞行物到点交给特效窗口，带上出手方');
+
+  t.mock.timers.tick(SLOT_MS - 500);
   assert.deepEqual(self.said, [['一拳', LINE_MS]]);
-  assert.deepEqual(arena, [10, 10, 10]);
+  assert.deepEqual(arena, [10, 10, 10, 10]);
   assert.equal(settled, false, '台词还在显示，不算演完');
 
   t.mock.timers.tick(LINE_MS);
@@ -587,10 +753,40 @@ test('执行器：按 at 依次播，台词按 LINE_MS 显示，最后一步放�
   assert.equal(settled, true);
 });
 
+test('执行器 animLeadMs：动画按各边的提前量早发（上屏有延迟），飞行物、台词、气血照原时刻', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  const { self, foe, shots, show } = makeShow(
+    [
+      stepAt(1_000, 0, { anim: '战斗-直拳', rate: 1.667 }),
+      stepAt(1_000, 1, { anim: HIT, rate: 2.2, line: '哎哟' }),
+      stepAt(1_000, 0, { shot: SHOT }),
+      stepAt(50, 1, { anim: '战斗-起手', rate: 1 }),
+    ],
+    fakeSide(),
+    [120, 80],
+  );
+  const done = show.run();
+  t.mock.timers.tick(0);
+  assert.deepEqual(foe?.played, [['战斗-起手', 1]], '提前量比 at 还大：夹到 0 立刻发');
+  t.mock.timers.tick(879);
+  assert.deepEqual(self.played, [], '自家宠物还没到提前的时刻');
+  t.mock.timers.tick(1);
+  assert.deepEqual(self.played, [['战斗-直拳', 1.667]], '自家宠物提前 120ms');
+  t.mock.timers.tick(40);
+  assert.deepEqual(foe?.played[foe.played.length - 1], [HIT, 2.2], '对手提前 80ms');
+  assert.deepEqual(foe?.said, [], '台词不提前');
+  assert.deepEqual(shots, [], '飞行物不提前');
+  t.mock.timers.tick(80);
+  assert.deepEqual(foe?.said, [['哎哟', LINE_MS]]);
+  assert.deepEqual(shots, [[SHOT, 0]]);
+  show.dispose();
+  await done;
+});
+
 test('没有对手窗口（X4 渡劫）：对手那几步只是没画面，气血条照更新，不报错', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
   const { self, arena, show } = makeShow(
-    [stepAt(0, 0, { line: '第一道雷' }), stepAt(100, 1, { anim: '战斗-受击' }), stepAt(200, 0, { line: '第二道雷' })],
+    [stepAt(0, 0, { line: '第一道雷' }), stepAt(100, 1, { anim: HIT }), stepAt(200, 0, { line: '第二道雷' })],
     null,
   );
   const done = show.run();
@@ -603,7 +799,7 @@ test('没有对手窗口（X4 渡劫）：对手那几步只是没画面，气�
   assert.deepEqual(arena, [10, 10, 10], '三步都刷了擂台');
 });
 
-test('渡劫形态整场跑一遍：雷一道道挨、失败那一下走池内素材的名字形态', async (t) => {
+test('渡劫形态整场跑一遍：雷一道道劈（天上来的飞行物）、劈中触电、失败那一下走池内素材的名字形态', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
   const steps = timeline(
     [start(0), strike(0, 40, [60, 0]), strike(1, 60, [0, 0]), tribEnd(false, [0, 0])],
@@ -612,14 +808,21 @@ test('渡劫形态整场跑一遍：雷一道道挨、失败那一下走池内�
     undefined,
     TRIB,
   );
-  const { self, show } = makeShow(steps, null);
+  const { self, shots, show } = makeShow(steps, null);
   const done = show.run();
-  t.mock.timers.tick(OPEN_MS + SLOT_MS * 2 + LINE_MS * 2);
+  t.mock.timers.tick(steps[steps.length - 1].at + LINE_MS);
   await done;
   assert.deepEqual(
     self.played.map(([anim]) => anim),
-    ['修炼-挨雷', '修炼-挨雷'],
-    '两道雷各一段挨雷（url 形态）',
+    ['修炼-触电', '修炼-触电'],
+    '两道雷各一段触电（url 形态）',
+  );
+  assert.deepEqual(
+    shots.map(([shot, who]) => [shot.kind, shot.sky, who]),
+    [
+      ['闪电', true, 0],
+      ['闪电', true, 0],
+    ],
   );
   assert.deepEqual(
     self.pooled.map(([anim]) => anim),
@@ -630,9 +833,10 @@ test('渡劫形态整场跑一遍：雷一道道挨、失败那一下走池内�
 
 test('快进：剩下的步骤不播，直接到结果（收场几步 + 最终气血），run 立即结束', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
-  const { self, foe, arena, show } = makeShow([
+  const { self, foe, arena, shots, show } = makeShow([
     stepAt(0, 0, { anim: '战斗-起手' }),
     stepAt(SLOT_MS, 0, { line: '打你' }),
+    stepAt(3_000, 0, { shot: SHOT }),
     stepAt(6_000, 0, { anim: '战斗-胜利', hp: [50, 0], closing: true }),
     stepAt(6_000, 1, { line: '我赢了', hp: [50, 0], closing: true }),
   ]);
@@ -650,6 +854,7 @@ test('快进：剩下的步骤不播，直接到结果（收场几步 + 最终�
   ]);
   assert.deepEqual(foe?.said, [['我赢了', LINE_MS]]);
   assert.deepEqual(arena, [10, 10, 50, 50]);
+  assert.deepEqual(shots, [], '快进掉的飞行物不再放');
   show.skip();
   assert.equal(self.played.length, 2, '已经收场，再快进不重复播');
 });
@@ -681,29 +886,40 @@ test('空时间线：run 直接结束（引擎没给事件也不能卡住调用�
   assert.deepEqual(self.played, []);
 });
 
+test('素材都在包里：出手 / 受击素材、特效贴图、客人窗口预取清单，一个不缺', () => {
+  const webm = new Set(
+    readdirSync(join(packageRoot, 'assets', 'webm'))
+      .filter((file) => file.endsWith('.webm'))
+      .map((file) => file.slice(0, -'.webm'.length)),
+  );
+  for (const show of Object.values(ATTACK_SHOW)) {
+    assert.ok(webm.has(show.action), `出手素材不存在：${show.action}`);
+    if (show.fly?.react) assert.ok(webm.has(show.fly.react), `受击素材不存在：${show.fly.react}`);
+    if (show.fly) assert.ok(RELEASE[show.action], `${show.action} 没量出手时刻`);
+  }
+  for (const anim of SHOW_ANIMS) assert.ok(webm.has(anim), `预取清单里的素材不存在：${anim}`);
+  for (const name of FX_ASSETS) {
+    assert.ok(existsSync(join(packageRoot, 'assets', 'pic', 'fx', `${name}.png`)), `特效贴图不存在：${name}`);
+  }
+  assert.ok(FX_ASSETS.includes('乌云'), '天雷顺带画的乌云也要预加载');
+});
+
 test('真引擎的若干场：素材名都对得上包内素材、倍速都在 /anim 允许区间、整场不拖沓', () => {
-  // 素材名是拼出来的（法宝-<名> / 招式-<名>），拼错就是「那一下没动画」——这里逐个核到文件；
-  // 倍速越界宿主直接回 bad-request，同样等于没动画。
-  const assetFiles = readdirSync(join(packageRoot, 'assets', 'webm'))
-    .filter((file) => file.endsWith('.webm'))
-    .map((file) => file.slice(0, -'.webm'.length));
-  const assets = new Set(assetFiles);
+  // 倍速越界宿主直接回 bad-request，等于那一下没动画；素材名拼错同理——逐个核到文件
+  const assets = new Set(
+    readdirSync(join(packageRoot, 'assets', 'webm'))
+      .filter((file) => file.endsWith('.webm'))
+      .map((file) => file.slice(0, -'.webm'.length)),
+  );
   // X4 渡劫失败那一下是**动画池里的现有素材**（名字形态播）：除了文件在，还得真在池里（config 的
   // animations.events.workStatus 那一档），不然宿主回 unknown-animation，那一下就是没动画。
-  assert.ok(assetFiles.includes(TRIBULATION_LOSS_ANIM), `${TRIBULATION_LOSS_ANIM} 有素材文件`);
+  assert.ok(assets.has(TRIBULATION_LOSS_ANIM), `${TRIBULATION_LOSS_ANIM} 有素材文件`);
   const pool = readFileSync(join(packageRoot, 'assets', 'config.jsonc'), 'utf8');
   assert.match(
     pool.slice(pool.indexOf('"workStatus"')),
     new RegExp(`${TRIBULATION_LOSS_ANIM}"`),
     '池子里点得到它（用户没换配置时）',
   );
-  // 境界扫到顶： fighterAt 一路攒下被动招式，高境界那几只才带得出泡泡护体 / 灵兽助阵 / 第六感 / 无影手
-  const newAnims = [
-    SKILLS.bubble.anim,
-    SKILLS['spirit-beast'].anim,
-    SKILLS['sixth-sense'].anim,
-    SKILLS['shadow-fists'].anim,
-  ];
   const played = new Set<string>();
   for (let stage = 0; stage <= MAX_STAGE; stage += 1) {
     const you = fighterAt(stage, seq(stage));
@@ -711,6 +927,7 @@ test('真引擎的若干场：素材名都对得上包内素材、倍速都在 /
     const tribulated = tribulate(you, tribulationStrikes(stage + 1), stage, `tribulate-${stage}`);
     for (const [events, options] of [
       [fight(you, foe, `sweep-${stage}`, [unarmed, unarmed]), undefined] as const,
+      [fight(you, foe, `sweep-auto-${stage}`), undefined] as const,
       // 渡劫：吃丹不吃丹两种开场 × 扛住没扛住两种收场（雷数照 §X4 的规则，境界扫到顶也就排到 9 道）
       [tribulated, { tribulation: { pill: false } }] as const,
       [tribulated, { tribulation: { pill: true } }] as const,
@@ -725,12 +942,14 @@ test('真引擎的若干场：素材名都对得上包内素材、倍速都在 /
         // 渡劫这一场只有自家这一边（没有对手窗口）：排到 who = 1 就是映射漏了
         if (options) assert.equal(step.who, 0, `渡劫不该有对手那一边：${step.anim ?? step.line}`);
       }
-      assert.ok(steps[steps.length - 1].at < 90_000, `整场不超过 90 秒：${steps[steps.length - 1].at / 1000}`);
+      assert.ok(steps[steps.length - 1].at < 120_000, `整场不超过 2 分钟：${steps[steps.length - 1].at / 1000}`);
     }
   }
-  // 这四段是这次新接的：没演到就是扫描白跑（招式攒不满、映射没生效都算）
-  for (const anim of newAnims) assert.ok(played.has(anim), `这批扫描没演到 ${anim}`);
-  // X4 渡劫那几段（挨雷 / 服丹 / 突破 / 垂头叹气）也都得演到
-  for (const anim of [TRIBULATION_STRIKE_ANIM, TRIBULATION_PILL_ANIM, TRIBULATION_WIN_ANIM, TRIBULATION_LOSS_ANIM])
+  // 境界扫到顶时 fighterAt 攒得出这几门被动招式：没演到就是扫描白跑（招式攒不满、映射没生效都算）
+  for (const anim of ['出手-召唤灵兽', '出手-第六感', '战斗-连拳', BUBBLE, '修炼-触电']) {
+    assert.ok(played.has(anim), `这批扫描没演到 ${anim}`);
+  }
+  for (const anim of [TRIBULATION_PILL_ANIM, TRIBULATION_WIN_ANIM, TRIBULATION_LOSS_ANIM]) {
     assert.ok(played.has(anim), `扫描没演到 ${anim}`);
+  }
 });

@@ -1,0 +1,329 @@
+/**
+ * dev/fx-preview.mjs —— 对战演出逐招预览（开发自测工具，不入 npm 包）：不开 app，把每一招单独排成一小场，
+ * 用**正式代码**（battle-show.ts 的 timeline、fx-window.ts 的 fxSpec 与 fxPage）算时间线和坐标，
+ * 在无头 Chromium 里把两只宠物（视频）和特效层叠在一起播，录成 webm——逐帧看「出手 → 飞行物 → 命中 → 受击」
+ * 衔不衔得上。素材重做、改飞行时间 / 贴图大小 / 前摇之后，跑一遍就知道哪一招不对。
+ *
+ * 用法（strip-types 与 test-register 的说明见 scripts/test-ts-resolver.mjs）：
+ *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/fx-preview.mjs [场景…] [--out 目录] [--layout trial|spar]
+ *
+ * 不给场景就全录；`--list` 列出场景名，`--plan` 只打印时间线不录。每个场景录成 <目录>/<场景>.mp4，逐帧截图在 <目录>/<场景>/<毫秒>.jpg
+ * （毫秒 = 距离开打，方便按时间线的时刻挑帧；默认目录是系统临时目录下的 dsh-pet-fx-preview）。
+ * 帧来自 Chromium 的屏幕推流（CDP Page.startScreencast），拼视频用系统的 ffmpeg。
+ * 布局：trial = 心魔试炼（两只等大、贴身站），spar = 切磋（客人小一号、隔开一段社交距离）。
+ * 本机 playwright 对应版本的浏览器没下载时，设 FX_PREVIEW_CHROMIUM 指到已有的 chrome-headless-shell 可执行文件。
+ * 预览里的宠物不经过 app 的动画通道，没有真机上的上屏延迟——那一段要真机录屏量（BattleShow 的 animLeadMs）。
+ */
+import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { extname, join, resolve } from 'node:path';
+import { chromium } from 'playwright';
+import { timeline } from '../../src/app/battle-show.ts';
+import { fxPage, fxSpec } from '../../src/app/fx-window.ts';
+
+const ROOT = resolve(import.meta.dirname, '../..');
+const args = process.argv.slice(2);
+const option = (name, fallback) => (args.includes(name) ? args[args.indexOf(name) + 1] : fallback);
+const outDir = resolve(option('--out', join(tmpdir(), 'dsh-pet-fx-preview')));
+const layoutName = option('--layout', 'trial');
+const W = 1100;
+const H = 620;
+
+/** 两只的舞台（画布矩形）：自家宠物在左、面朝右（整段镜像），对手在右、面朝左（素材原样） */
+const LAYOUTS = {
+  trial: { self: { x: 60, y: 300, width: 480 }, foe: { x: 520, y: 300, width: 480 } },
+  spar: { self: { x: 40, y: 300, width: 480 }, foe: { x: 640, y: 360, width: 336 } },
+};
+const layout = LAYOUTS[layoutName];
+if (!layout) throw new Error(`没有这种布局：${layoutName}（trial / spar）`);
+const stageOf = (rect, facing) => ({ ...rect, height: (rect.width * 9) / 16, facing });
+const stages = [stageOf(layout.self, 'right'), stageOf(layout.foe, 'left')];
+const bounds = { x: 0, y: 0, width: W, height: H };
+
+const hp = [100, 100];
+const start = { actor: 0, kind: 'start', hp };
+const decide = (actor, action) => ({ actor, kind: 'decide', action, hp });
+const weapon = (id) => ({ kind: 'weapon', weapon: id });
+const skill = (id) => ({ kind: 'skill', skill: id });
+const hit = (actor, extra = {}) => ({ actor, kind: 'hit', damage: 10, crit: false, blocked: false, hp, ...extra });
+/** 法宝打中（带上法宝编号，解说台词才对得上） */
+const whit = (actor, id, extra = {}) => hit(actor, { weapon: id, ...extra });
+const none = [[], []];
+
+/** 场景：名字 → { events, skillSets, tribulation? }。每招一小场，外加闪避 / 挡下 / 反击 / 假死 / 反方向 / 渡劫 */
+const SCENES = {
+  空手: { events: [start, decide(0, { kind: 'unarmed' }), hit(0)] },
+  水枪: { events: [start, decide(0, weapon('water-gun')), whit(0, 'water-gun')] },
+  扑克牌: { events: [start, decide(0, weapon('poker')), whit(0, 'poker'), whit(0, 'poker')] },
+  毽子: { events: [start, decide(0, weapon('shuttlecock')), whit(0, 'shuttlecock')] },
+  气球: { events: [start, decide(0, weapon('balloon')), whit(0, 'balloon')] },
+  三球: { events: [start, decide(0, weapon('juggle')), whit(0, 'juggle'), whit(0, 'juggle'), whit(0, 'juggle')] },
+  陀螺: { events: [start, decide(0, weapon('top')), whit(0, 'top')] },
+  鲸尾: { events: [start, decide(0, weapon('whale-tail')), whit(0, 'whale-tail')] },
+  烟花: { events: [start, decide(0, weapon('firework')), whit(0, 'firework')] },
+  狮子吼: {
+    events: [start, decide(0, skill('lion-roar')), { actor: 0, kind: 'skill', skill: 'lion-roar', damage: 12, hp }],
+  },
+  蓝鲸现世: {
+    events: [start, decide(0, skill('blue-whale')), { actor: 0, kind: 'skill', skill: 'blue-whale', damage: 20, hp }],
+  },
+  灵兽助阵: {
+    events: [start, decide(0, { kind: 'unarmed' }), hit(0), { actor: 0, kind: 'beast', damage: 5, blocked: false, hp }],
+    skillSets: [['spirit-beast'], []],
+  },
+  无影手: {
+    events: [start, decide(0, { kind: 'unarmed' }), hit(0), { ...hit(0), kind: 'combo' }],
+    skillSets: [['shadow-fists'], []],
+  },
+  第六感: {
+    events: [
+      start,
+      decide(0, { kind: 'unarmed' }),
+      hit(0),
+      { actor: 1, kind: 'counter', damage: 5, blocked: false, hp },
+    ],
+    skillSets: [[], ['sixth-sense']],
+  },
+  闪避: { events: [start, decide(0, weapon('poker')), { actor: 1, kind: 'dodge', hp }, whit(0, 'poker')] },
+  化鸽遁: {
+    events: [start, decide(0, weapon('shuttlecock')), { actor: 1, kind: 'dodge', hp }],
+    skillSets: [[], ['dove']],
+  },
+  泡泡挡下: {
+    events: [start, decide(0, weapon('firework')), whit(0, 'firework', { blocked: true })],
+    skillSets: [[], ['bubble']],
+  },
+  假死遁: { events: [start, decide(0, { kind: 'unarmed' }), hit(0), { actor: 1, kind: 'play-dead', hp }] },
+  对手出手: {
+    events: [
+      start,
+      decide(1, weapon('water-gun')),
+      whit(1, 'water-gun'),
+      decide(0, weapon('balloon')),
+      whit(0, 'balloon'),
+    ],
+  },
+  渡劫: {
+    events: [
+      start,
+      { actor: 0, kind: 'strike', index: 0, damage: 20, blocked: false, hp },
+      { actor: 0, kind: 'strike', index: 1, damage: 0, blocked: true, hp },
+      { actor: 0, kind: 'end', winner: 0, reason: 'ko', hp },
+    ],
+    skillSets: [['bubble'], []],
+    tribulation: { pill: false, strikes: 2 },
+  },
+};
+
+if (args.includes('--list')) {
+  console.log(Object.keys(SCENES).join(' '));
+  process.exit(0);
+}
+const wanted = args.filter((arg, i) => !arg.startsWith('--') && args[i - 1] !== '--out' && args[i - 1] !== '--layout');
+const names = wanted.length > 0 ? wanted : Object.keys(SCENES);
+for (const name of names) if (!SCENES[name]) throw new Error(`没有这个场景：${name}（--list 看全部）`);
+
+/** 场景 → 页面要的时间线：动画（谁、哪段、倍速）、飞行物（算好的 FxSpec）、台词 */
+function planOf(scene) {
+  const solo = !!scene.tribulation;
+  const steps = timeline(scene.events, ['自家', '对手'], () => 0, scene.skillSets ?? none, {
+    ...(solo ? { tribulation: scene.tribulation } : {}),
+  });
+  const view = solo ? [stages[0], null] : stages;
+  return {
+    solo,
+    stages: view,
+    end: Math.max(...steps.map((step) => step.at)) + 2_600,
+    steps: steps.map((step) => ({
+      at: step.at,
+      who: step.who,
+      ...(step.anim ? { anim: step.anim, rate: step.rate ?? 1 } : {}),
+      ...(step.line ? { line: step.line } : {}),
+      // 心魔布局：对手放出来的那几发用心魔配色（同 app 里的 foeShadow）
+      ...(step.shot
+        ? { spec: fxSpec(step.shot, step.who, view, bounds, layoutName === 'trial' && step.who === 1) }
+        : {}),
+    })),
+  };
+}
+
+/** 预览页：两只宠物的视频按舞台摆、特效层是正式的 fxPage（iframe srcdoc，和主页同源，贴图走 /assets/pic/fx/） */
+function pageOf(plan) {
+  const pets = plan.stages
+    .map((stage, who) =>
+      stage
+        ? `<video id="pet${who}" muted playsinline style="position:absolute;left:${stage.x}px;top:${stage.y}px;width:${stage.width}px;height:${stage.height}px;${stage.facing === 'right' ? 'transform:scaleX(-1);' : ''}"></video>`
+        : '',
+    )
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;width:${W}px;height:${H}px;background:#9aa3ad;overflow:hidden;font:16px sans-serif}
+#fx{position:absolute;left:0;top:0;width:${W}px;height:${H}px;border:0;background:transparent;pointer-events:none}
+.line{position:absolute;top:24px;padding:4px 10px;background:#fff;border-radius:8px}
+#clock{position:absolute;right:10px;bottom:8px;color:#222}
+</style></head><body>${pets}
+<iframe id="fx" srcdoc="${fxPage.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"></iframe>
+<div class="line" id="line0" style="left:${plan.stages[0].x + 40}px"></div>
+<div class="line" id="line1" style="left:${(plan.stages[1]?.x ?? 0) + 40}px"></div>
+<div id="clock"></div>
+<script>
+const PLAN = ${JSON.stringify(plan)};
+const pets = [document.getElementById('pet0'), document.getElementById('pet1')];
+function play(who, name, rate) {
+  const video = pets[who];
+  if (!video) return;
+  video.loop = false;
+  video.src = '/assets/webm/' + encodeURIComponent(name) + '.webm';
+  video.playbackRate = rate;
+  video.play().catch(() => undefined);
+}
+for (const video of pets) {
+  if (!video) continue;
+  // 开场先待机（app 里宠物本来就在待机；渡劫不吃丹时第一段动画要等到第一道雷）
+  video.loop = true;
+  video.src = '/assets/webm/' + encodeURIComponent('待机呼吸休闲') + '.webm';
+  video.play().catch(() => undefined);
+  video.addEventListener('ended', () => {
+    video.loop = true;
+    video.src = '/assets/webm/' + encodeURIComponent('待机呼吸休闲') + '.webm';
+    video.playbackRate = 1;
+    video.play().catch(() => undefined);
+  });
+}
+window.go = () => new Promise((resolve) => {
+  window.t0 = Date.now();
+  const fx = document.getElementById('fx').contentWindow.fx;
+  const names = PLAN.steps.filter((s) => s.spec).flatMap((s) => [s.spec.kind, s.spec.hitFx, '乌云']);
+  fx.init({ base: '/assets/pic/fx/', names: Array.from(new Set(names)) });
+  const t0 = performance.now();
+  for (const step of PLAN.steps) {
+    setTimeout(() => {
+      if (step.anim) play(step.who, step.anim, step.rate);
+      if (step.spec) fx.fire(step.spec);
+      if (step.line) document.getElementById('line' + step.who).textContent = step.line;
+    }, step.at);
+  }
+  (function tick() {
+    document.getElementById('clock').textContent = Math.round(performance.now() - t0) + ' ms';
+    if (performance.now() - t0 < PLAN.end) requestAnimationFrame(tick);
+    else resolve();
+  })();
+});
+</script></body></html>`;
+}
+
+if (args.includes('--plan')) {
+  // 只打印时间线（每一步的时刻、谁、动画 / 飞行物 / 台词），不录
+  for (const name of names) {
+    console.log(`== ${name}`);
+    for (const step of planOf(SCENES[name]).steps) {
+      const what = [
+        step.anim ? `${step.anim} ×${step.rate}` : '',
+        step.spec
+          ? `飞 ${step.spec.kind} ${step.spec.track} ${step.spec.flightMs}ms → 命中 ${step.at + step.spec.flightMs}`
+          : '',
+        step.line ? `「${step.line}」` : '',
+      ].filter(Boolean);
+      console.log(`  ${String(step.at).padStart(5)}  ${step.who}  ${what.join('  ')}`);
+    }
+  }
+  process.exit(0);
+}
+
+const MIME = { '.webm': 'video/webm', '.png': 'image/png', '.html': 'text/html; charset=utf-8' };
+let current = '';
+const server = createServer((req, res) => {
+  const url = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  if (url === '/') {
+    res.writeHead(200, { 'content-type': MIME['.html'] });
+    res.end(current);
+    return;
+  }
+  if (!url.startsWith('/assets/')) {
+    res.writeHead(404).end();
+    return;
+  }
+  try {
+    const body = readFileSync(join(ROOT, url));
+    res.writeHead(200, { 'content-type': MIME[extname(url)] ?? 'application/octet-stream' });
+    res.end(body);
+  } catch {
+    res.writeHead(404).end();
+  }
+});
+await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+const base = `http://127.0.0.1:${server.address().port}/`;
+mkdirSync(outDir, { recursive: true });
+// 本机 playwright 要的浏览器版本没下载时，可以用 FX_PREVIEW_CHROMIUM 指到已有的 chrome-headless-shell / Chromium
+const browser = await chromium.launch(
+  process.env.FX_PREVIEW_CHROMIUM ? { executablePath: process.env.FX_PREVIEW_CHROMIUM } : {},
+);
+try {
+  for (const name of names) {
+    const plan = planOf(SCENES[name]);
+    current = pageOf(plan);
+    const frames = join(outDir, name);
+    rmSync(frames, { recursive: true, force: true });
+    mkdirSync(frames, { recursive: true });
+    const context = await browser.newContext({ viewport: { width: W, height: H } });
+    const page = await context.newPage();
+    const cdp = await context.newCDPSession(page);
+    const shots = [];
+    cdp.on('Page.screencastFrame', (frame) => {
+      shots.push({ wall: frame.metadata.timestamp * 1000, data: frame.data });
+      void cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId });
+    });
+    await page.goto(base);
+    // 先把这一场的素材都取一遍（预览里没有 app 的预加载，第一次换源要等网络会把节奏拖乱）
+    await page.evaluate(async (plan) => {
+      const names = [...new Set(plan.steps.filter((s) => s.anim).map((s) => s.anim)), '待机呼吸休闲'];
+      await Promise.all(
+        names.map((n) => fetch('/assets/webm/' + encodeURIComponent(n) + '.webm').then((r) => r.blob())),
+      );
+    }, plan);
+    await page.waitForTimeout(300);
+    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 85, everyNthFrame: 1 });
+    await page.evaluate(() => window.go());
+    const t0 = await page.evaluate(() => window.t0);
+    await cdp.send('Page.stopScreencast');
+    await context.close();
+    // 逐帧落盘（文件名 = 距离开打的毫秒），再按真实间隔拼成 30fps 的视频
+    const list = [];
+    for (const shot of shots) {
+      const ms = Math.round(shot.wall - t0);
+      if (ms < 0) continue;
+      const jpg = join(frames, `${String(ms).padStart(5, '0')}.jpg`);
+      writeFileSync(jpg, Buffer.from(shot.data, 'base64'));
+      list.push({ jpg, ms });
+    }
+    const concat = list
+      .map(
+        (item, i) =>
+          `file '${item.jpg}'\nduration ${(((list[i + 1]?.ms ?? item.ms + 33) - item.ms) / 1000).toFixed(3)}`,
+      )
+      .join('\n');
+    writeFileSync(join(frames, 'list.txt'), concat);
+    const file = join(outDir, `${name}.mp4`);
+    spawnSync('ffmpeg', [
+      '-nostdin',
+      '-v',
+      'error',
+      '-y',
+      '-f',
+      'concat',
+      '-safe',
+      '0',
+      '-i',
+      join(frames, 'list.txt'),
+      '-vf',
+      'fps=30,format=yuv420p',
+      file,
+    ]);
+    console.log(`[fx-preview] ${name} → ${file}（${list.length} 帧，${(plan.end / 1000).toFixed(1)} 秒）`);
+  }
+} finally {
+  await browser.close();
+  server.close();
+}

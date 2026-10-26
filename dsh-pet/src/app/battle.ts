@@ -7,7 +7,7 @@
  */
 import { createHash } from 'node:crypto';
 
-/** 图鉴条目都会上网（X5 名帖），编号用 ASCII；name / anim 只在本机和局域网里显示 */
+/** 图鉴条目都会上网（X5 名帖），编号用 ASCII；name 只在本机和局域网里显示（素材名在 battle-show.ts 的演出表里） */
 export type WeaponId = 'water-gun' | 'poker' | 'shuttlecock' | 'balloon' | 'juggle' | 'top' | 'whale-tail' | 'firework';
 
 export interface WeaponDef {
@@ -17,8 +17,6 @@ export interface WeaponDef {
   /** 伤害区间（结算前，还没加灵力、会心、泡泡护体） */
   min: number;
   max: number;
-  /** 素材名（§2.3：法宝-<名字>.webm） */
-  anim: string;
   /** 一次几件齐发，每件独立判定命中 */
   hits: number;
   /** 连击率加成 */
@@ -46,7 +44,6 @@ const weapon = (
   grade,
   min,
   max,
-  anim: `法宝-${name}`,
   hits: 1,
   comboBonus: 0,
   skipChance: 0,
@@ -86,15 +83,12 @@ export interface SkillDef {
   id: SkillId;
   name: string;
   kind: '被动' | '主动';
-  /** 素材名（§2.3：招式-<名字>.webm） */
-  anim: string;
 }
 
 const skill = (id: SkillId, name: string, kind: SkillDef['kind']): SkillDef => ({
   id,
   name,
   kind,
-  anim: `招式-${name}`,
 });
 
 /** 招式图鉴 */

@@ -195,7 +195,7 @@ test('app cultivation route serves the read-only view, 200s null while off, and 
   );
 });
 
-test('/app/arena 回擂台页面（X3）：与 /app/guest、/app/note 同一口径', async () => {
+test('/app/arena 回擂台页面（X3）、/app/fx 回特效层页面（X7）：与 /app/guest、/app/note 同一口径', async () => {
   const handler = createAppRoutes(
     () => ({ say: async () => true }) as unknown as AppFeatures,
     () => undefined,
@@ -209,7 +209,7 @@ test('/app/arena 回擂台页面（X3）：与 /app/guest、/app/note 同一口�
       }
     },
     async (base) => {
-      for (const page of ['/app/guest', '/app/note', '/app/arena']) {
+      for (const page of ['/app/guest', '/app/note', '/app/arena', '/app/fx']) {
         const got = await fetch(base + page);
         assert.equal(got.status, 200, page);
         assert.match(got.headers.get('content-type') ?? '', /text\/html/, page);
@@ -218,7 +218,9 @@ test('/app/arena 回擂台页面（X3）：与 /app/guest、/app/note 同一口�
         // 非 GET 不发明新的读端点
         assert.equal((await fetch(base + page, { method: 'POST' })).status, 405, page);
       }
-      // 网页来源照旧拒绝（这三个页面都不例外）
+      // /app/fx 回的就是特效窗口的页面（fx-window.ts 的 fxPage）
+      assert.match(await (await fetch(`${base}/app/fx`)).text(), /window\.fx = \{/);
+      // 网页来源照旧拒绝（这几个页面都不例外）
       const web = await fetch(`${base}/app/arena`, { headers: { origin: 'https://evil.example' } });
       assert.equal(web.status, 403);
       // 功能还没起来：/app/* 一律 503（包括擂台页）

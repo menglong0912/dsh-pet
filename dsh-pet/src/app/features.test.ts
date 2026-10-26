@@ -588,11 +588,12 @@ test('渡劫失败：扣 20% 修为、境界不掉、不再是圆满（不设冷
       await until(() => menus.some((labels) => labels.includes('修炼/渡劫')), '渡劫可点');
       clicks.push('修炼/渡劫');
       await until(() => menus.some((labels) => labels.includes('修炼/快进')), '开打');
-      // 快进前该已经挨上第一道雷了（时间线第一拍在 2.4 秒）
+      // 快进前该已经挨上雷了（X7：乌云聚起、闪电劈中那一刻触电，第一道约在 3.1 秒；
+      // 第一道被躲开的话要等下一道，再晚两秒左右）
       await until(
-        () => anims.some((body) => String(body.url ?? '').includes(encodeURIComponent('修炼-挨雷'))),
-        '挨雷动画',
-        400,
+        () => anims.some((body) => String(body.url ?? '').includes(encodeURIComponent('修炼-触电'))),
+        '触电动画',
+        800,
       );
       clicks.push('修炼/快进');
       await until(() => (cultivationSave(home)?.progress as number | undefined) === 120, '扣了 30 修为');

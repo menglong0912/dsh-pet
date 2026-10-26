@@ -39,6 +39,24 @@ test('the guest stands left of the home pet, a size smaller, feet on the same li
   assert.ok(Math.abs(guestFeet - homeFeet) <= 1, `脚底对齐 ${guestFeet} vs ${homeFeet}`);
 });
 
+test('自家宠物贴着屏幕顶：窗口顶贴住工作区、从气泡空间里扣，脚底照样对齐（2026-10-26 真机差了约 77pt）', () => {
+  // 宠物舞台顶几乎贴着菜单栏：客人窗口按原口径要伸到工作区上面去
+  const nearTop = { left: 1000, top: 10, size: 500, bottomPad: (500 * 9) / 16 / 12 };
+  const homeFeet = feetOf(nearTop.top, nearTop.bottomPad, (500 * 9) / 16);
+  for (const options of [{}, { scale: 1, tight: true }]) {
+    const bounds = guestBounds(nearTop, workArea, undefined, options);
+    assert.equal(bounds.y, workArea.y, '窗口顶贴住工作区顶，不伸出去');
+    // 页面 flex-end：舞台贴窗口底（底下只有名牌余量 6），脚底 = 窗口底 − 6 − 舞台 × 30/360
+    const stage = (bounds.width * 9) / 16;
+    const guestFeet = bounds.y + bounds.height - 6 - stage + stage * (330 / 360);
+    assert.ok(Math.abs(guestFeet - homeFeet) <= 1, `脚底对齐 ${guestFeet} vs ${homeFeet}`);
+    assert.ok(bounds.height < Math.round(stage) + 96 + 6, '扣掉的是气泡空间');
+    // 点击区跟着舞台走（从窗口底往上算），不会因为气泡空间变小而偏到身体下面
+    const hit = petHitRect(bounds);
+    assert.ok(Math.abs(hit.y + hit.height - guestFeet) <= 1, '点击区底边就是脚底');
+  }
+});
+
 test('对战摆位（scale 1 + tight）：心魔与自家宠物等大、贴身站位；串门默认一个字不变', () => {
   const battle = guestBounds(home, workArea, undefined, { scale: 1, tight: true });
   assert.equal(battle.width, 500, 'scale 1 = 真等大（宽度上限跟着 scale 走，不被串门的 400 卡住）');
@@ -232,7 +250,7 @@ test('guestPage：两种色都在页面里，arrive 的 tint 决定用哪一套�
   assert.ok(guestPage.includes('paint(frame.data);'), '逐帧用当前这一套色');
   // 倍速：每次 play 都写一遍 playbackRate（接回待机时自动常速），而且必须**换源之后**写——
   // 改 src 会走一遍媒体的 load 算法，它把 playbackRate 打回默认值（写在前面等于没写）
-  const srcAt = guestPage.indexOf("video.src = ANIM + encodeURIComponent(name) + '.webm';");
+  const srcAt = guestPage.indexOf("video.src = cached[name] || ANIM + encodeURIComponent(name) + '.webm';");
   const rateAt = guestPage.indexOf('video.playbackRate = Number.isFinite(Number(rate))');
   const playAt = guestPage.indexOf('video.play().catch');
   assert.ok(srcAt > 0 && rateAt > srcAt && playAt > rateAt, '顺序：换源 → 写倍速 → play');
@@ -375,5 +393,27 @@ test('GuestWindow.play 带倍速：rate 送进页面，不给就是 1', async ()
   // 非法倍速不送进页面（夹在调用方，页面只收数字）
   guest.play('战斗-倒地', Number.NaN);
   assert.ok(fake.executed.some((code) => code === 'guest.play("战斗-倒地", 1)'));
+  guest.close(0);
+});
+
+test('GuestWindow.preload（X7）：对战开演前把要播的动画取到页面里，之后换源用本地副本、取不到照旧现取', async () => {
+  const fake = fakeWindows();
+  const guest = openGuestWindow(
+    fake.electron,
+    'http://127.0.0.1:1/app/guest',
+    '心魔',
+    () => home,
+    () => undefined,
+  );
+  await new Promise((done) => setImmediate(done));
+  guest.preload(['受击-正面', '"); alert(1); ("']);
+  assert.ok(
+    fake.executed.includes('guest.preload(["受击-正面","\\"); alert(1); (\\""])'),
+    `名字经 JSON.stringify 成字面量：${fake.executed.join('\n')}`,
+  );
+  // 页面：fetch 到的 blob 记成本地地址，play 先找它，没有再拼网络地址
+  assert.ok(guestPage.includes("fetch(ANIM + encodeURIComponent(name) + '.webm')"));
+  assert.ok(guestPage.includes('cached[name] = URL.createObjectURL(blob);'));
+  assert.ok(guestPage.includes('.catch(() => undefined);'), '取不到只是没有副本，不抛到页面外');
   guest.close(0);
 });
