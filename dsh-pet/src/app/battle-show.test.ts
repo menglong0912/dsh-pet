@@ -43,6 +43,7 @@ import {
   animLength,
   rateFor,
   releaseOffset,
+  swapSides,
   timeline,
   windupOf,
   type Shot,
@@ -143,6 +144,25 @@ test('开场：两边各一段起手式，都在 t=0', () => {
     ],
   );
   assert.deepEqual(steps[0].hp, hp);
+});
+
+test('swapSides（X12）：who 与两条气血对调、其余字段原样，不改入参；换两次回原样', () => {
+  const a: Fighter = { name: '小鱼', hp: 120, power: 10, agility: 8, speed: 9, weapons: ['poker'], skills: ['dove'] };
+  const steps = timeline(fight(a, shadowOf(a), 'swap-1'), NAMES, seq(), [a.skills, a.skills]);
+  const snapshot = steps.map((step) => ({ ...step }));
+  const swapped = swapSides(steps);
+  assert.equal(swapped.length, steps.length);
+  for (let i = 0; i < steps.length; i += 1) {
+    const before = steps[i];
+    const after = swapped[i];
+    assert.notEqual(after, before, '返回的是新数组里的新对象');
+    assert.equal(after.who, (before.who ^ 1) as 0 | 1);
+    assert.deepEqual(after.hp, [before.hp[1], before.hp[0]]);
+    // 把换过的两项换回去，其余字段（at / anim / from / rate / line / shot / closing）逐项不变
+    assert.deepEqual({ ...after, who: before.who, hp: before.hp }, before);
+  }
+  assert.deepEqual(steps, snapshot, '不改入参');
+  assert.deepEqual(swapSides(swapped), steps, '换两次等于原样');
 });
 
 test('出手 → 飞行物 → 命中 → 受击（X7）：飞行物在离手那一刻放出，受击对准命中、扣掉前摇，台词和掉血都在命中', () => {

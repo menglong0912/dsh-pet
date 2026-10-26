@@ -38,7 +38,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { z } from 'zod';
-import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS, fight, statCap } from './battle';
+import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS, fight, rngFrom, statCap } from './battle';
 import type { BattleEvent, Fighter, SkillId, WeaponId } from './battle';
 import { MAX_STAGE } from './cultivation';
 import { idOfPub, knockMessage, verifyWithPub, welcomeMessage } from './visit-identity';
@@ -183,6 +183,15 @@ export function isSparNonce(value: string): boolean {
  */
 export function sparFight(host: Fighter, guest: Fighter, guestNonce: string, hostNonce: string): BattleEvent[] {
   return fight(host, guest, `${guestNonce}:${hostNonce}`);
+}
+
+/**
+ * 解说台词的随机数（X12）：主客两边都拿同一对随机数、按同一个种子挑句子，
+ * 两块屏幕上的解说才会逐句相同（动作、飞行物、气血本来就由同一场事件决定）。
+ * 心魔试炼、渡劫没有对面那个随机数，照旧用 `Math.random`。
+ */
+export function sparLineRng(guestNonce: string, hostNonce: string): () => number {
+  return rngFrom(`${guestNonce}:${hostNonce}:lines`);
 }
 
 // ---------- 发现 ----------

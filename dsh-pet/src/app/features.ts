@@ -16,8 +16,9 @@
  *   - 局域网串门（visit.ts 管网络、visit-windows.ts 管窗口、visit-talk.ts 管怎么聊）：设置里开了才发信标、开接待端口；
  *     出门时自家宠物变半透明、把别人家的聊天转播回来，客人来了在自家宠物旁边开个小窗（能摸、能一起玩）；
  *     两边接着前文聊、主人家也会起话题；串门的台词只按人设生成，不带「主人此刻」；
- *     串门进行中两边都能发起切磋（X5，visit.ts 的先承诺后揭示协议）：主人家屏幕上自家宠物对客人窗口
- *     演全套（复用 X3 的演出执行器与擂台），客人那边只把台词转播回来；奖励与战绩各记各的；
+ *     串门进行中两边都能发起切磋（X5，visit.ts 的先承诺后揭示协议）：两边的屏幕上都演全套——主人家对客人窗口、
+ *     客人对主人家的窗口（复用 X3 的演出执行器、擂台与特效层）；解说台词用同一对随机数排，动作、飞行物、
+ *     气血两边一致；奖励与战绩各记各的；
  *     开着串门时，用餐时间宠物也分到一份零食（snacks.ts，晚上偶尔有宵夜），家里来客时请它吃；
  *     熟人之间还能捎话（note-window.ts 的小输入窗）：主人的话经宠物带给对方主人，原文不进提示词与日记；
  *   - 右键菜单根上注册「看看我在干嘛 / 宠物日记」与串门的项（「串门」子菜单列附近的邻居，
@@ -42,7 +43,7 @@ import { ActivityTracker, describeActivity, durationText } from './activity';
 import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
 import { SKILLS, WEAPONS, fight, shadowOf, tribulate } from './battle';
-import { BattleShow, FX_ASSETS, LINE_MS, SHOW_ANIMS, timeline } from './battle-show';
+import { BattleShow, FX_ASSETS, LINE_MS, SHOW_ANIMS, swapSides, timeline } from './battle-show';
 import type { Shot, Step } from './battle-show';
 import { arenaScoreboard, openArenaWindow } from './arena-window';
 import { foeStage, homeStage, openFxWindow } from './fx-window';
@@ -78,6 +79,7 @@ import {
   sparCardOf,
   sparCommit,
   sparFight,
+  sparLineRng,
   SPAR_MODE,
   tripRequest,
   VisitHost,
@@ -1594,12 +1596,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   }
 
   function showRelay(text: string, durationMs: number): void {
-    fadeHome(electron, RELAY_OPACITY);
-    if (relayTimer !== null) clearTimeout(relayTimer);
-    relayTimer = setTimeout(() => {
-      relayTimer = null;
-      if (trip) fadeHome(electron, AWAY_OPACITY);
-    }, durationMs);
+    // 切磋演出期间（battle 在跑、人在别人家）转播的台词只出气泡，不改亮度：
+    // 开演时 fadeHome(1)，收摊后由 startGuestSpar 退回 AWAY_OPACITY
+    if (!(trip !== null && battle !== null)) {
+      fadeHome(electron, RELAY_OPACITY);
+      if (relayTimer !== null) clearTimeout(relayTimer);
+      relayTimer = setTimeout(() => {
+        relayTimer = null;
+        if (trip) fadeHome(electron, AWAY_OPACITY);
+      }, durationMs);
+    }
     void petRequest('POST', '/broadcast', { text, anim: false, duration: durationMs })
       .then((result) => {
         if (result.ok !== true) log(`串门：转播没显示出来：${JSON.stringify(result)}`);
@@ -2046,25 +2052,49 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   }
 
   let spar: SparState | null = null;
-  /** 这场切磋的擂台（演完 3 秒关掉；客人家那边没有窗口） */
-  let sparArena: ArenaWindow | null = null;
-  /** 这场切磋的特效层（X7；客人走了 / 退出时和擂台一起关） */
-  let sparFx: FxWindow | null = null;
 
-  /** 收摊一场切磋（客人走了 / 回家了 / 退出）：定时器停掉、擂台关掉、演出立刻收尾 */
+  /**
+   * 这一场切磋开着的窗口：对手窗口（主人家那边是客人窗口、客人这边是「主人家的宠物」窗口；心魔试炼没有）、
+   * 擂台、特效层。每一场记自己的一份引用——上一场演完到 3 秒收摊之间又开了下一场时，收摊只关自己那份，
+   * 不会把下一场的窗口误关掉，也不会把上一场的窗口丢下没人关（§X11「顺手发现」第 1 条就是漏关的教训）。
+   */
+  interface SparWindows {
+    foe: GuestWindow | null;
+    arena: ArenaWindow;
+    fx: FxWindow;
+  }
+  /** 还没收完的每一场（上一场演完等 3 秒收摊时又开了下一场，两组都要在退出 / 回家时立刻关掉） */
+  const sparWindows = new Set<SparWindows>();
+
+  /** 收摊一场切磋（客人走了 / 回家了 / 退出）：定时器停掉、演出停掉、窗口全部立刻关 */
   function cancelSpar(): void {
     const current = spar;
-    if (!current) return;
     spar = null;
-    if (current.timer !== null) clearTimeout(current.timer);
-    // dispose 只是让 run() 立刻 resolve；battle 不清零的话菜单永远挂着「快进」、
-    // 后续心魔 / 渡劫 / 切磋全被 `if (battle)` 挡住（真机踩过：一场演完全锁死）
-    battle?.dispose();
-    battle = null;
-    sparArena?.close(0);
-    sparArena = null;
-    sparFx?.close(0);
-    sparFx = null;
+    if (current) {
+      if (current.timer !== null) clearTimeout(current.timer);
+      // dispose 只是让 run() 立刻 resolve；battle 不清零的话菜单永远挂着「快进」、
+      // 后续心魔 / 渡劫 / 切磋全被 `if (battle)` 挡住（真机踩过：一场演完全锁死）
+      battle?.dispose();
+      battle = null;
+    }
+    // 演完到 3 秒收摊之间回家 / 被请回也要立刻关（那会儿 spar 已经是 null，靠窗口组收尾）
+    for (const windows of [...sparWindows]) closeSparWindows(windows, 0);
+  }
+
+  /**
+   * 关掉某一场切磋的窗口：0 = 立刻（回家 / 被请回 / 退出），`CLOSE_HOLD_MS` = 演完留一会儿再收。
+   * 只按传进来的这一组关——上一场的收摊不会把下一场的窗口误关掉，也不会把上一场丢下没人关。
+   */
+  function closeSparWindows(windows: SparWindows, afterMs: number): void {
+    if (!sparWindows.has(windows)) return;
+    const close = (): void => {
+      if (!sparWindows.delete(windows)) return;
+      windows.foe?.close(0);
+      windows.arena.close(0);
+      windows.fx.close(0);
+    };
+    if (afterMs <= 0) close();
+    else setTimeout(close, afterMs);
   }
 
   /** 主人家发起切磋（菜单「串门/和客人切磋」）：把 spar-invite 捎给客人，等它应战（§X5 第 1 步） */
@@ -2148,20 +2178,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return { ok: true };
   }
 
-  /** 关掉这场的擂台与特效层（演完 3 秒收尾，同 X3 的心魔窗口；客人走了 / 退出时立刻关） */
-  function closeSparArena(afterMs: number): void {
-    const closing = sparArena;
-    if (closing) {
-      sparArena = null;
-      closing.close(afterMs);
-    }
-    const fx = sparFx;
-    if (fx) {
-      sparFx = null;
-      fx.close(afterMs);
-    }
-  }
-
   /**
    * 主人家这一侧的切磋演出：两边各自用同一对随机数算同一场（必然一致），这边演全套——
    * 自家宠物对客人窗口（照旧粉色），头顶擂台两条血，名帖里的境界上名牌。
@@ -2186,11 +2202,14 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     onCultivation(Date.now(), practice.sparDone(Date.now(), visitor.id, won), { anim: false });
     neighbors.recordSpar(visitor.id, won);
     diary.note(Date.now(), 'cultivate', `和 ${visitor.owner} 家的 ${visitor.pet} 切磋，${won ? '赢了' : '输了'}`);
-    const steps = timeline(events, [you.name, foe.name], Math.random, [you.skills, foe.skills]);
+    // 台词也用这一对随机数挑（X12）：客人那边按同一颗种子排，两块屏幕上的解说逐句相同
+    const steps = timeline(events, [you.name, foe.name], sparLineRng(guestNonce, state.hostNonce), [
+      you.skills,
+      foe.skills,
+    ]);
     const arena = openArenaWindow(electron, `${new URL(deps.petBase).origin}/app/arena`, homePet.box, () =>
       current.window.bounds(),
     );
-    sparArena = arena;
     // 客人要播的动画先取到窗口里（X7：换源不等网络，出手才和飞行物对得上）
     current.window.preload(SHOW_ANIMS);
     // 特效层（X7）：客人窗口就是这一场的对手（照旧粉色；体型进门时就定了，跟随切磋复用串门的客人窗口）
@@ -2198,7 +2217,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       () => current.window.bounds(),
       () => current.window.side === 'left',
     );
-    sparFx = fx;
+    const windows: SparWindows = { foe: null, arena, fx };
+    sparWindows.add(windows);
     const scoreboard = arenaScoreboard({
       self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
       foe: { label: `${foe.name} · ${stageLabel(guestCard.stage)}`, maxHp: foe.hp },
@@ -2238,14 +2258,14 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人，下次再战。');
     const text = cleanText(await compose(instruction, won ? '切磋赢啦，承让承让～' : '切磋输了，下次再战！'), LINE_MAX);
     void say(text, { anim: false });
-    closeSparArena(CLOSE_HOLD_MS);
+    closeSparWindows(windows, CLOSE_HOLD_MS);
     void refreshMenu();
   }
 
   /**
    * 客人这一侧的切磋（菜单「串门/找主人家的宠物切磋」；收到 spar-invite 也走这里，§X5 的自动应战）：
    * 发名帖与承诺 → 拿到主人家的随机数后这一场就定了 → 编好自己的赛后感言跟着 reveal 带过去 →
-   * 记账、把台词按同一张时间线转播回来（say 会先把宠物叫回家，所以全走 relay）。
+   * 记账、在自家屏幕上把这一场演全套（对手是主人家的宠物窗口；`say` 会先把宠物叫回家，台词全走转播）。
    */
   async function startGuestSpar(): Promise<void> {
     const current = trip;
@@ -2305,25 +2325,83 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       'cultivate',
       `和 ${current.host.owner} 家的 ${current.host.pet} 切磋，${won ? '赢了' : '输了'}`,
     );
-    // 转播演出：跟主人家的演出同一张时间线（同一对随机数、同一个 timeline），台词 relay 回来、动画不播
-    const steps = timeline(events, [hostFighter.name, you.name], Math.random, [hostFighter.skills, you.skills]);
+    // 演出：跟主人家同一张时间线（同一对随机数、同一个 timeline、同一颗台词种子）。引擎里主人家是 0 号，
+    // 这边先按引擎序号排好名字与招式表，再换边成本地视角（自家宠物 0 号、对手 1 号）
+    const ordered = timeline(events, [hostFighter.name, you.name], sparLineRng(ownNonce, reply.nonce), [
+      hostFighter.skills,
+      you.skills,
+    ]);
+    const steps = swapSides(ordered);
     state.stage = 'showing';
-    battle = new BattleShow(steps, {
-      self: { play: () => undefined, say: (line, durationMs) => showRelay(line, durationMs) },
-      foe: { play: () => undefined, say: (line, durationMs) => showRelay(line, durationMs) },
-      arena: () => undefined,
-      // 客人这一侧不播动画、也不放飞行物（转播本来就没有画面，§X7 范围）
-      shoot: () => undefined,
+    // 对手窗口：本机 /app/guest，名牌是主人家的；默认粉色——两边都是自家原色、对方粉色，和主人家屏幕对称
+    const foe = openGuestWindow(
+      electron,
+      `${new URL(deps.petBase).origin}/app/guest`,
+      `${current.host.owner} 家的 ${current.host.pet}`,
+      homePet.box,
+      () => undefined,
+      { scale: 1, tight: true },
+    );
+    // 对手要播的动画先取到窗口里（X7：换源不等网络，出手才和飞行物对得上）
+    foe.preload(SHOW_ANIMS);
+    const arena = openArenaWindow(electron, `${new URL(deps.petBase).origin}/app/arena`, homePet.box, () =>
+      foe.bounds(),
+    );
+    // 特效层：对手是主人家的宠物窗口（默认粉色，不用心魔配色）
+    const fx = openShowFx(
+      () => foe.bounds(),
+      () => foe.side === 'left',
+    );
+    const windows: SparWindows = { foe, arena, fx };
+    sparWindows.add(windows);
+    const scoreboard = arenaScoreboard({
+      self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
+      foe: { label: `${hostFighter.name} · ${stageLabel(reply.card.stage)}`, maxHp: hostFighter.hp },
     });
+    battle = new BattleShow(steps, {
+      self: {
+        // 自家宠物面朝对手（素材统一画成朝左，对手站右边时整段镜像）
+        play: (anim, rate) => void playExtra(anim, { facing: foe.side === 'left' ? 'left' : 'right', rate }),
+        // say 会先把宠物叫回家：演出台词只发 anim: false 的转播气泡（演出期间 showRelay 不改亮度）
+        say: (line, durationMs) => showRelay(line, durationMs),
+      },
+      foe: {
+        play: (anim, rate) => foe.play(anim, rate),
+        say: (line, durationMs) => foe.say(line, durationMs),
+      },
+      arena: (hp) => {
+        arena.place(homePet.box(), foe.bounds());
+        // 左右跟着两只的实际位置：主人家的宠物站在自家宠物左边时它那条在左
+        arena.update(scoreboard(hp, foe.side === 'left'));
+        fx.place();
+      },
+      shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
+    });
+    // 做客时自家宠物是半透明的（AWAY_OPACITY）：开演亮回原色；演出期间转播不改亮度，
+    // 等窗口一起收摊（CLOSE_HOLD_MS）后才退回半透明
+    if (relayTimer !== null) {
+      clearTimeout(relayTimer);
+      relayTimer = null;
+    }
+    fadeHome(electron, 1);
     void refreshMenu();
-    await battle.run();
+    const show = battle;
+    await holdPet(steps);
+    await show.run();
     battle = null; // 不清零的话「快进」常驻菜单、下一场被 guard 挡住（真机踩过）
+    releasePet(disposed ? 0 : CLOSE_HOLD_MS);
     const cancelled = trip !== current || spar !== state || disposed;
     if (spar === state) spar = null;
     if (cancelled) return;
+    // 结果与感言照旧转播（演完了，按平时的转播调亮、到点退回半透明）
     relay(won ? '（切磋）这场我赢啦！' : '（切磋）这场输了，下次再战～');
     relay(remark);
     void refreshMenu();
+    closeSparWindows(windows, CLOSE_HOLD_MS);
+    // 窗口收摊时退回做客的半透明；转播的气泡还挂着就交给它到点再退（又开了一场就不动）
+    setTimeout(() => {
+      if (trip === current && battle === null && relayTimer === null) fadeHome(electron, AWAY_OPACITY);
+    }, CLOSE_HOLD_MS);
   }
 
   /** 客人的赛后感言：按人设编一句（只带人设，§2.2 的口径），编太久退回模板（模型卡住别拖垮 reveal） */

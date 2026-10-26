@@ -25,13 +25,15 @@ import {
   sparCardOf,
   sparCommit,
   sparFight,
+  sparLineRng,
   SPAR_MODE,
   tripRequest,
   VisitHost,
 } from './visit.ts';
 import type { Beacon, HostHandlers, SparCard, Visitor } from './visit.ts';
 import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS } from './battle.ts';
-import type { Fighter, WeaponId } from './battle.ts';
+import type { Fighter, SkillId, WeaponId } from './battle.ts';
+import { swapSides, timeline } from './battle-show.ts';
 import { generateVisitIdentity, knockMessage, welcomeMessage } from './visit-identity.ts';
 import type { VisitIdentity } from './visit-identity.ts';
 
@@ -723,6 +725,47 @@ test('sparFight: both sides compute the same fight, the host is actor 0, and the
   assert.equal(events[0].hp[0], aFighter.hp);
   // 种子是「客人随机数:主人家随机数」：顺序反了就是另一场
   assert.notDeepEqual(sparFight(aFighter, guest, hostNonce, guestNonce), events);
+});
+
+test('sparLineRng: 同一对随机数给出同一串、换个顺序就不同（两边的解说才会一致）', () => {
+  const guestNonce = 'a'.repeat(64);
+  const hostNonce = 'b'.repeat(64);
+  const draw = (rng: () => number): number[] => Array.from({ length: 8 }, () => rng());
+  const first = draw(sparLineRng(guestNonce, hostNonce));
+  assert.deepEqual(draw(sparLineRng(guestNonce, hostNonce)), first);
+  assert.notDeepEqual(draw(sparLineRng(hostNonce, guestNonce)), first);
+});
+
+test('切磋两边的时间线：台词与动作逐步相同，客人这边只是把本地宠物换到 0 号', () => {
+  const guest: Fighter = {
+    name: '阿花',
+    hp: 76,
+    power: 6,
+    agility: 5,
+    speed: 7,
+    weapons: ['poker', 'snowball'],
+    skills: ['bloom', 'sixth-sense'],
+  };
+  const guestNonce = 'a'.repeat(64);
+  const hostNonce = 'b'.repeat(64);
+  const events = sparFight(aFighter, guest, guestNonce, hostNonce);
+  const skills: [SkillId[], SkillId[]] = [aFighter.skills, guest.skills];
+  // 主人家：自家 fighter 是 0 号，名字 / 招式表照引擎顺序
+  const hostView = timeline(events, [aFighter.name, guest.name], sparLineRng(guestNonce, hostNonce), skills);
+  // 客人：同样先照引擎顺序排（主人家 0 号），再换边成本地视角
+  const guestView = swapSides(
+    timeline(events, [aFighter.name, guest.name], sparLineRng(guestNonce, hostNonce), skills),
+  );
+  assert.deepEqual(swapSides(guestView), hostView, '换回引擎视角后逐步相同（时刻、动作、台词、气血都在）');
+  assert.deepEqual(
+    guestView.map((step) => step.line),
+    hostView.map((step) => step.line),
+    '台词逐句相同',
+  );
+  assert.ok(
+    hostView.some((step) => step.line),
+    '这一场确实排出了台词（否则上面的逐句比较没意义）',
+  );
 });
 
 test("a spar challenge goes through with the host's card and nonce, and the reveal gets its line cleaned", async () => {

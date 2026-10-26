@@ -9,10 +9,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { StandaloneAiService } from '../standalone/ai-provider.ts';
 import { configPathsFor } from '../standalone/options.ts';
+import { flattenPetList, readAllConfig } from '../host/config.ts';
 import { DEFAULT_APP_CONFIG } from './app-config.ts';
 import type { AppConfig } from './app-config.ts';
 import { ANNOUNCE_AFTER_MS } from './claude-hooks.ts';
 import { SKILLS, type Fighter, type SkillId } from './battle.ts';
+import { swapSides, timeline } from './battle-show.ts';
 import { diaryDate } from './diary.ts';
 import type { DiaryDay } from './diary.ts';
 import { startAppFeatures } from './features.ts';
@@ -27,6 +29,7 @@ import {
   sparCardOf,
   sparCommit,
   sparFight,
+  sparLineRng,
   SPAR_MODE,
   tripRequest,
   VisitHost,
@@ -98,6 +101,23 @@ function fakeWindow(url: string): FakeWin {
   return win;
 }
 
+/** 假 helper 报自家宠物位置：特效层要拿它的舞台矩形才开得了窗（真机上 helper 会一直报） */
+const petBoundsListeners: Array<(event: unknown, payload: unknown) => void> = [];
+function emitPetBounds(payload: Record<string, number>): void {
+  for (const listener of [...petBoundsListeners]) listener({}, payload);
+}
+
+/** 测试配置里这只宠物的名字（`timeline` 的台词要按真实名字算，和 app 里 `petName()` 同一口径） */
+function petNameIn(home: string): string {
+  try {
+    const pets = flattenPetList(readAllConfig(configPathsFor(packageRoot, home)));
+    const desktop = pets.find((pet) => pet.display === 'desktop' || pet.display === 'both') ?? pets[0];
+    return String(desktop?.name ?? '') || '桌宠';
+  } catch {
+    return '桌宠';
+  }
+}
+
 const electron: FeatureElectron = {
   powerMonitor: { getSystemIdleTime: () => env.idleSec, getSystemIdleState: () => 'active' },
   desktopCapturer: {
@@ -110,14 +130,23 @@ const electron: FeatureElectron = {
   },
   systemPreferences: { getMediaAccessStatus: () => 'granted' },
   shell: { openExternal: () => Promise.resolve(), openPath: () => Promise.resolve('') },
-  // 只有心魔试炼那几项会开窗口（客人、擂台），其余测试一个都不建
+  // 只有心魔试炼 / 切磋那几项会开窗口（客人、擂台、特效层），其余测试一个都不建
   BrowserWindow: Object.assign(
     function () {
       return fakeWindow('');
     },
     { getAllWindows: () => [] },
   ) as unknown as FeatureElectron['BrowserWindow'],
-  ipcMain: { on: () => undefined, removeListener: () => undefined },
+  ipcMain: {
+    on: (channel, listener) => {
+      if (channel === 'pet:set-bounds') petBoundsListeners.push(listener);
+    },
+    removeListener: (channel, listener) => {
+      if (channel !== 'pet:set-bounds') return;
+      const at = petBoundsListeners.indexOf(listener);
+      if (at >= 0) petBoundsListeners.splice(at, 1);
+    },
+  },
 };
 
 /** 看屏幕发给模型的指令、挑表情包时发给模型的话（按调用顺序） */
@@ -889,7 +918,7 @@ test('切磋（主人家）：邀约 → 应战 → 亮随机数 → 演出与�
   const beaconPort = await freeUdpPort();
   await withFeatures(
     { config: visitConfig(), cultivation: cultivationEarly(), clicks, beacon: { port: beaconPort, targets: () => [] } },
-    async (_features, said, _bodies, home, extras) => {
+    async (_features, said, bodies, home, extras) => {
       const { menus } = extras;
       const { port, token } = await knockIn(home, clicks, extras);
       // 切磋的菜单项有了（开着修炼、客人在、验证过身份、没在打）
@@ -919,6 +948,14 @@ test('切磋（主人家）：邀约 → 应战 → 亮随机数 → 演出与�
       const fightEvents = sparFight(hostFighter, cardFighter('阿花', guestCard()), ownNonce, hostNonce);
       const fightEnd = fightEvents[fightEvents.length - 1]!;
       const won = fightEnd.kind === 'end' && fightEnd.winner === 0;
+      // 主人家这边的解说也用 sparLineRng（X12）：复算一遍时间线，自己那一方的第一句要在 /broadcast 里出现
+      const expectedSteps = timeline(fightEvents, [petNameIn(home), '阿花'], sparLineRng(ownNonce, hostNonce), [
+        hostFighter.skills,
+        guestCard().skills,
+      ]);
+      const ownLine = expectedSteps.find((step) => step.line && step.who === 0)?.line;
+      const firstLine = ownLine ?? expectedSteps.find((step) => step.line)?.line;
+      assert.ok(firstLine, '这一场排出了解说台词');
       // 这边的账：战绩 +1、修为进账（anim:false 的冒泡）、邻居簿、日记
       await until(() => {
         const record = cultivationSave(home)?.record as { wins: number; losses: number } | undefined;
@@ -944,6 +981,14 @@ test('切磋（主人家）：邀约 → 应战 → 亮随机数 → 演出与�
       assert.ok(guest, '客人窗口在');
       assert.ok(!guest!.calls.some((code) => code.includes('"shadow"')), '切磋的客人窗口不是心魔配色');
       await until(() => menus.some((labels) => labels.includes('修炼/快进')), '打的时候换成快进');
+      await until(
+        () =>
+          ownLine !== undefined
+            ? bodies.some((body) => body.anim === false && body.text === ownLine)
+            : guest!.calls.some((code) => code.startsWith('guest.say(') && code.includes(firstLine)),
+        '主人家也按 sparLineRng 挑台词（复算的第一句出现在对应的那一侧）',
+        1000,
+      );
       // 快进收场：客人的感言（跟着 reveal 带来的）上了客人窗口、自家感言走 compose
       clicks.push('修炼/快进');
       await until(
@@ -1028,7 +1073,7 @@ test('切磋：随机数对不上、超时没亮、邀约没人接，各按各�
   );
 });
 
-test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数 → 台词转播回来、账记上、没被叫回家', async () => {
+test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数 → 自家屏幕上演全套、账记上、没被叫回家、回家收窗', async () => {
   const clicks: string[] = [];
   windows.length = 0;
   const config = structuredClone(DEFAULT_APP_CONFIG);
@@ -1085,6 +1130,8 @@ test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数
       { config, cultivation: cultivationEarly(), clicks, beacon: { port: beaconPort, targets: () => [] } },
       async (_features, said, bodies, home, extras) => {
         const { menus } = extras;
+        // 真机上 helper 会一直报自家宠物位置；先报一次，切磋的特效层才摆得出来
+        emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
         await until(
           () => menus.some((labels) => labels.some((label) => label.startsWith('串门/去 '))),
           '信标听见了邻居（菜单要等下一拍才重注册）',
@@ -1101,6 +1148,16 @@ test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数
         const expected = sparFight(cardFighter('大个', fakeCard), hostFighter, saw.nonce!, HOST_NONCE);
         const expectedEnd = expected[expected.length - 1]!;
         const won = expectedEnd.kind === 'end' && expectedEnd.winner === 1;
+        // 两边台词用同一颗种子（X12）：客人这边换边后的时间线里，第一句要在自己的 /broadcast 里出现
+        const guestSteps = swapSides(
+          timeline(expected, ['大个', petNameIn(home)], sparLineRng(saw.nonce!, HOST_NONCE), [
+            fakeCard.skills,
+            hostFighter.skills,
+          ]),
+        );
+        const ownGuestLine = guestSteps.find((step) => step.line && step.who === 0)?.line;
+        const firstGuestLine = ownGuestLine ?? guestSteps.find((step) => step.line)?.line;
+        assert.ok(firstGuestLine, '这一场排出了解说台词');
         await until(() => {
           const record = cultivationSave(home)?.record as { wins: number; losses: number } | undefined;
           return record !== undefined && record.wins + record.losses === 1;
@@ -1119,21 +1176,57 @@ test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数
           '开场那句转播了',
         );
         await until(() => menus.some((labels) => labels.includes('修炼/快进')), '转播中可快进');
+        // 自家屏幕上也是全套（X12）：对手窗口（粉色、名牌是主人家的）、擂台、特效层
+        await until(
+          () =>
+            windowOn('/app/guest') !== undefined &&
+            windowOn('/app/arena') !== undefined &&
+            windowOn('/app/fx') !== undefined,
+          '客人这边的三扇窗',
+          400,
+        );
+        const foeWindow = windowOn('/app/guest')!;
+        const arena = windowOn('/app/arena')!;
+        const fx = windowOn('/app/fx')!;
+        await until(
+          () => foeWindow.calls.some((code) => code.startsWith('guest.arrive(') && code.includes('测试邻居')),
+          '对手窗口名牌是主人家的',
+        );
+        assert.ok(!foeWindow.calls.some((code) => code.includes('"shadow"')), '客人这边的对手窗口照旧粉色');
+        await until(() => foeWindow.calls.some((code) => code.startsWith('guest.play(')), '主人家的宠物按时间线播动画');
+        // 自家宠物走 /anim 的 url 形态、带朝向（面朝对手）
+        await until(
+          () =>
+            extras.anims.some(
+              (anim) => String(anim.url ?? '').includes(encodeURIComponent('战斗-起手')) && anim.facing !== undefined,
+            ),
+          '自家宠物播 url 形态的动画、带朝向',
+          400,
+        );
+        // 开演前占住宠物（和心魔试炼同一把锁），演完（快进也算）才放
+        const hold = extras.requests.findIndex((request) => request.path === '/lock');
+        assert.ok(hold >= 0, '开演前拿了锁');
+        assert.ok(hold < extras.requests.findIndex((request) => request.path === '/anim'), '拿锁在自家第一段动画之前');
+        await until(() => arena.calls.some((code) => code.startsWith('arena.update(')), '擂台按时间线刷气血');
+        assert.ok(
+          arena.calls.some((code) => code.includes('"大个')),
+          `擂台对手那条是主人家的宠物：${last(arena.calls)}`,
+        );
+        // 快进之前先等到复算出来的第一句台词：自己的走 /broadcast，对手的走对手窗口（同一颗台词种子）
+        await until(
+          () =>
+            ownGuestLine !== undefined
+              ? bodies.some((body) => body.anim === false && body.text === ownGuestLine)
+              : foeWindow.calls.some((code) => code.startsWith('guest.say(') && code.includes(firstGuestLine)),
+          '客人这边也按 sparLineRng 挑台词（复算的第一句出现在对应的那一侧）',
+          1000,
+        );
         clicks.push('修炼/快进');
+        await until(() => extras.requests.some((request) => request.path === '/lock/release'), '演完放锁', 400);
         await until(
           () => bodies.some((body) => body.anim === false && String(body.text).startsWith('（切磋）这场')),
           '结果转播了',
-          400,
-        );
-        assert.ok(
-          bodies.some(
-            (body) =>
-              body.anim === false &&
-              typeof body.text === 'string' &&
-              !String(body.text).startsWith('（切磋）') &&
-              !String(body.text).startsWith('（在 '),
-          ),
-          '战斗台词也转播回来了',
+          1000,
         );
         // 没被叫回家：还在别人家
         await until(() => menus.some((labels) => labels.includes('从 测试邻居 家回来')), '还在别人家做客');
@@ -1141,6 +1234,9 @@ test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数
           said.every((text) => !text.includes('我从 测试邻居 家回来')),
           '转播不走 say',
         );
+        // 回家：对手窗口、擂台、特效层一起立刻关（漏一个，测试进程就会被那两个 interval 挂住）
+        clicks.push('从 测试邻居 家回来');
+        await until(() => foeWindow.destroyed && arena.destroyed && fx.destroyed, '回家后三个窗口都销毁了', 400);
       },
     );
   } finally {

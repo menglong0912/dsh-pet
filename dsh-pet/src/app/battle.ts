@@ -273,7 +273,8 @@ function sfc32(seed: Buffer): () => number {
   };
 }
 
-function rngFrom(seedText: string): () => number {
+/** 种子 → 随机数序列（sha256 → sfc32）。切磋的解说台词也用它，两边用同一对随机数才挑得出同一句（X12） */
+export function rngFrom(seedText: string): () => number {
   return sfc32(createHash('sha256').update(seedText).digest());
 }
 

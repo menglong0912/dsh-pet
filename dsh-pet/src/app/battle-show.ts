@@ -467,6 +467,21 @@ export interface Step {
   closing?: boolean;
 }
 
+/**
+ * 换边（X12）：把每一步的「谁」和两条气血对调，其余字段（`at`、`anim`、`from`、`rate`、`line`、`shot`、
+ * `closing`）原样保留。`Shot` 的字段都相对出手方，所以不用改。返回新数组，不动入参。
+ *
+ * 作客的一方在引擎里是 1 号（主人家是 0 号）；时间线必须先按引擎序号排（名字、招式表都照引擎来），
+ * 再把画面换成本地视角——反着传名字 / 招式表的话，台词和化鸽遁这些按序号查的东西就对不上了。
+ */
+export function swapSides(steps: Step[]): Step[] {
+  return steps.map((step) => ({
+    ...step,
+    who: (step.who ^ 1) as 0 | 1,
+    hp: [step.hp[1], step.hp[0]] as [number, number],
+  }));
+}
+
 /** 这些事件是打在对方身上的，要对方播挨打（凭空生花是回血，不算挨打） */
 function isDamageOnFoe(event: BattleEvent): boolean {
   if (event.kind === 'hit' || event.kind === 'combo' || event.kind === 'counter' || event.kind === 'beast') return true;

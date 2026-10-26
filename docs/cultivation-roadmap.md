@@ -28,6 +28,7 @@
 | X9   | 蛊真人那一路 3 个招式          | X8     | `battle.ts`、`battle-lines.ts`；演出 `battle-show.ts`、`fx-window.ts`、`scripts/dev/fx-preview.mjs`     | 大   |
 | X10  | 演出期间占住宠物（不插播活动） | X9     | `features.ts`（用现成的 `/lock` 占用锁）                                                                | 小   |
 | X11  | 台词里名字后的「的」不重复     | X10    | `battle-lines.ts`、`battle-lines.test.ts`                                                               | 小   |
+| X12  | 切磋时客人那边也演全套         | X10    | `features.ts`、`battle-show.ts`、`visit.ts`、`battle.ts`（导出种子随机数）                              | 中   |
 
 **执行顺序**：X0 → X1 → X2 → X3 → X4 → X5 → X6，一次一个。X2 起都改 `features.ts`，必须串行。
 
@@ -709,6 +710,75 @@ X10 真机时发现（2026-10-26）：宠物名字以「的」结尾（用户的
 - **顺手发现（没改，既有问题）**：
   1. **心魔窗口泄漏**：第一场打完、赛后感言还没说完（`compose` 还在等）时，`battle` 已经是 null，这时再点心魔试炼会开第二场，`trialWindows` 被新窗口覆盖。第一场的心魔窗口和擂台再也没人关，第一场随后的 `closeTrial(CLOSE_HOLD_MS)` 反而会把第二场的窗口关掉。测试里的表现是 `features.test.ts` 跑完不退出：心魔窗口 `visit-windows.ts` 里那两个 100ms / 50ms 的 interval 一直挂着。改动前的提交 `576946f` 6 份并行跑 18 份，卡住 4 份，所以不是 X10 / X11 带进来的。真机上也可能碰到。等另一个会话的改动落地以后再单独修。
   2. **「心魔试炼：菜单里有该项…」在高负载下偶尔超时**（等第一句演出台词超过 8 秒）：6 份并行时，包含 X10 的代码 18 份里超时 2 份，改动前 18 份里 0 份。样本太小下不了结论，X9 就记过这条测试对负载敏感。正常跑全量时没出现过。
+
+### X12 切磋时客人那边也演全套
+
+用户 2026-10-26 提出：去别人家做客时切磋，客人自己的屏幕上也要看到这一场，不能只转播台词。这一条推翻 §X5「演出」里「客人那边只转播台词」的口径，也推翻 §X7、§X10 里「客人那一侧没有画面」的说法。
+
+**现状**：
+
+- `startGuestSpar` 已经按同一份事件序列排时间线、跑 `BattleShow`，但两边的 `play`、`shoot`、`arena` 都是空操作，台词全走 `showRelay`，转播到自家宠物的气泡里。
+- 解说台词的随机数两边都用 `Math.random`，所以两块屏幕上的台词不一样。动作、飞行物、气血是一样的。`features.ts` 里「同一张时间线」那句注释说得不准。
+- 做客期间自家宠物是半透明的（`AWAY_OPACITY` = 0.3），转播那几秒调到 `RELAY_OPACITY`（0.9），到点退回 0.3。
+
+**改法**：
+
+1. **台词种子**（`visit.ts`）：新增 `sparLineRng(guestNonce, hostNonce): () => number`，种子取 `${guestNonce}:${hostNonce}:lines`。实现复用 `battle.ts` 的 `rngFrom`（目前没导出，导出它，不要另写一个 PRNG）。主人家 `runHostSparShow` 和客人 `startGuestSpar` 的 `timeline(...)` 都改用它。心魔试炼、渡劫照旧用 `Math.random`。
+2. **换边**（`battle-show.ts`）：新增纯函数 `swapSides(steps: Step[]): Step[]`。每一步的 `who` 0↔1、`hp` 两项对调，其余字段（`at`、`anim`、`from`、`rate`、`line`、`shot`、`closing`）原样保留。`Shot` 的字段都相对出手方，不用改。返回新数组，不改入参。
+   - 时间线必须先按引擎序号算（主人家是 0 号），名字和招式表的顺序都照引擎来，然后再换边。不能为了让自家变成 0 号，直接把名字或招式表反过来传：台词、闪避动画（化鸽遁）都按序号查，反过来传就对不上了。
+3. **客人这边的演出**（`startGuestSpar`）：接法照 `runHostSparShow`，差别如下。
+   - **对手窗口**：`openGuestWindow(electron, <本机 /app/guest>, `${owner} 家的 ${pet}`, homePet.box, () => undefined, { scale: 1, tight: true })`。配色用默认粉色，和主人家屏幕对称：两边都是自家原色、对方粉色。开演前 `preload(SHOW_ANIMS)`。
+   - **擂台**：`openArenaWindow`，名牌分别是自家 `${you.name} · ${practice.view().label}`，对方 `${hostFighter.name} · ${stageLabel(reply.card.stage)}`。
+   - **特效层**：`openShowFx(() => 对手窗口.bounds(), () => 对手窗口.side === 'left')`，不用心魔配色。
+   - **时间线**：`swapSides(timeline(events, [hostFighter.name, you.name], sparLineRng(ownNonce, reply.nonce), [hostFighter.skills, you.skills]))`。
+   - **执行器**：`self.play` 走 `playExtra(anim, { facing, rate })`，`facing` 跟着对手窗口在哪边，口径同 `runHostSparShow`。`self.say` 不能走 `say`（`say` 会先把宠物叫回家），直接发 anim: false 的 `/broadcast`，时长照传进来的 `durationMs`；复用 `showRelay` 也行。`foe` 接对手窗口的 `play` / `say`。`arena` 里挪擂台、刷新气血条、`fx.place()`；`shoot` 接 `fx.fire`。
+   - **占住宠物**：开演前 `holdPet(steps)`，演完 `releasePet(disposed ? 0 : CLOSE_HOLD_MS)`，把 X10 的口径扩到客人这边。
+   - **自家宠物的亮度**：开演时 `fadeHome(electron, 1)`。演出期间转播的话照常出气泡，但不改亮度：不调到 `RELAY_OPACITY`，到点也不退回 `AWAY_OPACITY`。演完、窗口收摊时（`CLOSE_HOLD_MS` 后），如果还在做客，就退回 `AWAY_OPACITY`。回家（`comeHome`）照旧 `fadeHome(1)`。
+   - **演完**：照旧转播结果和自己的赛后感言，`CLOSE_HOLD_MS` 后关对手窗口、擂台、特效层。
+   - **收摊**：`cancelSpar`（回家、被请回、退出）要把对手窗口和擂台、特效层一起立刻关掉。可以在 `sparArena` / `sparFx` 旁边加一个 `sparFoe`，`closeSparArena` 一起关。
+   - **窗口不能漏关**：对手窗口里有两个 interval（看光标、跟随自家宠物），漏关一次，测试进程就退不出去（§X11「顺手发现」第 1 条就是心魔窗口这么漏的）。正常演完、快进、回家、被请回、退出，每条路都要关掉。演完到 `CLOSE_HOLD_MS` 收摊之间又开了下一场时，也别让上一场的收摊关掉下一场的窗口，或者把上一场的窗口丢下没人关。
+4. **过时的注释**：改掉 `features.ts` 文件头里「客人那边只把台词转播回来」、`sparArena` 注释里「客人家那边没有窗口」，以及 `startGuestSpar` 的文档注释和函数里「台词 relay 回来、动画不播」「转播本来就没有画面」这几处。
+
+**不改**：协议、名帖、`BATTLE_VERSION`、引擎结算、记账的时机和内容。旧版本的主人家仍用 `Math.random` 排台词，两边台词会不一样，但动作、飞行物、气血仍一致。这可以接受，不做版本协商。
+
+**模型调用**：不新增。
+
+**测试**：
+
+- `battle-show.test.ts`：`swapSides` 把 `who`、`hp` 对调，其余字段不变，不改入参；换两次等于原样。
+- `visit.test.ts`：`sparLineRng` 给同一对随机数时序列相同，两个随机数换了顺序就不同。主客两边按各自的取法（主人家：自家 `fighter` + 客人名帖；客人：主人家名帖 + 自家 `fighter`）排出来的时间线逐步相同，台词也相同。
+- `features.test.ts`，改「切磋（客人）：…」那条或另加一条：
+  - 开了三个窗口：对手窗口（`/app/guest`，不是 `shadow` 配色，名牌里有主人家的名字）、擂台、特效层；
+  - 对手窗口收到了 `guest.play(...)`；
+  - 自家宠物收到了 url 形态、带 `facing` 的 `/anim`；
+  - 开演前拿了锁（`/lock`），收场后放锁；
+  - 演出期间台词仍是 anim: false 的 `/broadcast`，原来「战斗台词也转播回来了」的断言照旧成立；
+  - 回家后三个窗口都销毁了。
+  - 亮度：现在的假 `electron.BrowserWindow.getAllWindows()` 返回 `[]`，`fadeHome` 测不到。可以给假 electron 加一个 URL 带 `electron-helper` 的假窗口来记 `setOpacity`（推荐），也可以不测。选了哪种，在回报里写明。
+- 主人家那条切磋测试：用 `sparLineRng` 复算一遍时间线，第一句解说台词要出现在 `bodies` 里，证明主人家这边也换成了种子随机数。
+- 旧断言不能弱化。
+
+**验收**：`prettier --check`、`typecheck`、`lint`、`npm test` 全过。改动只在 `features.ts`、`battle-show.ts`、`visit.ts`、`battle.ts` 和它们的测试里。真机由主会话做（`visit-peer.mjs host` 扮主人家，真 app 去做客、发起切磋）。
+
+**X12 落地情况**（2026-10-26，分支 `spar-guest-show`，在 worktree `dsh-pet-wt-spar` 里做的）：
+
+- **开发方式**：当时另一个会话在主工作区改 `features.ts`、跑测试，所以开了独立的 worktree。dsh headless 一次做完，主会话核验。
+- **和设计的偏差**：
+  - 窗口没有只加一个 `sparFoe`，而是每一场一组 `SparWindows`，放进一个 `Set`。演完到收摊之间又开了下一场时，各关各的。`cancelSpar` 把没收完的组全部立刻关掉。
+  - 亮度只靠 `showRelay` 里的一个判断：人在别人家、而且正在演（`trip && battle`），转播就不改亮度。演完的结果和感言照平时的转播走（调亮，到点退回）。窗口收摊的那一下，如果还有转播气泡挂着，就不急着退回半透明。
+  - 亮度没写单测，靠真机核。
+- **核验时主会话改的**：
+  - dsh 把 `cancelSpar` 改成了不管有没有切磋都停掉 `battle`，恢复成原来的「有切磋才停」，关窗那一步照旧无条件执行。
+  - 去掉了 dsh 给 `relay` / `showRelay` 加的 `keepOpacity` 参数，理由见上一条：演完那两句如果排到 3 秒之后才出，会显示在 0.3 的半透明宠物身上。
+- **验证**：prettier（改动文件）、typecheck、lint 都干净，全量 **1312/1312**，73 秒正常退出。`src/app/main.ts` 的 prettier 告警是开工前就有的。
+- **真机**（worktree 构建，假主人家 `visit-peer.mjs host`，真 app 去做客）：
+  - 客人从菜单发起一场、主人家发邀约一场，客人屏幕上都演了全套：自家宠物亮回原色，右边是粉色的「测试邻居 家的 小测」，头顶两条血带名字和境界。魂牵梦绕念咒、飞行物、命中特效、对方入梦的气泡、万我三重魂影、鲸尾、胜利撒彩带、对方倒地，都按时间线走。
+  - 用 CoreGraphics 窗口列表数过：演出中有 4 扇窗（宠物、对手窗口、擂台、特效层），宠物 alpha 1.0；演完 3 秒后只剩宠物，alpha 0.9（转播气泡还挂着）；演完 20 秒退回 0.3。
+  - 拿锁 / 放锁：开演拿锁，演完 3 秒放锁。
+  - 演到一半被叫回家，碰到了两次：一次是菜单「从 测试邻居 家回来」，一次是另一个 Claude 会话干完活，宠物要报一声，`say` 按现有设计先把它叫回家。两次三扇窗都立刻关了，宠物 alpha 1.0。
+  - 测完用户数据按备份原样还原（`diff -r` 一致），新构建留在本机。
+- **踩到的坑**：worktree 里没有 `runtime/electron-helper/shared-core.js`（被 gitignore，由 `npm run build:desktop-core` 生成）。第一次打的包里宠物渲染端起不来（`translateRects`、`BASE is not defined`），客人这边因此报「还不知道宠物在哪」。补跑 `build:desktop-core` 重新打包就好了。新 worktree 打包前要先跑它。
+- **遗留（既有设计，没改）**：做客时只要家里有话要说（提醒、Claude 干完活……），就会把宠物叫回家，切磋演到一半也一样。账在开打前就记好了，所以不会乱，只是这一场看不完。
 
 ## 4. 主会话的核验清单
 
