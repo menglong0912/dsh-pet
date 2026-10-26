@@ -126,7 +126,7 @@ const REACTION_WINDUP_MS: Record<string, number> = {
 };
 
 /** 飞行轨迹（§X7）：直飞 / 抛物线 / 贴地 / 慢飘 / 高抛砸落 / 天雷（乌云 + 闪电，渡劫用）/ 回旋（银托盘，X8） */
-export type FxTrack = 'line' | 'arc' | 'ground' | 'float' | 'slam' | 'bolt' | 'boomerang';
+export type FxTrack = 'line' | 'thrust' | 'arc' | 'ground' | 'float' | 'slam' | 'bolt' | 'boomerang';
 
 /**
  * 特效贴图名（`assets/pic/fx/<名>.png`）：§X7 的素材清单。
@@ -173,11 +173,15 @@ export type FxAssetName =
   | '命中-电光'
   | '命中-雪花'
   | '命中-墨汁'
-  | '命中-魂碎';
+  | '命中-魂碎'
+  | '剑光'
+  | '命中-剑痕';
 
 /** 各轨迹的飞行时间（`bolt` = 乌云淡入 + 闪电劈下） */
 const FLIGHT_MS: Record<FxTrack, number> = {
   line: 380,
+  // 剑光：原著「剑光之快，匪夷所思」，几乎是一闪就到（X9 的五指拳心剑）
+  thrust: 160,
   arc: 620,
   ground: 520,
   float: 900,
@@ -273,8 +277,8 @@ export const ATTACK_SHOW: Record<string, AttackShow> = {
     action: '出手-魂牵梦绕',
     fly: { kind: '灵光', track: 'float', hitFx: '命中-魂碎', react: '受击-入梦', count: 8, gapMs: 90 },
   },
-  // 五指拳心剑（X9）：拳风飞出去，到对方面前才展开成一道剑气
-  'finger-sword': { action: '出手-拳心剑', fly: { kind: '拳风', track: 'line', hitFx: '命中-斩' } },
+  // 五指拳心剑（X9）：右拳举过头顶，拳心射出一道剑光——原著「剑光之快，匪夷所思」，几乎是闪就到
+  'finger-sword': { action: '出手-拳心剑', fly: { kind: '剑光', track: 'thrust', hitFx: '命中-剑痕' } },
   // 回血：作用在自己身上，照旧播整段素材，没有飞行物
   bloom: { action: '招式-凭空生花' },
   // 三种追加出手
@@ -349,8 +353,8 @@ export const RELEASE: Record<string, { ms: number; hand: [number, number]; catch
   '出手-第六感': { ms: 1_850, hand: [206, 216] },
   // 魂牵梦绕：双手捧在胸前念咒，魂丝从两手之间飘出去（X9）
   '出手-魂牵梦绕': { ms: 1_600, hand: [305, 200] },
-  // 五指拳心剑：拳头递到最左那一刻，剑气从拳心射出（实测 1.75 秒最左 182,188，之后一直停在 196）（X9）
-  '出手-拳心剑': { ms: 1_750, hand: [182, 188] },
+  // 五指拳心剑：拳头举到头顶上方、停住的那一刻，剑光从拳心射出（实测 2.3 秒起拳心停在 272,92）（X9）
+  '出手-拳心剑': { ms: 2_300, hand: [272, 92] },
 };
 
 /** 一段素材按这个倍速播完要多久 */

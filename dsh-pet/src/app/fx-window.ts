@@ -169,6 +169,9 @@ const FX_SIZE: Record<FxAssetName, { size: number; spin?: number; grow?: number 
   '命中-雪花': { size: 0.44 },
   '命中-墨汁': { size: 0.46 },
   '命中-魂碎': { size: 0.44 },
+  // 剑光是细长的一条：长边 0.36 个舞台高，飞起来才看得清是一道光（165ms 就到对面）
+  剑光: { size: 0.36 },
+  '命中-剑痕': { size: 0.58 },
 };
 
 /** 自家宠物的画布矩形（口径同 `guestBounds`：舞台顶 = box.top + bottomPad、画布高 = 宽 × 9/16） */
