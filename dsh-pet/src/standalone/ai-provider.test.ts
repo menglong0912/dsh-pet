@@ -391,19 +391,14 @@ test('disableThinking sends chat_template_kwargs only when enabled, including te
   );
 });
 
-test('streamVision attaches the image only for local OpenAI-compatible endpoints', async () => {
+test('streamVision sends the image to the configured endpoint on both protocols, local or remote', async () => {
   const image = 'data:image/jpeg;base64,AAAA';
   const vision = { system: 'persona', prompt: 'look', image };
   let body: Record<string, unknown> | undefined;
   await fixture(
     async (ai) => {
-      // 远端地址：拒绝且不发请求
-      assert.equal(ai.canSeeLocally(), false);
-      await assert.rejects(collect(ai.streamVision(vision)), /requires a local/);
-      assert.equal(body, undefined);
-
-      await ai.saveSettings({ baseUrl: 'http://127.0.0.1:18080/v1' });
-      assert.equal(ai.canSeeLocally(), true);
+      // 远端 OpenAI 兼容地址照发（不再只认本机）
+      assert.equal(ai.canSeeScreen(), true);
       assert.equal(await collect(ai.streamVision(vision)), 'seen');
       // body 在 fetch 回调里赋值，TS 看不到，上面的 assert 会把它收窄成 undefined
       assert.deepEqual((body as Record<string, unknown> | undefined)?.messages, [
@@ -416,15 +411,52 @@ test('streamVision attaches the image only for local OpenAI-compatible endpoints
           ],
         },
       ]);
+
+      await ai.saveSettings({ baseUrl: 'http://127.0.0.1:18080/v1' });
+      assert.equal(ai.canSeeScreen(), true);
+      assert.equal(await collect(ai.streamVision(vision)), 'seen');
       await assert.rejects(collect(ai.streamVision({ ...vision, image: 'https://evil.test/x.png' })), /invalid/);
       await assert.rejects(collect(ai.streamVision({ ...vision, prompt: ' ' })), /empty/);
 
-      await ai.saveSettings({ protocol: 'anthropic', baseUrl: 'http://localhost:9000' });
-      assert.equal(ai.canSeeLocally(), false);
+      // 模型没配好（关闭）时仍然不能看，也不发请求
+      await ai.saveSettings({ enabled: false });
+      assert.equal(ai.canSeeScreen(), false);
+      await assert.rejects(collect(ai.streamVision(vision)), /requires a configured model/);
     },
     async (_url, init) => {
       body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return openAiResponse('seen');
     },
+  );
+
+  // Anthropic 也能识图：截图作为 base64 图片块附在最后一条用户消息里
+  let anthropicBody: Record<string, unknown> | undefined;
+  await fixture(
+    async (ai) => {
+      // Anthropic 的 baseUrl 是服务根地址（SDK 自己接 /v1/messages）
+      await ai.saveSettings({ baseUrl: 'https://anthropic.test' });
+      assert.equal(ai.canSeeScreen(), true);
+      assert.equal(await collect(ai.streamVision(vision)), 'seen');
+      assert.deepEqual((anthropicBody as Record<string, unknown> | undefined)?.messages, [
+        {
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'AAAA' } },
+            { type: 'text', text: 'look' },
+          ],
+        },
+      ]);
+    },
+    async (_url, init) => {
+      anthropicBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const events = [
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'seen' } },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
+      ];
+      return new Response(events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''), {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    },
+    'anthropic',
   );
 });

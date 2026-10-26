@@ -594,9 +594,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     manual: boolean,
   ): Promise<{ ok: boolean; text?: string; image?: string; reason?: string }> {
     if (screenBusy) return { ok: false, reason: 'busy' };
-    if (!ai.canSeeLocally()) {
-      if (manual) await say('看屏幕要用本机模型哦，先在 AI 设置里填本机地址～');
-      return { ok: false, reason: 'not-local' };
+    if (!ai.canSeeScreen()) {
+      if (manual) await say('先在 AI 设置里把模型配好，我才能看屏幕哦～');
+      return { ok: false, reason: 'not-ready' };
     }
     // 自动触发不主动弹系统授权框：没授权就安静跳过；手动触发才去调 getSources（首次会弹授权）
     if (!manual && electron.systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
@@ -751,7 +751,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /**
    * 到点该自动看屏幕：开着、没出门、没在演一场、人在且 activeIdleSec 内碰过键鼠、离上次够间隔、
-   * 能看（本机模型 + 已授权）
+   * 能看（模型已就绪 + 已授权）
    * @param activeIdleSec 「最近碰过键鼠」的窗口（秒）
    */
   function screenDue(now: number, activeIdleSec = SCREEN_ACTIVE_IDLE_SEC): boolean {
@@ -764,7 +764,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       electron.powerMonitor.getSystemIdleTime() < activeIdleSec &&
       now - lastScreenAt >= config.screen.intervalMin * 60_000 &&
       !screenBusy &&
-      ai.canSeeLocally() &&
+      ai.canSeeScreen() &&
       electron.systemPreferences.getMediaAccessStatus('screen') === 'granted'
     );
   }

@@ -16,7 +16,7 @@ const schema = z
     /** 离开超过多少分钟、回来时打招呼 */
     greetAfterAwayMin: z.number().min(1).max(1440),
     screen: z.object({
-      /** 自动看屏幕（右键手动看不受此开关限制）；只在模型接口是本机地址时生效 */
+      /** 自动看屏幕（右键手动看不受此开关限制）；模型接口没配好时不生效 */
       enabled: z.boolean(),
       intervalMin: z.number().min(3).max(1440),
     }),

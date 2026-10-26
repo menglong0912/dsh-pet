@@ -37,8 +37,8 @@ export interface StandaloneAiService {
   ): Promise<undefined | { id: string; name: string }>;
   stream(options: unknown): AsyncIterable<{ type: 'text'; text: string }>;
   /**
-   * 带一张图的单轮请求（独立应用「看屏幕」用）。截图属于隐私，只允许 OpenAI 兼容协议 +
-   * 本机地址（127.0.0.1 / localhost / ::1）；不满足时直接抛错，绝不把图发到远端。
+   * 带一张图的单轮请求（独立应用「看屏幕」用），发往当前配置的模型接口：
+   * 本机地址只留在本机，云端地址会把截图上传给服务商。
    */
   streamVision(input: {
     system: string;
@@ -48,7 +48,7 @@ export interface StandaloneAiService {
     signal?: AbortSignal;
   }): AsyncIterable<{ type: 'text'; text: string }>;
   /** 当前设置能否走 streamVision（不发请求） */
-  canSeeLocally(): boolean;
+  canSeeScreen(): boolean;
   getSettings(): StandaloneAiPublicSettings;
   saveSettings(input: unknown): Promise<StandaloneAiPublicSettings>;
   testConnection(input: {
@@ -104,15 +104,6 @@ function parseRequest(options: unknown, model: string): { request: AiRequest; si
   return { request: { system, messages }, signal: data.signal };
 }
 
-/** 只认本机回环地址：识图的截图不能离开这台机器 */
-function isLoopback(baseUrl: string): boolean {
-  try {
-    return ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(baseUrl).hostname);
-  } catch {
-    return false;
-  }
-}
-
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(new Error('Standalone AI request cancelled.'));
   return new Promise<T>((resolve, reject) => {
@@ -159,8 +150,7 @@ export function createStandaloneAi(
     yield* run(settings, request, callerSignal);
   }
 
-  const localVision = () =>
-    ready() && store.current().protocol === 'openai-compatible' && isLoopback(store.current().baseUrl);
+  const canSeeScreen = () => ready();
 
   async function* streamVision(input: {
     system: string;
@@ -168,7 +158,7 @@ export function createStandaloneAi(
     image: string;
     signal?: AbortSignal;
   }): AsyncIterable<{ type: 'text'; text: string }> {
-    if (!localVision()) throw new Error('Standalone AI vision requires a local OpenAI-compatible endpoint.');
+    if (!canSeeScreen()) throw new Error('Standalone AI vision requires a configured model.');
     if (!/^data:image\/(?:png|jpeg|webp);base64,/.test(input.image) || input.image.length > MAX_IMAGE_CHARS)
       throw new Error('Standalone AI image input is invalid or too large.');
     if (input.system.length + input.prompt.length > MAX_INPUT_CHARS || !input.prompt.trim())
@@ -261,7 +251,7 @@ export function createStandaloneAi(
         : undefined,
     stream,
     streamVision,
-    canSeeLocally: localVision,
+    canSeeScreen,
     getSettings: () => store.publicSettings(),
     async saveSettings(input) {
       if (disposed) throw new Error('Standalone AI is disposed.');

@@ -10,11 +10,25 @@ export interface AiTextMessage {
 export interface AiRequest {
   system: string;
   messages: AiTextMessage[];
-  /** 附在最后一条用户消息上的图片（data URL）；只有 OpenAI 兼容协议支持 */
+  /** 附在最后一条用户消息上的图片（data URL）；两种协议都支持 */
   images?: string[];
 }
 export type AiTransportEvent = { text?: string; refusal?: boolean };
 const quiet = { debug() {}, info() {}, warn() {}, error() {} };
+
+/** `data:image/...;base64,` → Anthropic 图片块（只认桌宠截图会用的三种格式） */
+function anthropicImage(image: string): Anthropic.ImageBlockParam {
+  const match = /^data:image\/(png|jpeg|webp);base64,(.+)$/.exec(image);
+  if (!match) throw new Error('Unsupported image input.');
+  return {
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: `image/${match[1]}` as 'image/png' | 'image/jpeg' | 'image/webp',
+      data: match[2],
+    },
+  };
+}
 
 /** SDKs can inherit custom auth headers from env even with explicit keys; rebuild headers. */
 export function isolatedFetch(settings: Readonly<StandaloneAiSettings>, fetcher: AiFetch): AiFetch {
@@ -62,10 +76,10 @@ export async function* sdkTextStream(
     logger: quiet,
     logLevel: 'off' as const,
   };
+  const images = request.images ?? [];
+  const last = request.messages.length - 1;
   if (settings.protocol === 'openai-compatible') {
     const client = new OpenAI({ ...shared, organization: null, project: null, webhookSecret: null });
-    const images = request.images ?? [];
-    const last = request.messages.length - 1;
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       ...(request.system ? [{ role: 'system' as const, content: request.system }] : []),
       ...request.messages.map((message, index): OpenAI.Chat.Completions.ChatCompletionMessageParam =>
@@ -93,16 +107,23 @@ export async function* sdkTextStream(
     }
     return;
   }
-  if (request.images?.length) throw new Error('Images are only supported for OpenAI-compatible endpoints.');
   // Explicit authToken:null prevents SDK environment/OAuth/profile credential resolution.
   const client = new Anthropic({ ...shared, authToken: null, webhookKey: null });
+  const messages: Anthropic.MessageParam[] = request.messages.map((message, index) =>
+    index === last && message.role === 'user' && images.length
+      ? {
+          role: 'user',
+          content: [...images.map(anthropicImage), { type: 'text', text: message.content }],
+        }
+      : message,
+  );
   const opus = settings.model === 'claude-opus-5-5';
   const firstParty = new URL(settings.baseUrl).origin === 'https://api.anthropic.com';
   const parameters = {
     model: settings.model,
     max_tokens: settings.maxTokens,
     system: request.system,
-    messages: request.messages,
+    messages,
     stream: true as const,
     ...(opus ? { thinking: { type: 'adaptive' as const }, output_config: { effort: 'low' as const } } : {}),
   };

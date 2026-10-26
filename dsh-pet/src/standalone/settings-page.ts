@@ -46,7 +46,7 @@ export const settingsPage = `<!doctype html>
 </fieldset>
 <fieldset id="app-settings" hidden><legend>陪伴与提醒</legend>
 <label class="check"><input id="screenEnabled" type="checkbox" aria-describedby="screen-note">定时看屏幕吐槽</label>
-<p id="screen-note" class="hint">只在上面的接口是本机地址（127.0.0.1 / localhost）时生效，截图只发给本机模型；离开电脑或一分钟没碰键鼠时不看。开着自动碎碎念时，到点的那一句碎碎念换成看屏幕，两者不会互相顶掉。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
+<p id="screen-note" class="hint">截图会发给上面配置的模型接口：填本机地址就只留在本机，填云端地址会把屏幕内容上传给服务商，请确认模型支持图片输入。离开电脑或一分钟没碰键鼠时不看。开着自动碎碎念时，到点的那一句碎碎念换成看屏幕，两者不会互相顶掉。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
 <label for="screenIntervalMin">看屏幕间隔（分钟）</label><input id="screenIntervalMin" type="number" min="3" max="1440" step="1" value="15">
 <label class="check"><input id="sittingEnabled" type="checkbox" aria-describedby="sitting-note">久坐提醒</label>
 <div class="pair"><div><label for="sittingAfterMin">连续坐多久提醒（分钟）</label><input id="sittingAfterMin" type="number" min="5" max="600" step="1" value="50"></div>

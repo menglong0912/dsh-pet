@@ -125,7 +125,7 @@ const visionPrompts: string[] = [];
 const memeAsks: string[] = [];
 
 const ai = {
-  canSeeLocally: () => true,
+  canSeeScreen: () => true,
   isReady: () => true,
   currentSelection: () => ({ provider: 'local', model: 'qwen' }),
   stream: async function* (options: { messages: Array<{ content: Array<{ text: string }> }> }) {
