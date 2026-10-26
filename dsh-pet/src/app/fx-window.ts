@@ -111,6 +111,18 @@ export interface FxSpec {
   cloud?: number;
   /** 用心魔的配色画（飞行物和命中特效都是）：心魔放出来的那几发 */
   shadow?: boolean;
+  /** 水母分身（X8）：挨打方原地留一只水母替身（这个边长），飞行物打在它身上、它碎成泡泡 */
+  decoy?: number;
+  /**
+   * 银托盘的回旋（X8，`track = 'boomerang'`）：`flightMs` 时擦过对方正面（第一段），`secondMs` 时绕到背后
+   * 再磕一下（第二段，打在 `behind`），`totalMs` 时飞回出手方手里（`from`）。`second` = 第二段的结果
+   */
+  boomerang?: {
+    secondMs: number;
+    totalMs: number;
+    behind: [number, number];
+    second: 'hit' | 'blocked' | 'decoy' | 'miss' | 'none';
+  };
 }
 
 /**
@@ -121,8 +133,6 @@ const FX_SIZE: Record<FxAssetName, { size: number; spin?: number; grow?: number 
   毽子: { size: 0.16, spin: 300 },
   扑克牌: { size: 0.13, spin: 900 },
   水弹: { size: 0.16 },
-  // 起点对准出手素材里手上那只大气球（长边含绳子，球身约占一半）
-  气球: { size: 0.7 },
   彩球: { size: 0.09, spin: 400 },
   陀螺: { size: 0.14, spin: 1_080 },
   水浪: { size: 0.32 },
@@ -138,7 +148,6 @@ const FX_SIZE: Record<FxAssetName, { size: number; spin?: number; grow?: number 
   '命中-星': { size: 0.36 },
   '命中-水花': { size: 0.42 },
   '命中-烟花': { size: 0.5 },
-  '命中-气球爆': { size: 0.42 },
   '命中-纸牌': { size: 0.42 },
   '命中-羽毛': { size: 0.42 },
   '命中-彩星': { size: 0.4 },
@@ -148,6 +157,16 @@ const FX_SIZE: Record<FxAssetName, { size: number; spin?: number; grow?: number 
   '命中-泡泡': { size: 0.42 },
   '命中-斩': { size: 0.42 },
   '命中-电光': { size: 0.42 },
+  雪球: { size: 0.12, spin: 240 },
+  羽毛: { size: 0.13, spin: 420 },
+  托盘: { size: 0.22, spin: 1_200 },
+  星星糖: { size: 0.1, spin: 600 },
+  音符: { size: 0.14 },
+  墨汁: { size: 0.17 },
+  水母: { size: 0.42 },
+  灵光: { size: 0.08 },
+  '命中-雪花': { size: 0.44 },
+  '命中-墨汁': { size: 0.46 },
 };
 
 /** 自家宠物的画布矩形（口径同 `guestBounds`：舞台顶 = box.top + bottomPad、画布高 = 宽 × 9/16） */
@@ -237,6 +256,7 @@ export function fxSpec(
   let start: [number, number];
   let end: [number, number];
   let target: Stage;
+  let behind: [number, number] | null = null;
   if (shot.sky) {
     // 天雷：落在渡劫者头顶，乌云悬在正上方
     const self = stages[who];
@@ -254,22 +274,36 @@ export function fxSpec(
     const hand = handPoint(from, shot.hand);
     const body = bodyPoint(to);
     // 贴地的两头都落在脚底线上（陀螺贴地转过去、水浪拍地），抛物线（毽子、三球）从头顶砸下来，
-    // 其余从手里飞到对方身上
+    // 其余从手里飞到对方身上；鲸吞反过来，从对方身上吸出来、飞回出手方嘴边
     const ground = shot.track === 'ground';
-    start = ground ? [hand[0], feetPoint(from)] : hand;
-    end = ground
-      ? [body[0], feetPoint(to)]
-      : shot.track === 'arc'
-        ? toScreen(to, (BODY.x0 + BODY.x1) / 2, HEAD_Y)
-        : body;
+    if (shot.reverse) {
+      start = body;
+      end = hand;
+    } else {
+      start = ground ? [hand[0], feetPoint(from)] : hand;
+      end = ground
+        ? [body[0], feetPoint(to)]
+        : shot.track === 'arc'
+          ? toScreen(to, (BODY.x0 + BODY.x1) / 2, HEAD_Y)
+          : body;
+    }
     const toward = Math.sign(end[0] - start[0]) || 1;
-    if (shot.blocked) {
+    if (shot.reverse || shot.decoy) {
+      // 鲸吞的终点就是嘴；分身原地挨打（本体侧身躲开），终点就是原来的身体中心
+    } else if (shot.blocked) {
       // 打在泡泡朝着来路的那一侧（素材里泡泡也是那一侧被撞凹）
       end = [end[0] - toward * ((BUBBLE_R * to.width) / CANVAS_W), end[1]];
+    } else if (shot.wild) {
+      // 被墨汁糊了眼打歪：远远地从对方头顶斜上方飞过去
+      end = [end[0] + toward * to.width * 0.5, end[1] - to.height * 0.55];
     } else if (shot.miss) {
       // 被躲开：直飞的从头顶上方掠过、抛物线落到身后、贴地的从脚边滚过去（不穿身而过）
       if (shot.track === 'arc') end = [end[0] + toward * to.width * 0.3, end[1]];
       else if (!ground) end = [end[0], end[1] - to.height * 0.32];
+    }
+    if (shot.track === 'boomerang') {
+      // 回旋：绕到对方背后再磕一下的那一点（身体中心往远侧挪三成舞台宽、略高一点）
+      behind = [body[0] + toward * to.width * 0.3, body[1] - to.height * 0.06];
     }
   }
   const pieces: Array<{ delay: number; hue: number }> = [];
@@ -279,7 +313,9 @@ export function fxSpec(
   const art = FX_SIZE[shot.kind];
   const px = (ratio: number): number => Math.max(8, Math.round(ratio * target.height));
   const size = px(art.size);
-  const hitSize = px(FX_SIZE[shot.hitFx].size);
+  // 分身挨的那一下：水母碎成泡泡（不画法宝自己的命中特效）
+  const hitFx: FxAssetName = shot.decoy ? '命中-泡泡' : shot.hitFx;
+  const hitSize = px(FX_SIZE[hitFx].size);
   const local = (point: [number, number]): [number, number] => [
     Math.round(point[0] - bounds.x),
     Math.round(point[1] - bounds.y),
@@ -294,7 +330,7 @@ export function fxSpec(
   const lift = Math.round(Math.min((LIFT[shot.track] ?? 0) * dist, room));
   return {
     kind: shot.kind,
-    hitFx: shot.hitFx,
+    hitFx,
     track: shot.track,
     flightMs: shot.flightMs,
     // 素材统一画成朝左飞：往右飞（目标在自己右边）时页面水平镜像
@@ -307,10 +343,21 @@ export function fxSpec(
     spin: art.spin ?? 0,
     lift,
     grow: art.grow ?? 1,
-    miss: shot.miss === true,
+    miss: shot.miss === true || shot.wild === true,
     pieces,
     ...(shot.track === 'bolt' ? { cloud: px(FX_SIZE.乌云.size) } : {}),
     ...(shadow ? { shadow: true } : {}),
+    ...(shot.decoy ? { decoy: px(FX_SIZE.水母.size) } : {}),
+    ...(behind && shot.boomerang
+      ? {
+          boomerang: {
+            secondMs: shot.boomerang.secondMs,
+            totalMs: shot.boomerang.totalMs,
+            behind: local(behind),
+            second: shot.boomerang.second,
+          },
+        }
+      : {}),
   };
 }
 
@@ -578,6 +625,40 @@ function sky(item, used) {
   return used < s.flightMs + 400;
 }
 
+/** 二次贝塞尔：a → b，控制点 c */
+function bez(a, c, b, u) {
+  var v = 1 - u;
+  return [v * v * a[0] + 2 * v * u * c[0] + u * u * b[0], v * v * a[1] + 2 * v * u * c[1] + u * u * b[1]];
+}
+
+/** 银托盘的一帧：擦过正面 → 绕过头顶到背后再磕一下 → 高高地飞回手里；两个命中点各按结果放特效 */
+function boomerang(item, used) {
+  var s = item.spec;
+  var b = s.boomerang;
+  var t1 = s.flightMs;
+  var pos;
+  if (used < t1) {
+    pos = [s.from[0] + (s.to[0] - s.from[0]) * (used / t1), s.from[1] + (s.to[1] - s.from[1]) * (used / t1)];
+  } else if (used < b.secondMs) {
+    var over = [(s.to[0] + b.behind[0]) / 2, Math.min(s.to[1], b.behind[1]) - s.size * 2.2];
+    pos = bez(s.to, over, b.behind, (used - t1) / (b.secondMs - t1));
+  } else {
+    var high = [(b.behind[0] + s.from[0]) / 2, Math.min(b.behind[1], s.from[1]) - s.size * 2.6];
+    pos = bez(b.behind, high, s.from, Math.min(1, (used - b.secondMs) / (b.totalMs - b.secondMs)));
+  }
+  if (used >= t1 && !item.hit) {
+    item.hit = true;
+    if (!s.miss) burst(s.hitFx, s.hitAt[0], s.hitAt[1], s.hitSize, s.shadow);
+  }
+  if (used >= b.secondMs && !item.hit2) {
+    item.hit2 = true;
+    if (b.second === 'hit' || b.second === 'blocked') burst(s.hitFx, b.behind[0], b.behind[1], s.hitSize, s.shadow);
+    else if (b.second === 'decoy') burst('命中-泡泡', b.behind[0], b.behind[1], s.hitSize, s.shadow);
+  }
+  place(item.node, s.size, s.mirror, pos[0], pos[1], (((s.spin * used) / 1000) * Math.PI) / 180, 1, Math.min(1, used / 40));
+  return used < b.totalMs;
+}
+
 function loop(now) {
   var dt = now - FX.last;
   FX.last = now;
@@ -587,6 +668,18 @@ function loop(now) {
     item.left += dt;
     var used = item.left - item.delay;
     if (used < 0) continue; // 还没起飞（齐发时逐发错开）
+    if (s.boomerang) {
+      if (!boomerang(item, used)) {
+        item.node.remove();
+        FX.items.splice(i, 1);
+      }
+      continue;
+    }
+    if (item.jelly) {
+      // 分身：飞行物到之前 300ms 水母在原地浮现，挨了这一下碎成泡泡
+      var appear = (used - (s.flightMs - 300)) / 150;
+      place(item.jelly, s.decoy, false, s.hitAt[0], s.hitAt[1], 0, 1, Math.max(0, Math.min(1, appear)) * 0.85);
+    }
     if (s.track === 'bolt') {
       if (!sky(item, used)) {
         item.node.remove();
@@ -609,6 +702,7 @@ function loop(now) {
         continue;
       }
       item.node.remove();
+      if (item.jelly) item.jelly.remove();
       FX.items.splice(i, 1);
       burst(s.hitFx, s.hitAt[0], s.hitAt[1], s.hitSize, s.shadow);
       continue;
@@ -658,11 +752,20 @@ window.fx = {
         grow: Number(spec.grow) || 1,
         cloud: Number(spec.cloud) || 0,
         shadow: !!spec.shadow,
+        decoy: Number(spec.decoy) || 0,
+        boomerang: spec.boomerang
+          ? {
+              secondMs: Number(spec.boomerang.secondMs),
+              totalMs: Number(spec.boomerang.totalMs),
+              behind: [spec.boomerang.behind[0], spec.boomerang.behind[1]],
+              second: String(spec.boomerang.second),
+            }
+          : null,
         from: [spec.from[0], spec.from[1]],
         to: [spec.to[0], spec.to[1]],
         hitAt: [spec.hitAt[0], spec.hitAt[1]],
       };
-      var item = { spec: box, delay: Number(pieces[i].delay) || 0, left: 0, hit: false, node: null, cloud: null };
+      var item = { spec: box, delay: Number(pieces[i].delay) || 0, left: 0, hit: false, hit2: false, node: null, cloud: null, jelly: null };
       if (box.track === 'bolt') {
         item.node = piece(src, box.size, 0);
         item.node.className = 'bolt';
@@ -670,6 +773,7 @@ window.fx = {
       } else {
         item.node = piece(src, box.size, Number(pieces[i].hue) || 0, box.shadow);
       }
+      if (box.decoy && i === 0 && FX.src['水母']) item.jelly = piece(FX.src['水母'], box.decoy, 0, box.shadow);
       FX.items.push(item);
     }
     if (FX.raf === null) {
@@ -684,6 +788,7 @@ window.fx = {
       s.from = [s.from[0] + dx, s.from[1] + dy];
       s.to = [s.to[0] + dx, s.to[1] + dy];
       s.hitAt = [s.hitAt[0] + dx, s.hitAt[1] + dy];
+      if (s.boomerang) s.boomerang.behind = [s.boomerang.behind[0] + dx, s.boomerang.behind[1] + dy];
     }
   },
 };

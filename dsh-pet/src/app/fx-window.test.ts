@@ -128,6 +128,52 @@ test('fxSpec 闪避与挡下：躲开的从头顶掠过 / 落到身后（不穿�
   assert.equal(fromRight.to[0], 421 + 115, '从右边打过来就是泡泡右沿');
 });
 
+test('fxSpec X8：鲸吞从对方身体中心吸回出手方嘴边；分身那一下终点不偏、换成泡泡命中并带水母；打歪的远远飞过头顶', () => {
+  const suck = fxSpec(
+    shot({ kind: '灵光', hitFx: '灵光', reverse: true, hand: [258, 200] }),
+    0,
+    stages,
+    everywhere,
+  ) as FxSpec;
+  assert.deepEqual(suck.from, [1119, 497], '起点是对方身体中心');
+  assert.deepEqual(suck.to, [100 + 640 - 258, 300 + 200], '终点是自家宠物的嘴（朝右时镜像）');
+  const decoy = fxSpec(shot({ decoy: true }), 0, stages, everywhere) as FxSpec;
+  assert.deepEqual(decoy.to, [1119, 497], '水母站在原来的位置挨打');
+  assert.equal(decoy.hitFx, '命中-泡泡');
+  assert.equal(decoy.decoy, Math.round(0.42 * 360));
+  const wild = fxSpec(shot({ wild: true }), 0, stages, everywhere) as FxSpec;
+  assert.deepEqual(wild.to, [Math.round(1119 + 0.5 * 640), Math.round(497 - 0.55 * 360)]);
+  assert.equal(wild.miss, true, '打歪的不画命中特效');
+});
+
+test('fxSpec X8 银托盘：回旋带上绕到背后那一点、第二段的时刻与结果，最后飞回出手方的手', () => {
+  const tray = shot({
+    kind: '托盘',
+    track: 'boomerang',
+    flightMs: 340,
+    hand: [180, 210],
+    boomerang: { secondMs: 720, totalMs: 1160, second: 'hit' },
+  });
+  const spec = fxSpec(tray, 0, stages, everywhere) as FxSpec;
+  assert.deepEqual(spec.to, [1119, 497], '第一段擦过正面');
+  assert.deepEqual(spec.boomerang, {
+    secondMs: 720,
+    totalMs: 1160,
+    behind: [Math.round(1119 + 0.3 * 640), Math.round(497 - 0.06 * 360)],
+    second: 'hit',
+  });
+  assert.deepEqual(spec.from, [100 + 640 - 180, 300 + 210], '飞回来落在出手的那只手');
+  // 页面能把整条回旋跑完：两个命中点各放一次特效，最后托盘摘掉
+  const { fx, nodes, advance } = runPage();
+  fx.init({ base: '/x/', names: ['托盘', '命中-星'] });
+  fx.fire(spec);
+  advance(0);
+  for (let t = 0; t < 1300; t += 50) advance(50);
+  const hits = nodes.filter((node) => node.src.endsWith(encodeURIComponent('命中-星') + '.png'));
+  assert.equal(hits.length, 2, '擦过正面一下、背后一下');
+  assert.equal(nodes[0].removed, true, '回到手里就摘掉');
+});
+
 test('fxSpec 天雷：乌云悬在渡劫者头顶上方、闪电劈到头顶；挡下劈在泡泡顶，躲开劈在身后的地上', () => {
   const bolt = shot({ kind: '闪电', track: 'bolt', hitFx: '命中-电光', sky: true, flightMs: 720 });
   const spec = fxSpec(bolt, 0, [self, null], everywhere) as FxSpec;

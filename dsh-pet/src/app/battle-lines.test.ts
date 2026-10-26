@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { lineOf } from './battle-lines.ts';
-import type { BattleEvent, SkillId } from './battle.ts';
+import { WEAPON_IDS, type BattleEvent, type SkillId } from './battle.ts';
 
 /** 名字按 12 字上限来验长度 */
 const names: [string, string] = ['小花小花小花小花', '心魔心魔心魔心魔'];
@@ -26,7 +26,7 @@ test('start 和 decide 不配台词', () => {
 });
 
 test('每件法宝的命中都有专属台词，且不超过 40 字', () => {
-  const weapons = ['water-gun', 'poker', 'shuttlecock', 'balloon', 'juggle', 'top', 'whale-tail', 'firework'] as const;
+  const weapons = WEAPON_IDS;
   for (const weapon of weapons) {
     const lines = pick([0, 0.4, 0.8], { actor: 0, kind: 'hit', weapon, damage: 9, crit: false, blocked: false });
     assert.ok(lines.length >= 2, `${weapon} 至少两句`);
@@ -117,4 +117,50 @@ test('同一种事件多次掷随机数会换着说', () => {
     lineOf(event, names, () => 0.99),
   ]);
   assert.ok(seen.size >= 2, '闪避的几句模板应该轮着来');
+});
+
+test('X8：新法宝的迟缓 / 两颗、跳过按原因、打空、分身、三个新主动都有台词，不超过 40 字', () => {
+  const cases: [BattleEvent, (line: string) => boolean][] = [
+    [
+      { actor: 0, kind: 'hit', weapon: 'duster', damage: 6, crit: false, blocked: false, slowed: true, hp: [10, 4] },
+      (l) => l.includes('6') && /笑|乐/.test(l),
+    ],
+    [
+      { actor: 0, kind: 'hit', weapon: 'slingshot', damage: 16, crit: false, blocked: false, twin: true, hp: [10, 4] },
+      (l) => l.includes('16') && /两颗/.test(l),
+    ],
+    [{ actor: 1, kind: 'skip', cause: 'freeze', hp: [10, 10] }, (l) => l.includes(names[1]) && /冰/.test(l)],
+    [{ actor: 1, kind: 'skip', cause: 'sleep', hp: [10, 10] }, (l) => l.includes(names[1]) && /睡|呼/.test(l)],
+    [{ actor: 1, kind: 'skip', cause: 'stun', hp: [10, 10] }, (l) => l.includes(names[1])],
+    [{ actor: 1, kind: 'miss', hp: [10, 10] }, (l) => l.includes(names[1])],
+    [{ actor: 1, kind: 'decoy', hp: [10, 10] }, (l) => l.includes(names[1]) && l.includes('水母')],
+    [{ actor: 0, kind: 'skill', skill: 'whale-song', hp: [10, 10] }, (l) => l.includes(names[1])],
+    [{ actor: 0, kind: 'skill', skill: 'ink', hp: [10, 10] }, (l) => l.includes(names[1]) && l.includes('墨')],
+    [
+      { actor: 0, kind: 'skill', skill: 'whale-gulp', damage: 22, heal: 11, hp: [10, 10] },
+      (l) => l.includes('22') && l.includes('11'),
+    ],
+  ];
+  for (const [event, check] of cases) {
+    for (const roll of [0.01, 0.99]) {
+      const line = lineOf(event, names, () => roll);
+      assert.ok(line !== null, `${event.kind} 应该有台词`);
+      assert.ok(check(line!), `${event.kind} 台词内容不对：${line}`);
+      assert.ok(line!.length <= 40, `${event.kind} 台词超长：${line}`);
+    }
+  }
+  // 迟缓 / 两颗的专属句叠上会心或挡伤，仍不超长
+  for (const flag of [{ slowed: true as const }, { twin: true as const }]) {
+    for (const extra of [
+      { crit: true, blocked: false },
+      { crit: false, blocked: true },
+    ]) {
+      const line = lineOf(
+        { actor: 0, kind: 'hit', weapon: 'duster', damage: 99, ...extra, ...flag, hp: [10, 4] },
+        names,
+        () => 0.5,
+      );
+      assert.ok(line!.length <= 40, `叠加后超长：${line}`);
+    }
+  }
 });

@@ -58,7 +58,47 @@ const SCENES = {
   水枪: { events: [start, decide(0, weapon('water-gun')), whit(0, 'water-gun')] },
   扑克牌: { events: [start, decide(0, weapon('poker')), whit(0, 'poker'), whit(0, 'poker')] },
   毽子: { events: [start, decide(0, weapon('shuttlecock')), whit(0, 'shuttlecock')] },
-  气球: { events: [start, decide(0, weapon('balloon')), whit(0, 'balloon')] },
+  雪球: {
+    events: [
+      start,
+      decide(0, weapon('snowball')),
+      whit(0, 'snowball'),
+      { actor: 1, kind: 'skip', cause: 'freeze', hp },
+    ],
+  },
+  鸡毛掸子: { events: [start, decide(0, weapon('duster')), whit(0, 'duster', { slowed: true })] },
+  银托盘: { events: [start, decide(0, weapon('tray')), whit(0, 'tray'), whit(0, 'tray')] },
+  托盘被躲: { events: [start, decide(0, weapon('tray')), { actor: 1, kind: 'dodge', hp }, whit(0, 'tray')] },
+  弹弓: { events: [start, decide(0, weapon('slingshot')), whit(0, 'slingshot', { twin: true })] },
+  鲸歌: {
+    events: [
+      start,
+      decide(0, skill('whale-song')),
+      { actor: 0, kind: 'skill', skill: 'whale-song', hp },
+      { actor: 1, kind: 'skip', cause: 'sleep', hp },
+    ],
+  },
+  墨汁: {
+    events: [
+      start,
+      decide(0, skill('ink')),
+      { actor: 0, kind: 'skill', skill: 'ink', hp },
+      decide(1, weapon('poker')),
+      { actor: 1, kind: 'miss', hp },
+      whit(1, 'poker'),
+    ],
+  },
+  鲸吞: {
+    events: [
+      start,
+      decide(0, skill('whale-gulp')),
+      { actor: 0, kind: 'skill', skill: 'whale-gulp', damage: 20, heal: 10, hp },
+    ],
+  },
+  水母分身: {
+    events: [start, decide(0, weapon('firework')), { actor: 1, kind: 'decoy', hp }],
+    skillSets: [[], ['jelly-clone']],
+  },
   三球: { events: [start, decide(0, weapon('juggle')), whit(0, 'juggle'), whit(0, 'juggle'), whit(0, 'juggle')] },
   陀螺: { events: [start, decide(0, weapon('top')), whit(0, 'top')] },
   鲸尾: { events: [start, decide(0, weapon('whale-tail')), whit(0, 'whale-tail')] },
@@ -101,8 +141,8 @@ const SCENES = {
       start,
       decide(1, weapon('water-gun')),
       whit(1, 'water-gun'),
-      decide(0, weapon('balloon')),
-      whit(0, 'balloon'),
+      decide(0, weapon('snowball')),
+      whit(0, 'snowball'),
     ],
   },
   渡劫: {
@@ -273,7 +313,8 @@ try {
     const shots = [];
     cdp.on('Page.screencastFrame', (frame) => {
       shots.push({ wall: frame.metadata.timestamp * 1000, data: frame.data });
-      void cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId });
+      // 收场时还会漏回来一两帧，那时会话已经关了：ack 失败不算错，别让它盖掉真正的异常
+      void cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => undefined);
     });
     await page.goto(base);
     // 先把这一场的素材都取一遍（预览里没有 app 的预加载，第一次换源要等网络会把节奏拖乱）

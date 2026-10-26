@@ -113,8 +113,8 @@ const sparCardSchema = z.object({
   power: z.number().int().min(1),
   agility: z.number().int().min(1),
   speed: z.number().int().min(1),
-  weapons: z.array(z.enum(WEAPON_IDS)).max(8),
-  skills: z.array(z.enum(SKILL_IDS)).max(10),
+  weapons: z.array(z.enum(WEAPON_IDS)).max(WEAPON_IDS.length),
+  skills: z.array(z.enum(SKILL_IDS)).max(SKILL_IDS.length),
 });
 
 /**

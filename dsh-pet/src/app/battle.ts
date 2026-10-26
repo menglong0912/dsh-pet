@@ -8,7 +8,18 @@
 import { createHash } from 'node:crypto';
 
 /** 图鉴条目都会上网（X5 名帖），编号用 ASCII；name 只在本机和局域网里显示（素材名在 battle-show.ts 的演出表里） */
-export type WeaponId = 'water-gun' | 'poker' | 'shuttlecock' | 'balloon' | 'juggle' | 'top' | 'whale-tail' | 'firework';
+export type WeaponId =
+  | 'water-gun'
+  | 'poker'
+  | 'shuttlecock'
+  | 'snowball'
+  | 'duster'
+  | 'juggle'
+  | 'top'
+  | 'whale-tail'
+  | 'tray'
+  | 'slingshot'
+  | 'firework';
 
 export interface WeaponDef {
   id: WeaponId;
@@ -29,6 +40,14 @@ export interface WeaponDef {
   ranged: boolean;
   /** 重：用它出手后，下次出手间隔 ×1.2 */
   heavy: boolean;
+  /** 定身的样子（演出与解说用）：陀螺是晕（stun），雪球是冻住（freeze） */
+  skipCause: 'stun' | 'freeze';
+  /** 迟缓（鸡毛掸子，X8）：打中就让对方下次出手往后推半个出手间隔 */
+  slow: boolean;
+  /** 回旋（银托盘，X8）：最后一段是飞回来从背后磕的，必中 */
+  returnSure: boolean;
+  /** 一发打两颗的概率（弹弓，X8）：这一下伤害再加一次区间随机 */
+  twinChance: number;
 }
 
 const weapon = (
@@ -50,6 +69,10 @@ const weapon = (
   mustHit: false,
   ranged: false,
   heavy: false,
+  skipCause: 'stun',
+  slow: false,
+  returnSure: false,
+  twinChance: 0,
   ...extra,
 });
 
@@ -58,10 +81,13 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   'water-gun': weapon('water-gun', '水枪', '凡器', 6, 10, { ranged: true }),
   poker: weapon('poker', '扑克牌', '凡器', 3, 6, { hits: 2 }),
   shuttlecock: weapon('shuttlecock', '毽子', '凡器', 5, 9, { comboBonus: 0.1 }),
-  balloon: weapon('balloon', '气球', '凡器', 4, 8, { skipChance: 0.1 }),
+  snowball: weapon('snowball', '雪球', '凡器', 4, 8, { skipChance: 0.1, skipCause: 'freeze' }),
+  duster: weapon('duster', '鸡毛掸子', '凡器', 3, 7, { slow: true }),
   juggle: weapon('juggle', '三球', '灵器', 2, 4, { hits: 3 }),
   top: weapon('top', '陀螺', '灵器', 6, 10, { skipChance: 0.15 }),
   'whale-tail': weapon('whale-tail', '鲸尾', '灵器', 9, 15, { heavy: true }),
+  tray: weapon('tray', '银托盘', '灵器', 4, 7, { hits: 2, returnSure: true }),
+  slingshot: weapon('slingshot', '弹弓', '灵器', 6, 10, { ranged: true, twinChance: 0.15 }),
   firework: weapon('firework', '烟花', '神器', 10, 16, { mustHit: true }),
 };
 
@@ -77,7 +103,11 @@ export type SkillId =
   | 'spirit-beast'
   | 'bloom'
   | 'lion-roar'
-  | 'blue-whale';
+  | 'blue-whale'
+  | 'whale-song'
+  | 'ink'
+  | 'whale-gulp'
+  | 'jelly-clone';
 
 export interface SkillDef {
   id: SkillId;
@@ -103,6 +133,10 @@ export const SKILLS: Record<SkillId, SkillDef> = {
   bloom: skill('bloom', '凭空生花', '主动'),
   'lion-roar': skill('lion-roar', '狮子吼', '主动'),
   'blue-whale': skill('blue-whale', '蓝鲸现世', '主动'),
+  'whale-song': skill('whale-song', '鲸歌', '主动'),
+  ink: skill('ink', '墨汁喷射', '主动'),
+  'whale-gulp': skill('whale-gulp', '鲸吞', '主动'),
+  'jelly-clone': skill('jelly-clone', '水母分身', '被动'),
 };
 
 export const SKILL_IDS = Object.keys(SKILLS) as SkillId[];
@@ -111,10 +145,10 @@ export const SKILL_IDS = Object.keys(SKILLS) as SkillId[];
  * 引擎版本（X5 名帖的 v）：结算规则、图鉴内容变了就 +1。切磋双方在名帖里各带一份，
  * 两边不同就切不了（谁也不知道对方那版引擎会打出什么）。
  */
-export const BATTLE_VERSION = 1;
+export const BATTLE_VERSION = 2;
 
 /** 主动招式（Action 里允许出现的） */
-const ACTIVE_SKILLS: readonly SkillId[] = ['bloom', 'lion-roar', 'blue-whale'];
+const ACTIVE_SKILLS: readonly SkillId[] = ['bloom', 'lion-roar', 'blue-whale', 'whale-song', 'ink', 'whale-gulp'];
 
 export interface Fighter {
   name: string; // 显示用
@@ -156,6 +190,10 @@ export type BattleEvent =
       damage: number;
       crit: boolean;
       blocked: boolean;
+      /** 鸡毛掸子这一下让对方迟缓了（X8） */
+      slowed?: true;
+      /** 弹弓这一下打了两颗（X8） */
+      twin?: true;
       hp: [number, number];
     }
   | {
@@ -165,12 +203,19 @@ export type BattleEvent =
       damage: number;
       crit: boolean;
       blocked: boolean;
+      slowed?: true;
+      twin?: true;
       hp: [number, number];
     }
   | { actor: 0 | 1; kind: 'dodge'; hp: [number, number] }
   | { actor: 0 | 1; kind: 'counter'; damage: number; blocked: boolean; hp: [number, number] }
   | { actor: 0 | 1; kind: 'beast'; damage: number; blocked: boolean; hp: [number, number] }
-  | { actor: 0 | 1; kind: 'skip'; hp: [number, number] }
+  /** 跳过一次出手；`cause`：陀螺 / 狮子吼是晕（stun），雪球是冻住（freeze），鲸歌是睡着（sleep） */
+  | { actor: 0 | 1; kind: 'skip'; cause?: 'stun' | 'freeze' | 'sleep'; hp: [number, number] }
+  /** 被墨汁糊了眼，这一下打空（X8；actor 是出手的那一方） */
+  | { actor: 0 | 1; kind: 'miss'; hp: [number, number] }
+  /** 水母分身替挨了这一下（X8；actor 是挨打的那一方） */
+  | { actor: 0 | 1; kind: 'decoy'; hp: [number, number] }
   | { actor: 0 | 1; kind: 'play-dead'; hp: [number, number] }
   | { actor: 0 | 1; kind: 'skill'; skill: SkillId; damage?: number; heal?: number; hp: [number, number] }
   | { actor: 0 | 1; kind: 'strike'; index: number; damage: number; blocked: boolean; hp: [number, number] }
@@ -226,6 +271,10 @@ interface Side {
   next: number;
   /** 下一次出手是否被定住跳过 */
   skip: boolean;
+  /** 跳过的原因（演出与解说用） */
+  skipCause: 'stun' | 'freeze' | 'sleep';
+  /** 墨汁：接下来还有几次出手被糊着眼 */
+  blind: number;
   used: Set<SkillId>;
   /** 泡泡护体这场还能挡几次 */
   bubbles: number;
@@ -239,6 +288,8 @@ function makeSide(f: Fighter, initialDelay: number): Side {
     hp: f.hp,
     next: (100 / (f.speed + 10)) * initialDelay,
     skip: false,
+    skipCause: 'stun',
+    blind: 0,
     used: new Set(),
     bubbles: f.skills.includes('bubble') ? 2 : 0,
     beastLeft: f.skills.includes('spirit-beast') ? 3 : 0,
@@ -279,6 +330,8 @@ export function autoController(rng: () => number): Controller {
       const maxHp = view.maxHp[view.self];
       const unused = view.you.skills.filter((s) => ACTIVE_SKILLS.includes(s) && !view.you.used.includes(s));
       if (unused.includes('bloom') && hp * 2 < maxHp) return { kind: 'skill', skill: 'bloom' };
+      // 鲸吞带回血：气血低于七成时先用
+      if (unused.includes('whale-gulp') && hp * 10 < maxHp * 7) return { kind: 'skill', skill: 'whale-gulp' };
       const actives = unused.filter((s) => s !== 'bloom');
       if (actives.length > 0 && rng() < 0.25) return { kind: 'skill', skill: pick(rng, actives) };
       if (view.you.weapons.length > 0 && rng() >= 0.2) return { kind: 'weapon', weapon: pick(rng, view.you.weapons) };
@@ -297,13 +350,15 @@ const POWER_FACTOR = 0.75;
  * 渡劫：单道天雷伤害 ≈ 典型气血 ÷ 雷数 ×（TRIBULATION_BASE + 境界 × TRIBULATION_STEP）。
  * X4 落地后按正式成长（fighterAt 同口径）对七个渡劫分界重标过（2026-10-25）：
  * 旧值 0.54 / 0.024 / 0.35 下成功率 0.30–0.72 不齐（早期偏难），调后不吃丹全站 0.59–0.67、吃丹 0.83–0.89。
+ * X8 招式表从 10 个扩到 14 个（2026-10-26）：同样四五次二选一，攒到泡泡 / 化鸽 / 假死 / 生花这几门防身的
+ * 概率变低，后期偏难（不吃丹 0.44–0.59）；网格重标为 0.47 / 0.0198 / 0.002 / 0.368，七站不吃丹 0.59–0.70、吃丹 0.83–0.91。
  */
-const TRIBULATION_BASE = 0.46;
-const TRIBULATION_STEP = 0.022;
+const TRIBULATION_BASE = 0.47;
+const TRIBULATION_STEP = 0.0198;
 /** 炼虚往上升的额外斜率：技能攒得全，扛雷能力一路变强 */
-const TRIBULATION_LATE_STEP = 0.008;
+const TRIBULATION_LATE_STEP = 0.002;
 /** 渡劫：单道雷按渡劫者自身气血加成的比例（吃丹加的血也走这里，丹的收益不至于陡成必过） */
-const TRIBULATION_HP_CUT = 0.38;
+const TRIBULATION_HP_CUT = 0.368;
 /** 破势：伤害里随防守方气血上限加成的比例 */
 const HP_BONUS = 0.25;
 const CRIT_SKILL_CHANCE = 0.18;
@@ -317,6 +372,16 @@ const SIXTH_SENSE_CHANCE = 0.28;
 
 /** 连击：同一回合最多再补这么次数 */
 const MAX_COMBOS = 2;
+/** 墨汁糊眼：dodgeRoll 落在这以上就打空（一半） */
+const BLIND_MISS_FROM = 0.5;
+/** 墨汁糊眼管几次出手 */
+const INK_TURNS = 2;
+/** 水母分身：counterRoll 落在这以上就打在分身上（一成） */
+const DECOY_FROM = 0.9;
+/** 鸡毛掸子：对方下次出手往后推的比例（出手间隔的一半） */
+const SLOW_FACTOR = 0.5;
+/** 鲸吞伤害里吃的破势份额 */
+const GULP_HP_SHARE = 0.5;
 
 export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Controller, Controller]): BattleEvent[] {
   // 结算随机数只由种子决定，是 fight 内部的局部状态
@@ -339,8 +404,14 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
     };
   };
 
-  /** 一次攻击（法宝或空手）：命中、会心、连击、定身、反击、灵兽都从这进 */
-  const attack = (self: 0 | 1, action: Extract<Action, { kind: 'weapon' | 'unarmed' }>): void => {
+  /** 对方睡着（鲸歌）：睡着期间挨的攻击都不判闪避 */
+  const asleep = (side: Side): boolean => side.skip && side.skipCause === 'sleep';
+
+  /**
+   * 一次攻击（法宝或空手）：命中、会心、连击、定身、反击、灵兽都从这进。
+   * @param blinded 这次出手被墨汁糊着眼（X8）：每一下有一半打空
+   */
+  const attack = (self: 0 | 1, action: Extract<Action, { kind: 'weapon' | 'unarmed' }>, blinded: boolean): void => {
     const me = sides[self];
     const foe = sides[self ^ 1];
     const def = action.kind === 'weapon' ? WEAPONS[action.weapon] : null;
@@ -355,11 +426,26 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
       const comboRoll = rng();
       const skipRoll = rng();
       const counterRoll = rng();
-      if (!def?.mustHit && dodgeRoll < dodgeRate(foe.f)) {
+      // 墨汁糊眼：打空用 dodgeRoll 的高段（闪避用的是低段，互不重叠；不新增抽签）
+      if (blinded && dodgeRoll >= BLIND_MISS_FROM) {
+        events.push({ actor: self, kind: 'miss', hp: hpPair(sides[0], sides[1]) });
+        continue;
+      }
+      // 必中：烟花；银托盘最后一段从背后回旋磕过来；对方睡着
+      const sure = def?.mustHit || (def?.returnSure && hit === hits - 1) || asleep(foe);
+      if (!sure && dodgeRoll < dodgeRate(foe.f)) {
         events.push({ actor: (self ^ 1) as 0 | 1, kind: 'dodge', hp: hpPair(sides[0], sides[1]) });
         continue;
       }
-      const base = def ? randBetween(dmgRoll, def.min, def.max) : randBetween(dmgRoll, 3, 6);
+      // 水母分身：counterRoll 的高段（反击用低段；分身作废后本来就不判反击）
+      if (foe.f.skills.includes('jelly-clone') && counterRoll >= DECOY_FROM) {
+        events.push({ actor: (self ^ 1) as 0 | 1, kind: 'decoy', hp: hpPair(sides[0], sides[1]) });
+        continue;
+      }
+      let base = def ? randBetween(dmgRoll, def.min, def.max) : randBetween(dmgRoll, 3, 6);
+      // 弹弓一发打两颗：用 skipRoll（弹弓没有定身），第二颗的点数由 dmgRoll 派生（不新增抽签）
+      const twin = !!def && def.twinChance > 0 && skipRoll < def.twinChance;
+      if (twin && def) base += randBetween((dmgRoll * 7.31) % 1, def.min, def.max);
       // 灵力和破势（伤害随对手气血上限加成，§平衡：不然境界高一线、血厚一线就接近稳赢）
       // 都是整段出手合计一份，多段法宝每段按段数分摊（否则一次三张/三件会吃成三倍）
       const perPiece = Math.floor((me.f.power * POWER_FACTOR + foe.f.hp * HP_BONUS) / (def?.hits ?? 1));
@@ -370,6 +456,9 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
       if (crit) damage *= 2;
       const applied = applyDamage(foe, damage);
       const kind = hit < hits ? 'hit' : 'combo';
+      // 鸡毛掸子：打中（含被泡泡挡下）就笑岔气，对方下次出手往后推半个间隔
+      const slowed = !!def?.slow && foe.hp > 0;
+      if (slowed) foe.next += intervalOf(foe) * SLOW_FACTOR;
       events.push({
         actor: self,
         kind,
@@ -377,12 +466,17 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
         damage: applied.damage,
         crit,
         blocked: applied.blocked,
+        ...(slowed ? { slowed: true as const } : {}),
+        ...(twin ? { twin: true as const } : {}),
         hp: hpPair(sides[0], sides[1]),
       });
       if (applied.playDead)
         events.push({ actor: (self ^ 1) as 0 | 1, kind: 'play-dead', hp: hpPair(sides[0], sides[1]) });
-      // 定身
-      if (def && def.skipChance > 0 && skipRoll < def.skipChance) foe.skip = true;
+      // 定身（陀螺是晕，雪球是冻住）
+      if (def && def.skipChance > 0 && skipRoll < def.skipChance) {
+        foe.skip = true;
+        foe.skipCause = def.skipCause;
+      }
       // 反击：远程、灵兽和反击本身不会被反击
       if (!def?.ranged && foe.hp > 0 && foe.f.skills.includes('sixth-sense') && counterRoll < SIXTH_SENSE_CHANCE) {
         const counterDmg = randBetween(rng(), 3, 6) + Math.floor(foe.f.power * POWER_FACTOR);
@@ -414,7 +508,7 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
       me.beastLeft -= 1;
       const dodgeRoll = rng();
       const dmgRoll = rng();
-      if (!(dodgeRoll < dodgeRate(foe.f))) {
+      if (asleep(foe) || !(dodgeRoll < dodgeRate(foe.f))) {
         const applied = applyDamage(foe, randBetween(dmgRoll, 4, 7));
         events.push({
           actor: self,
@@ -451,6 +545,9 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
     const asked = controllers[self].decide(view(self));
     const action = legalize(me, asked);
     events.push({ actor: self, kind: 'decide', action, hp: hpPair(sides[0], sides[1]) });
+    // 墨汁：糊着眼的这次出手用掉一次（放招式也算一次，只是招式不受影响）
+    const blinded = me.blind > 0;
+    if (blinded) me.blind -= 1;
     if (action.kind === 'skill') {
       me.used.add(action.skill);
       const foe = sides[self ^ 1];
@@ -464,6 +561,7 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
         // 狮子吼的音波也算破势的一环，伤害吃半份破势（§平衡：主动招式别比普通攻击还弱）
         const applied = applyDamage(foe, 15 + Math.floor((foe.f.hp * HP_BONUS * LION_HP_SHARE) / 1));
         foe.skip = true;
+        foe.skipCause = 'stun';
         events.push({
           actor: self,
           kind: 'skill',
@@ -487,8 +585,38 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
         if (applied.playDead)
           events.push({ actor: (self ^ 1) as 0 | 1, kind: 'play-dead', hp: hpPair(sides[0], sides[1]) });
       }
+      if (action.skill === 'whale-song') {
+        // 鲸歌：对方睡着，跳过下一次出手；睡着期间挨的攻击都不判闪避
+        foe.skip = true;
+        foe.skipCause = 'sleep';
+        events.push({ actor: self, kind: 'skill', skill: 'whale-song', hp: hpPair(sides[0], sides[1]) });
+      }
+      if (action.skill === 'ink') {
+        // 墨汁喷射：对方接下来两次出手糊着眼
+        foe.blind = INK_TURNS;
+        events.push({ actor: self, kind: 'skill', skill: 'ink', hp: hpPair(sides[0], sides[1]) });
+      }
+      if (action.skill === 'whale-gulp') {
+        // 鲸吞：伤害吃半份破势，回复实际伤害的一半（不超上限）
+        const applied = applyDamage(
+          foe,
+          12 + Math.floor(me.f.power * POWER_FACTOR) + Math.floor(foe.f.hp * HP_BONUS * GULP_HP_SHARE),
+        );
+        const heal = Math.min(Math.floor(applied.damage / 2), me.f.hp - me.hp);
+        me.hp += heal;
+        events.push({
+          actor: self,
+          kind: 'skill',
+          skill: 'whale-gulp',
+          damage: applied.damage,
+          heal,
+          hp: hpPair(sides[0], sides[1]),
+        });
+        if (applied.playDead)
+          events.push({ actor: (self ^ 1) as 0 | 1, kind: 'play-dead', hp: hpPair(sides[0], sides[1]) });
+      }
     } else {
-      attack(self, action);
+      attack(self, action, blinded);
     }
     return action;
   };
@@ -501,7 +629,8 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
     actions += 1;
     if (me.skip) {
       me.skip = false;
-      events.push({ actor: self, kind: 'skip', hp: hpPair(sides[0], sides[1]) });
+      events.push({ actor: self, kind: 'skip', cause: me.skipCause, hp: hpPair(sides[0], sides[1]) });
+      me.skipCause = 'stun';
     } else {
       const done = takeAction(self);
       // 鲸尾：用它出手后，下次出手间隔 ×1.2

@@ -39,6 +39,7 @@ import {
   TRIBULATION_LOSS_ANIM,
   TRIBULATION_PILL_ANIM,
   TRIBULATION_WIN_ANIM,
+  actionRate,
   animLength,
   rateFor,
   releaseOffset,
@@ -183,6 +184,12 @@ test('每一招都有自己的出手、飞行物、命中特效和受击（§X7 
       { kind: 'skill', skill: id },
       [{ actor: 0, kind: 'skill', skill: id, damage: 20, hp: [100, 70] }],
     ]),
+    // X8：没有伤害的两个主动（鲸歌、墨汁）也放一发、对方按招式反应
+    ...(['whale-song', 'ink'] as SkillId[]).map((id): [string, Action, BattleEvent[]] => [
+      id,
+      { kind: 'skill', skill: id },
+      [{ actor: 0, kind: 'skill', skill: id, hp }],
+    ]),
     ['unarmed', UNARMED, [hit(0)]],
   ];
   for (const [key, action, landed] of cases) {
@@ -196,7 +203,9 @@ test('每一招都有自己的出手、飞行物、命中特效和受击（§X7 
       `${key}：出手方播自己的出手素材`,
     );
     const shots = shotsOf(steps);
-    assert.equal(shots.length, landed.length, `${key}：每一段伤害一发飞行物`);
+    // 银托盘的两段是同一只托盘回旋（一发里带两个命中点），其余每一段伤害一发
+    const expected = fly.track === 'boomerang' ? 1 : landed.length;
+    assert.equal(shots.length, expected, `${key}：每一段伤害一发飞行物`);
     for (const step of shots) {
       assert.equal(step.shot.kind, fly.kind, key);
       assert.equal(step.shot.hitFx, fly.hitFx, key);
@@ -952,4 +961,141 @@ test('真引擎的若干场：素材名都对得上包内素材、倍速都在 /
   for (const anim of [TRIBULATION_PILL_ANIM, TRIBULATION_WIN_ANIM, TRIBULATION_LOSS_ANIM]) {
     assert.ok(played.has(anim), `扫描没演到 ${anim}`);
   }
+});
+
+test('X8 银托盘：一只托盘回旋两段——擦过正面、绕到背后再磕一下、飞回手里接住；第一段被躲开也照样绕回来磕', () => {
+  const tray: Action = { kind: 'weapon', weapon: 'tray' };
+  const steps = timeline(
+    [start(0), decide(0, tray), hit(0, 6, [100, 84], false, 'tray'), hit(0, 6, [100, 78], false, 'tray')],
+    NAMES,
+    seq(),
+  );
+  const [shot] = shotsOf(steps);
+  assert.equal(shotsOf(steps).length, 1);
+  assert.equal(shot.at, OPEN_MS + releaseOffset('出手-托盘'));
+  assert.equal(shot.shot.boomerang?.second, 'hit');
+  const second = shot.at + (shot.shot.boomerang?.secondMs ?? 0);
+  // 两次掉血：第一段在擦过正面时，第二段在绕到背后时
+  assert.deepEqual(
+    steps.filter((step) => step.line).map((step) => step.at),
+    [impactOf(shot), second],
+  );
+  // 回到手里的那一刻对准素材里接住托盘的那一帧（出手素材按 3 秒的窗口播）
+  const rate = actionRate('出手-托盘');
+  assert.equal(rate, rateFor('出手-托盘', 3_000));
+  assert.equal(
+    shot.at + (shot.shot.boomerang?.totalMs ?? 0),
+    OPEN_MS + Math.round((RELEASE['出手-托盘'].catchMs ?? 0) / rate),
+  );
+  // 第一段被躲开：托盘从头顶掠过，绕回来第二段必中，对方的反应对准第二段
+  const dodged = timeline([start(0), decide(0, tray), dodge(1), hit(0, 6, [100, 84], false, 'tray')], NAMES, seq());
+  const [loop] = shotsOf(dodged);
+  assert.deepEqual([loop.shot.miss, loop.shot.boomerang?.second], [true, 'hit']);
+  const react = animsOf(dodged, HIT)[0];
+  assert.equal(react.at, loop.at + (loop.shot.boomerang?.secondMs ?? 0) - windupOf(HIT));
+  // 第一段就打倒了（没有第二段）：托盘照样飞回来，第二个命中点不放特效
+  const ko = timeline([start(0), decide(0, tray), hit(0, 99, [100, 0], false, 'tray')], NAMES, seq());
+  assert.equal(shotsOf(ko)[0].shot.boomerang?.second, 'none');
+});
+
+test('X8 弹弓：一发打两颗时两颗星星糖几乎一起飞出去', () => {
+  const sling: Action = { kind: 'weapon', weapon: 'slingshot' };
+  const one = shotsOf(timeline([start(0), decide(0, sling), hit(0, 8, [100, 82], false, 'slingshot')], NAMES, seq()));
+  assert.deepEqual([one[0].shot.kind, one[0].shot.count], ['星星糖', 1]);
+  const twin = { ...hit(0, 16, [100, 74], false, 'slingshot'), twin: true } as BattleEvent;
+  const two = shotsOf(timeline([start(0), decide(0, sling), twin], NAMES, seq()));
+  assert.deepEqual([two[0].shot.count, two[0].shot.gapMs], [2, 70]);
+});
+
+test('X8 鲸歌：音符飘过去对方打瞌睡；跳过的那一拍再演一遍犯困（冻住的那一拍演冻僵），不切断上一段', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'whale-song' }),
+      { actor: 0, kind: 'skill', skill: 'whale-song', hp },
+      { actor: 1, kind: 'skip', cause: 'sleep', hp },
+    ],
+    NAMES,
+    seq(),
+  );
+  const [notes] = shotsOf(steps);
+  assert.deepEqual([notes.shot.kind, notes.shot.track, notes.shot.count], ['音符', 'float', 3]);
+  const sleepy = animsOf(steps, '受击-犯困');
+  assert.equal(sleepy.length, 2, '中招一次、跳过的那一拍再一次');
+  assert.equal(sleepy[0].at, impactOf(notes) - windupOf('受击-犯困'));
+  assertNoCut(steps, '鲸歌');
+  const frozen = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'weapon', weapon: 'snowball' }),
+      hit(0, 6, [100, 84], false, 'snowball'),
+      { actor: 1, kind: 'skip', cause: 'freeze', hp: [100, 84] },
+    ],
+    NAMES,
+    seq(),
+  );
+  assert.equal(animsOf(frozen, '受击-冻僵').length, 2);
+  // 晕了（stun）照旧只有台词
+  const stunned = timeline([start(0), { actor: 1, kind: 'skip', cause: 'stun', hp }], NAMES, seq());
+  assert.equal(stunned.filter((step) => step.anim && step.at >= OPEN_MS).length, 0);
+});
+
+test('X8 墨汁与致盲：糊脸那一下对方演糊脸；被糊眼的一方出手打空，飞行物远远打歪、对方不反应', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'ink' }),
+      { actor: 0, kind: 'skill', skill: 'ink', hp },
+      decide(1, { kind: 'weapon', weapon: 'poker' }),
+      { actor: 1, kind: 'miss', hp },
+      hit(1, 6, [94, 90], false, 'poker'),
+    ],
+    NAMES,
+    seq(),
+  );
+  const [ink, wild, landed] = shotsOf(steps);
+  assert.equal(ink.shot.kind, '墨汁');
+  assert.equal(animsOf(steps, '受击-墨汁')[0]?.at, impactOf(ink) - windupOf('受击-墨汁'));
+  assert.deepEqual([wild.who, wild.shot.wild, landed.shot.wild], [1, true, undefined]);
+  // 打空的那张牌：自家宠物不躲也不挨；打中的那张照常受击
+  const selfReacts = steps.filter((step) => step.who === 0 && step.anim && step.at > ink.at);
+  assert.deepEqual(
+    selfReacts.map((step) => [step.anim, step.at]),
+    [[HIT, impactOf(landed) - windupOf(HIT)]],
+  );
+});
+
+test('X8 鲸吞：灵光从对方身上被吸走（放出那一刻对方就起反应），最后一颗飞回嘴边时掉血回血一起结算', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'whale-gulp' }),
+      { actor: 0, kind: 'skill', skill: 'whale-gulp', damage: 20, heal: 10, hp: [100, 70] },
+    ],
+    NAMES,
+    seq(),
+  );
+  const [suck] = shotsOf(steps);
+  assert.deepEqual([suck.shot.kind, suck.shot.reverse, suck.shot.count], ['灵光', true, 6]);
+  assert.deepEqual(suck.shot.hand, RELEASE['出手-鲸吞'].hand, '终点是出手方的嘴');
+  const arrive = suck.at + suck.shot.flightMs + (suck.shot.count - 1) * suck.shot.gapMs;
+  assert.equal(animsOf(steps, HIT)[0]?.at, suck.at - windupOf(HIT), '被吸的那一刻就起反应');
+  const settled = steps.find((step) => step.line);
+  assert.deepEqual([settled?.at, settled?.hp], [arrive, [100, 70]]);
+});
+
+test('X8 水母分身：那一下打在原地的水母替身上（decoy），本体侧身躲开，闪避对准命中', () => {
+  const steps = timeline(
+    [start(0), decide(0, { kind: 'weapon', weapon: 'firework' }), { actor: 1, kind: 'decoy', hp }],
+    NAMES,
+    seq(),
+    [[], ['jelly-clone']],
+  );
+  const [shot] = shotsOf(steps);
+  assert.equal(shot.shot.decoy, true);
+  assert.deepEqual(
+    steps.filter((step) => step.who === 1 && step.anim && step.at >= OPEN_MS).map((step) => [step.anim, step.at]),
+    [['战斗-闪避', impactOf(shot) - windupOf('战斗-闪避')]],
+  );
+  assert.equal(animsOf(steps, '受击-炸黑').length, 0, '本体没挨着');
 });

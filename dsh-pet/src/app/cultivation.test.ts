@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { seededRng } from './battle-testkit.ts';
 import { majorBreaks, statCap, WEAPON_IDS, type SkillId, type WeaponId } from './battle.ts';
 import { diaryDate } from './diary.ts';
 import {
   Cultivation,
+  migrateCatalog,
   drawDropWeapon,
   type CultivationEvent,
   isFullStage,
@@ -553,6 +554,31 @@ test('day rolls over at 4 am: counters reset and the old file is backed up', () 
     assert.equal(progressOf(path), 90);
     assert.equal(c.view().record.wins, 3); // 昨天心魔 + 切磋各赢一场，今天心魔又赢一场
   });
+});
+
+test('X8 图鉴迁移：带气球的旧档读得出来，气球换成雪球（已有雪球就去掉），不认识的招式丢掉，下一拍写回', () => {
+  withPath((path, warns) => {
+    open(path, 1);
+    writeSave(path, { weapons: ['poker', 'balloon'], skills: ['bubble', 'teleport'] });
+    const c = new Cultivation(path, (message) => warns.push(message), seededRng(1), 24 * 3_600_000);
+    assert.deepEqual(warns, [], '不当坏档');
+    assert.ok(!readdirSync(dirname(path)).some((name) => name.includes('.bad-')), '没有改名成坏档');
+    assert.deepEqual(c.view().weapons, ['扑克牌', '雪球']);
+    assert.deepEqual(c.view().skills, ['泡泡护体']);
+    c.tick(at(0), false);
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as { weapons: string[]; skills: string[] };
+    assert.deepEqual(saved.weapons, ['poker', 'snowball'], '迁移结果写回了');
+    assert.deepEqual(saved.skills, ['bubble']);
+  });
+  withPath((path) => {
+    open(path, 1);
+    writeSave(path, { weapons: ['snowball', 'balloon', 'top'] });
+    const c = open(path, 1);
+    assert.deepEqual(c.view().weapons, ['雪球', '陀螺'], '已经有雪球：气球直接去掉，不重复');
+  });
+  // 迁移函数本身：没有可迁的就说没动过（不平白写一次档）
+  assert.equal(migrateCatalog({ weapons: ['poker'], skills: ['dove'] }).changed, false);
+  assert.equal(migrateCatalog({ weapons: ['balloon'], skills: [] }).changed, true);
 });
 
 test('a corrupted file is renamed and rebuilt with a warning', () => {

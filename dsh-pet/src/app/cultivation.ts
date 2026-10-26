@@ -176,6 +176,40 @@ const OFFER_MS = 10 * 60_000;
  * 睡眠 / 合盖后醒来的那一拍间隔会很长，不封顶就会把整段睡眠当成在场，一下攒满当天的 240
  */
 export const TICK_MAX_ELAPSED_MS = 30_000;
+/** 图鉴删掉 / 改名的法宝：旧编号 → 新编号（X8：气球删了，换成接替它的雪球） */
+const RENAMED_WEAPONS: Record<string, WeaponId> = { balloon: 'snowball' };
+
+/**
+ * 读档前先按现在的图鉴迁移（X8）：存档的 zod 校验认图鉴编号，删了的法宝留在档里会整档读不出来、被当成坏档重建。
+ * 改了名的换成新编号（已经有了就去掉），其余不认识的法宝 / 招式编号丢掉。`changed` = 动过（要写回）。
+ */
+export function migrateCatalog(raw: unknown): { save: unknown; changed: boolean } {
+  if (typeof raw !== 'object' || raw === null) return { save: raw, changed: false };
+  const save = raw as { weapons?: unknown; skills?: unknown };
+  let changed = false;
+  const known = new Set<string>(WEAPON_IDS);
+  if (Array.isArray(save.weapons)) {
+    const weapons: string[] = [];
+    for (const id of save.weapons) {
+      const next = typeof id === 'string' ? (RENAMED_WEAPONS[id] ?? id) : id;
+      if (typeof next !== 'string' || !known.has(next) || weapons.includes(next)) {
+        changed = true;
+        continue;
+      }
+      if (next !== id) changed = true;
+      weapons.push(next);
+    }
+    save.weapons = weapons;
+  }
+  const skills = new Set<string>(SKILL_IDS);
+  if (Array.isArray(save.skills)) {
+    const kept = save.skills.filter((id) => typeof id === 'string' && skills.has(id));
+    if (kept.length !== save.skills.length) changed = true;
+    save.skills = kept;
+  }
+  return { save, changed };
+}
+
 /** 掉法宝的品级权重（同 battle-testkit 的成长近似）：凡器 70%、灵器 25%、神器 5% */
 const GRADE_WEIGHT: Record<'凡器' | '灵器' | '神器', number> = { 凡器: 0.7, 灵器: 0.25, 神器: 0.05 };
 
@@ -314,7 +348,12 @@ export class Cultivation {
   private load(): CultivationSave | null {
     if (!existsSync(this.path)) return null;
     try {
-      return saveSchema.parse(JSON.parse(readFileSync(this.path, 'utf8')));
+      const raw: unknown = JSON.parse(readFileSync(this.path, 'utf8'));
+      const migrated = migrateCatalog(raw);
+      const saved = saveSchema.parse(migrated.save);
+      // 迁移过（图鉴删改）：标脏，下一拍写回
+      if (migrated.changed) this.dirty = true;
+      return saved;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       const bad = `${this.path}.bad-${Date.now()}`;

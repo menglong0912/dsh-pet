@@ -684,7 +684,7 @@ test('cards: a valid card parses; version mismatches and anything over the codex
   assert.equal(parseSparCard({ ...aCard, power: 8 }), null);
   assert.equal(parseSparCard({ ...aCard, hp: 0 }), null);
   assert.equal(parseSparCard({ ...aCard, weapons: [...WEAPON_IDS, 'water-gun'] as WeaponId[] }), null, '法宝超过 8 件');
-  assert.equal(parseSparCard({ ...aCard, weapons: ['slingshot'] }), null, '法宝编号不认识');
+  assert.equal(parseSparCard({ ...aCard, weapons: ['nunchaku'] }), null, '法宝编号不认识');
   assert.equal(parseSparCard({ ...aCard, skills: [...SKILL_IDS, 'dove'] }), null, '招式超过 10 个');
   assert.equal(parseSparCard({ ...aCard, stage: 99 }), null, '境界出格');
   assert.equal(parseSparCard({ ...aCard, stage: -1 }), null);
@@ -710,7 +710,7 @@ test('sparFight: both sides compute the same fight, the host is actor 0, and the
     power: 6,
     agility: 5,
     speed: 7,
-    weapons: ['poker', 'balloon'],
+    weapons: ['poker', 'snowball'],
     skills: ['bloom', 'sixth-sense'],
   };
   const guestNonce = 'a'.repeat(64);
@@ -785,7 +785,7 @@ test('a spar is refused with the right reason for each kind of wrong before the 
       assert.deepEqual(await ask({ commit: 'nope' }), { ok: false, reason: 'bad-request' });
       assert.deepEqual(await ask({ card: { ...aCard, v: BATTLE_VERSION + 1 } }), { ok: false, reason: 'version' });
       assert.deepEqual(await ask({ card: { ...aCard, hp: 999 } }), { ok: false, reason: 'bad-card' });
-      assert.deepEqual(await ask({ card: { ...aCard, weapons: ['slingshot'] } }), { ok: false, reason: 'bad-card' });
+      assert.deepEqual(await ask({ card: { ...aCard, weapons: ['nunchaku'] } }), { ok: false, reason: 'bad-card' });
       assert.equal(asked, 0, '不对的请求根本没到 handlers.spar');
       // 到了的：handlers 说什么回什么；客人走了以后如实带 sent-home 回去
       assert.deepEqual(await ask({}), { ok: false, reason: 'off' });
@@ -828,7 +828,7 @@ test("the guest also checks the host's reply card, nonce and reasons like everyt
     ok: false,
     reason: 'bad-card',
   });
-  assert.deepEqual(await replyWith({ ok: true, card: { ...aCard, v: 2 }, nonce: 'b'.repeat(64) }), {
+  assert.deepEqual(await replyWith({ ok: true, card: { ...aCard, v: BATTLE_VERSION + 1 }, nonce: 'b'.repeat(64) }), {
     ok: false,
     reason: 'bad-card',
   });

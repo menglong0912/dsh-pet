@@ -1788,7 +1788,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     // 心魔要播的动画先取到窗口里（X7：换源不等网络，出手才和飞行物对得上）
     guest.preload(SHOW_ANIMS);
     // 特效层（X7）：飞行物从出手方手里飞到对方身上，命中那一刻对方才开始反应
-    // 心魔放出来的飞行物和命中特效也用它的暗紫配色（手里那只暗气球出手时才不突然变鲜红）
+    // 心魔放出来的飞行物和命中特效也用它的暗紫配色（手里那件暗色道具出手时颜色才接得上，不突然变鲜艳）
     const fx = openShowFx(
       () => trialWindows?.guest.bounds() ?? null,
       () => guest.side === 'left',

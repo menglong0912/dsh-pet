@@ -11,10 +11,13 @@ const HIT_LINES: Record<string, string[]> = {
   'water-gun': ['{a}掏出水枪滋过去，-{d}', '{a}端起水枪一顿猛滋，-{d}', '{a}的水枪正中{b}，-{d}'],
   poker: ['{a}甩出两张扑克牌，-{d}', '{a}指尖弹飞扑克牌，-{d}', '{a}的王牌划过空气，-{d}'],
   shuttlecock: ['{a}一个飞脚踢出毽子，-{d}', '{a}把毽子踢得虎虎生风，-{d}', '{a}的毽子直取面门，-{d}'],
-  balloon: ['{a}把气球砸向{b}，砰！-{d}', '{a}放飞气球正好爆在头上，-{d}'],
+  snowball: ['{a}团了个雪球砸过去，-{d}', '{a}的雪球啪地糊在{b}身上，-{d}'],
+  duster: ['{a}挥起鸡毛掸子一通掸，-{d}', '{a}的掸子扫过{b}的鼻尖，-{d}'],
   juggle: ['{a}抛出三个彩球，-{d}', '{a}三球连发砸向{b}，-{d}'],
   top: ['{a}放出陀螺嗡嗡转着撞过去，-{d}', '{a}的陀螺咬住{b}不放，-{d}'],
   'whale-tail': ['{a}掀起一条鲸尾拍下去，-{d}', '{a}借鲸尾之力横扫，-{d}'],
+  tray: ['{a}甩出银托盘，当！-{d}', '{a}的托盘旋着飞过去，-{d}'],
+  slingshot: ['{a}拉开弹弓弹出星星糖，-{d}', '{a}一弹弓正中{b}，-{d}'],
   firework: ['{a}点燃烟花轰向{b}，-{d}', '{a}的烟花在{b}脚边炸开，-{d}'],
   unarmed: ['{a}抡起小拳头捶过去，-{d}', '{a}握着小拳头冲上去乱捶，-{d}', '{a}鼓起腮帮子挥拳，-{d}'],
 };
@@ -26,6 +29,10 @@ const KIND_LINES: Record<string, string[]> = {
   counter: ['{a}顺手反打一记，-{d}', '{a}后发先至回敬一拳，-{d}'],
   beast: ['{a}的灵兽窜上去咬了一口，-{d}', '{a}的灵兽扑出偷袭，-{d}'],
   skip: ['{a}被定在原地，动弹不得', '{a}愣在原地错过了出手'],
+  skipFreeze: ['{a}冻成了冰棍，动弹不得', '{a}浑身挂着冰，错过了出手'],
+  skipSleep: ['{a}站着睡着了，错过了出手', '{a}还在打呼，没想起来出手'],
+  miss: ['{a}眼前一团黑，打歪了', '{a}抹着脸上的墨乱挥，落了空'],
+  decoy: ['{a}的水母分身替它挨了这下', '打中的是{a}的水母分身，本体没事'],
   'play-dead': ['{a}两眼一翻装死过去，硬是留了口气', '{a}直挺挺倒下，又幽幽爬起来'],
   strike: ['一道天雷劈下，-{d}', '雷光轰在{a}头顶，-{d}', '劫雷炸响，-{d}'],
 };
@@ -34,6 +41,15 @@ const SKILL_LINES: Record<string, string[]> = {
   bloom: ['{a}凭空变出一朵花，闻着精神一振，气血 +{h}', '{a}拈花一笑，气血 +{h}'],
   'lion-roar': ['{a}鼓足力气一声狮子吼，-{d}，{b}被震得动不了', '{a}吼得地动山摇，-{d}，{b}愣在原地'],
   'blue-whale': ['{a}身后浮现蓝鲸虚影砸落，-{d}', '{a}唤出蓝鲸现世，-{d}'],
+  'whale-song': ['{a}唱起鲸歌，{b}听着听着睡着了', '{a}哼了段摇篮曲，{b}眼皮直打架'],
+  ink: ['{a}噗地喷出一团墨汁，糊了{b}一脸', '{a}一口墨汁喷过去，{b}眼前一黑'],
+  'whale-gulp': ['{a}一口鲸吞，-{d}，气血 +{h}', '{a}张嘴猛吸，{b}的灵气 -{d}，自己 +{h}'],
+};
+
+/** 鸡毛掸子让对方迟缓、弹弓打两颗时的专属句（代替那件法宝的普通句） */
+const FLAG_LINES: Record<string, string[]> = {
+  slowed: ['{a}的掸子挠得{b}笑岔气，-{d}', '{b}被{a}掸得直乐，慢了一拍，-{d}'],
+  twin: ['{a}的弹弓一发两颗，-{d}', '{a}连弹两颗星星糖，-{d}'],
 };
 
 const END_LINES = ['{a}赢了！', '{a}站到了最后！', '{b}躺平了，{a}获胜'];
@@ -66,8 +82,14 @@ export function lineOf(
     case 'start':
     case 'decide':
       return null;
-    case 'hit':
-      return decorate(fill(pick(HIT_LINES[event.weapon ?? 'unarmed']), a, b, event.damage));
+    case 'hit': {
+      const lines = event.slowed
+        ? FLAG_LINES.slowed
+        : event.twin
+          ? FLAG_LINES.twin
+          : HIT_LINES[event.weapon ?? 'unarmed'];
+      return decorate(fill(pick(lines), a, b, event.damage));
+    }
     case 'combo':
       return decorate(fill(pick(KIND_LINES.combo), a, b, event.damage));
     case 'dodge': {
@@ -80,7 +102,20 @@ export function lineOf(
     case 'beast':
       return decorate(fill(pick(KIND_LINES.beast), a, b, event.damage));
     case 'skip':
-      return fill(pick(KIND_LINES.skip), a);
+      return fill(
+        pick(
+          event.cause === 'freeze'
+            ? KIND_LINES.skipFreeze
+            : event.cause === 'sleep'
+              ? KIND_LINES.skipSleep
+              : KIND_LINES.skip,
+        ),
+        a,
+      );
+    case 'miss':
+      return fill(pick(KIND_LINES.miss), a);
+    case 'decoy':
+      return fill(pick(KIND_LINES.decoy), a);
     case 'play-dead':
       return fill(pick(KIND_LINES['play-dead']), a);
     case 'skill':

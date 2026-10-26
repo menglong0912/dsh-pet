@@ -15,6 +15,7 @@ import {
   type Controller,
   type BattleView,
   type BattleEvent,
+  type Action,
 } from './battle.ts';
 import { fighterAt, seededRng } from './battle-testkit.ts';
 
@@ -132,7 +133,7 @@ test('出招者交代不合法的动作时按空手处理：不会递归、不�
 });
 
 test('主动招式都会被用出来，事件里带招式编号', () => {
-  const actives: SkillId[] = ['bloom', 'lion-roar', 'blue-whale'];
+  const actives: SkillId[] = ['bloom', 'lion-roar', 'blue-whale', 'whale-song', 'ink', 'whale-gulp'];
   for (const skill of actives) {
     const events = findFight(
       (rng) => {
@@ -391,4 +392,198 @@ test('平衡：渡劫不吃丹约 65%、吃丹约 80%——七个渡劫分界全
     assert.ok(noPill >= 0.55 && noPill <= 0.75, `stage ${stage} 不吃丹实际 ${noPill}`);
     assert.ok(pill >= 0.75 && pill <= 0.92, `stage ${stage} 吃丹实际 ${pill}`);
   }
+});
+
+/** 永远出同一招（招式用过以后引擎按空手处理） */
+const always = (action: Action): Controller => ({ decide: () => action });
+
+/** 一场里，从某个下标往后找下一个 `actor` 的出手（decide 或 skip） */
+function nextTurn(events: BattleEvent[], from: number, actor: 0 | 1): BattleEvent | undefined {
+  return events.slice(from + 1).find((e) => e.actor === actor && (e.kind === 'decide' || e.kind === 'skip'));
+}
+
+test('X8 定身的原因：雪球冻住（freeze），陀螺晕了（stun）', () => {
+  for (const [weapon, cause] of [
+    ['snowball', 'freeze'],
+    ['top', 'stun'],
+  ] as const) {
+    let seen = false;
+    for (let i = 0; i < 200 && !seen; i++) {
+      const a = { ...fighterAt(8, seededRng(i)), weapons: [weapon] };
+      const events = fight(named(a, '甲'), named(fighterAt(8, seededRng(i + 50)), '乙'), `cause-${weapon}-${i}`, [
+        always({ kind: 'weapon', weapon }),
+        unarmedOnly(),
+      ]);
+      const skips = events.filter((e) => e.kind === 'skip');
+      for (const e of skips) assert.equal(e.kind === 'skip' && e.cause, cause, `${weapon} 的定身原因`);
+      seen = skips.length > 0;
+    }
+    assert.ok(seen, `${weapon} 应该定住过对方`);
+  }
+});
+
+test('X8 鸡毛掸子：打中就带 slowed，对方下次出手被推后（同一对属性，比空手时晚）', () => {
+  const a = { ...fighterAt(8, seededRng(3)), weapons: ['duster' as const] };
+  const b = fighterAt(8, seededRng(4));
+  const events = fight(named(a, '甲'), named(b, '乙'), 'duster-1', [
+    always({ kind: 'weapon', weapon: 'duster' }),
+    unarmedOnly(),
+  ]);
+  const hits = events.filter((e) => e.kind === 'hit' && e.weapon === 'duster');
+  assert.ok(hits.length > 0);
+  for (const e of hits) if (e.kind === 'hit' && e.hp[1] > 0) assert.equal(e.slowed, true, '没打倒就迟缓');
+  // 掸子方出手次数比空手对照多（对方被推后，轮到自己的次数变多）
+  const turns = (ev: BattleEvent[]) => ev.filter((e) => e.kind === 'decide' && e.actor === 0).length;
+  let slowAhead = 0;
+  for (let i = 0; i < 60; i++) {
+    const x = { ...fighterAt(8, seededRng(i)), weapons: ['duster' as const], power: 0 };
+    const y = { ...fighterAt(8, seededRng(i + 70)), hp: 9_999 };
+    const withDuster = fight(x, y, `slow-${i}`, [always({ kind: 'weapon', weapon: 'duster' }), unarmedOnly()]);
+    const control = fight(x, y, `slow-${i}`, [unarmedOnly(), unarmedOnly()]);
+    const share = (ev: BattleEvent[]) => turns(ev) / ev.filter((e) => e.kind === 'decide').length;
+    if (share(withDuster) > share(control)) slowAhead++;
+  }
+  assert.ok(slowAhead >= 40, `大多数场次里掸子方的出手占比更高：${slowAhead}/60`);
+});
+
+test('X8 银托盘：两段，第二段（飞回来那一下）从不被闪避', () => {
+  let checked = 0;
+  for (let i = 0; i < 300; i++) {
+    const a = { ...fighterAt(8, seededRng(i)), weapons: ['tray' as const] };
+    const b = { ...fighterAt(8, seededRng(i + 9)), agility: 30, skills: ['dove' as const] };
+    const events = fight(named(a, '甲'), named(b, '乙'), `tray-${i}`, [
+      always({ kind: 'weapon', weapon: 'tray' }),
+      unarmedOnly(),
+    ]);
+    events.forEach((e, k) => {
+      if (e.kind !== 'decide' || e.actor !== 0) return;
+      const segments = events.slice(k + 1).filter((x, j, all) => {
+        const stop = all.findIndex(
+          (y) => y.kind === 'decide' || y.kind === 'end' || y.kind === 'combo' || y.kind === 'skip',
+        );
+        return (
+          (stop < 0 || j < stop) && (x.kind === 'hit' || x.kind === 'dodge' || x.kind === 'miss' || x.kind === 'decoy')
+        );
+      });
+      if (segments.length === 2) {
+        checked++;
+        assert.notEqual(segments[1].kind, 'dodge', '第二段必中');
+      }
+    });
+  }
+  assert.ok(checked > 50, `该核到足够多的两段：${checked}`);
+});
+
+test('X8 弹弓：远程（不被反击），15% 一发两颗（twin）', () => {
+  let twins = 0;
+  let hits = 0;
+  for (let i = 0; i < 200; i++) {
+    const a = { ...fighterAt(8, seededRng(i)), weapons: ['slingshot' as const] };
+    const b = { ...fighterAt(8, seededRng(i + 5)), skills: ['sixth-sense' as const] };
+    const events = fight(named(a, '甲'), named(b, '乙'), `sling-${i}`, [
+      always({ kind: 'weapon', weapon: 'slingshot' }),
+      unarmedOnly(),
+    ]);
+    for (const e of events) {
+      if (e.kind === 'hit' && e.weapon === 'slingshot') {
+        hits++;
+        if (e.twin) twins++;
+      }
+      assert.notEqual(e.kind === 'counter' && e.actor === 1, true, '弹弓不会被第六感反击');
+    }
+  }
+  assert.ok(twins / hits > 0.08 && twins / hits < 0.23, `两颗的比例 ${twins}/${hits}`);
+});
+
+test('X8 鲸歌：对方下一次出手跳过（sleep），睡着期间挨的攻击不判闪避', () => {
+  let seen = 0;
+  for (let i = 0; i < 100; i++) {
+    const a = { ...fighterAt(8, seededRng(i)), skills: ['whale-song' as const], weapons: [] };
+    const b = { ...fighterAt(8, seededRng(i + 3)), agility: 30, skills: ['dove' as const] };
+    const events = fight(named(a, '甲'), named(b, '乙'), `song-${i}`, [
+      always({ kind: 'skill', skill: 'whale-song' }),
+      unarmedOnly(),
+    ]);
+    const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'whale-song');
+    if (k < 0) continue;
+    seen++;
+    const turn = nextTurn(events, k, 1);
+    if (turn) assert.deepEqual([turn.kind, turn.kind === 'skip' && turn.cause], ['skip', 'sleep']);
+    const wake = events.findIndex((e, j) => j > k && e.kind === 'skip' && e.actor === 1);
+    const between = events.slice(k + 1, wake < 0 ? undefined : wake);
+    assert.equal(between.filter((e) => e.kind === 'dodge' && e.actor === 1).length, 0, '睡着时躲不开');
+  }
+  assert.ok(seen > 50);
+});
+
+test('X8 墨汁：对方接下来两次出手里会打空（miss），之后不再打空', () => {
+  let misses = 0;
+  for (let i = 0; i < 100; i++) {
+    const a = { ...fighterAt(8, seededRng(i)), skills: ['ink' as const], hp: 9_999 };
+    const b = { ...fighterAt(8, seededRng(i + 3)), weapons: ['juggle' as const] };
+    const events = fight(named(a, '甲'), named(b, '乙'), `ink-${i}`, [
+      always({ kind: 'skill', skill: 'ink' }),
+      always({ kind: 'weapon', weapon: 'juggle' }),
+    ]);
+    const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'ink');
+    if (k < 0) continue;
+    let turns = 0;
+    for (let j = k + 1; j < events.length; j++) {
+      const e = events[j];
+      if ((e.kind === 'decide' || e.kind === 'skip') && e.actor === 1) turns++;
+      if (e.kind === 'miss') {
+        assert.equal(e.actor, 1, '打空的是被糊眼的那一方');
+        assert.ok(turns >= 1 && turns <= 2, `只在糊眼后的两次出手里：第 ${turns} 次`);
+        misses++;
+      }
+    }
+    assert.equal(events.slice(0, k).filter((e) => e.kind === 'miss').length, 0, '糊眼之前不会打空');
+  }
+  assert.ok(misses > 30, `三球三下、两次出手，该打空不少：${misses}`);
+});
+
+test('X8 鲸吞：一场一次，回复实际伤害的一半（向下取整，不超上限）', () => {
+  let seen = 0;
+  for (let i = 0; i < 100; i++) {
+    const a = { ...fighterAt(8, seededRng(i)), skills: ['whale-gulp' as const] };
+    const b = fighterAt(8, seededRng(i + 3));
+    const events = fight(named(a, '甲'), named(b, '乙'), `gulp-${i}`, [
+      always({ kind: 'skill', skill: 'whale-gulp' }),
+      unarmedOnly(),
+    ]);
+    const gulps = events.filter((e) => e.kind === 'skill' && e.skill === 'whale-gulp');
+    assert.ok(gulps.length <= 1, '一场一次');
+    for (const e of gulps) {
+      if (e.kind !== 'skill') continue;
+      seen++;
+      assert.ok((e.heal ?? 0) <= Math.floor((e.damage ?? 0) / 2));
+      assert.ok(e.hp[0] <= a.hp, '不超上限');
+    }
+  }
+  assert.ok(seen > 50);
+});
+
+test('X8 水母分身：一成的攻击打在分身上（decoy），那一下不掉血、不触发反击', () => {
+  let decoys = 0;
+  let attacks = 0;
+  for (let i = 0; i < 200; i++) {
+    const a = fighterAt(8, seededRng(i));
+    const b = {
+      ...fighterAt(8, seededRng(i + 3)),
+      skills: ['jelly-clone' as const, 'sixth-sense' as const],
+      agility: 0,
+    };
+    const events = fight(named(a, '甲'), named(b, '乙'), `jelly-${i}`, [unarmedOnly(), unarmedOnly()]);
+    events.forEach((e, k) => {
+      if (e.kind === 'hit' && e.actor === 0) attacks++;
+      if (e.kind !== 'decoy') return;
+      decoys++;
+      attacks++;
+      assert.equal(e.actor, 1, '分身是挨打那一方的');
+      assert.deepEqual(e.hp, events[k - 1].hp, '那一下不掉血');
+      const next = events[k + 1];
+      assert.ok(!next || next.kind !== 'counter', '分身挡下的不触发反击');
+    });
+  }
+  assert.ok(decoys / attacks > 0.05 && decoys / attacks < 0.15, `分身比例 ${decoys}/${attacks}`);
 });

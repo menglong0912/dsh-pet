@@ -67,6 +67,11 @@ const BOLT_MS = 120;
  */
 export const LINE_MS = SLOT_MS;
 
+/** 弹弓一发打两颗时，第二颗晚这么久飞出 */
+const TWIN_GAP_MS = 70;
+/** 睡着 / 冻住跳过那一拍再演一遍的素材（和鲸歌、雪球的受击同一段） */
+const SLEEP_ANIM = '受击-犯困';
+const FREEZE_ANIM = '受击-冻僵';
 /** 挨打（正面挨一下：拳、牌、拳影、掌劈、灵兽一撞）与挡下的反应素材 */
 const HIT_ANIM = '受击-正面';
 const BUBBLE_ANIM = '招式-泡泡护体';
@@ -102,9 +107,12 @@ const REACTION_WINDUP_MS: Record<string, number> = {
   '受击-正面': 250,
   '受击-湿身': 83,
   '受击-炸黑': 83,
-  '受击-惊吓': 83,
+  '受击-冻僵': 83,
+  '受击-挠痒': 167,
+  '受击-犯困': 125,
+  '受击-墨汁': 125,
   '受击-震耳': 250,
-  '受击-绊脚': 125,
+  '受击-绊脚': 292,
   '受击-砸头': 292,
   '修炼-触电': 83,
   '招式-假死遁': 167,
@@ -113,8 +121,8 @@ const REACTION_WINDUP_MS: Record<string, number> = {
   '招式-泡泡护体': 1_400,
 };
 
-/** 飞行轨迹（§X7）：直飞 / 抛物线 / 贴地 / 慢飘 / 高抛砸落 / 天雷（乌云 + 闪电，渡劫用） */
-export type FxTrack = 'line' | 'arc' | 'ground' | 'float' | 'slam' | 'bolt';
+/** 飞行轨迹（§X7）：直飞 / 抛物线 / 贴地 / 慢飘 / 高抛砸落 / 天雷（乌云 + 闪电，渡劫用）/ 回旋（银托盘，X8） */
+export type FxTrack = 'line' | 'arc' | 'ground' | 'float' | 'slam' | 'bolt' | 'boomerang';
 
 /**
  * 特效贴图名（`assets/pic/fx/<名>.png`）：§X7 的素材清单。
@@ -125,7 +133,6 @@ export type FxAssetName =
   | '毽子'
   | '扑克牌'
   | '水弹'
-  | '气球'
   | '彩球'
   | '陀螺'
   | '水浪'
@@ -138,11 +145,19 @@ export type FxAssetName =
   | '手刀'
   | '闪电'
   | '乌云'
+  // X8
+  | '雪球'
+  | '羽毛'
+  | '托盘'
+  | '星星糖'
+  | '音符'
+  | '墨汁'
+  | '水母'
+  | '灵光'
   // 命中
   | '命中-星'
   | '命中-水花'
   | '命中-烟花'
-  | '命中-气球爆'
   | '命中-纸牌'
   | '命中-羽毛'
   | '命中-彩星'
@@ -151,7 +166,9 @@ export type FxAssetName =
   | '命中-巨浪'
   | '命中-泡泡'
   | '命中-斩'
-  | '命中-电光';
+  | '命中-电光'
+  | '命中-雪花'
+  | '命中-墨汁';
 
 /** 各轨迹的飞行时间（`bolt` = 乌云淡入 + 闪电劈下） */
 const FLIGHT_MS: Record<FxTrack, number> = {
@@ -161,7 +178,14 @@ const FLIGHT_MS: Record<FxTrack, number> = {
   float: 900,
   slam: 700,
   bolt: CLOUD_MS + BOLT_MS,
+  // 回旋：擦过正面的那一刻；绕到背后再磕一下、飞回手里见 BOOMERANG_*_MS
+  boomerang: 340,
 };
+
+/** 银托盘：放出后多久绕到背后磕第二下（第二段的命中时刻） */
+const BOOMERANG_SECOND_MS = 720;
+/** 银托盘：放出后多久飞回手里——兜底值，素材量过接住时刻（RELEASE 的 catchMs）就按它算 */
+const BOOMERANG_TOTAL_MS = 1_150;
 
 /** 一发飞行物与它打中以后的样子（§X7 第三步那张表里「飞行物 / 轨迹 / 命中 / 受击」那几列） */
 export interface Fly {
@@ -181,6 +205,8 @@ export interface Fly {
   gapMs?: number;
   /** 多段法宝逐段的色相步进（三球的三个球 0 / 120 / 240） */
   hueStep?: number;
+  /** 反向（鲸吞，X8）：从对方身上吸出来、飞回出手方嘴边；对方在被吸的那一刻（放出时）就起反应 */
+  reverse?: boolean;
 }
 
 /** 出手 → 动作 + 飞行物（§X7 第三步那张表；演出口径归演出，图鉴里不再存素材名） */
@@ -203,7 +229,13 @@ export const ATTACK_SHOW: Record<string, AttackShow> = {
   },
   poker: { action: '出手-扑克牌', fly: { kind: '扑克牌', track: 'line', hitFx: '命中-纸牌', gapMs: 150 } },
   shuttlecock: { action: '战斗-踢', fly: { kind: '毽子', track: 'arc', hitFx: '命中-羽毛', react: '受击-砸头' } },
-  balloon: { action: '出手-气球', fly: { kind: '气球', track: 'float', hitFx: '命中-气球爆', react: '受击-惊吓' } },
+  snowball: { action: '出手-雪球', fly: { kind: '雪球', track: 'arc', hitFx: '命中-雪花', react: '受击-冻僵' } },
+  duster: {
+    action: '出手-鸡毛掸子',
+    fly: { kind: '羽毛', track: 'line', hitFx: '命中-羽毛', react: '受击-挠痒', count: 4, gapMs: 70 },
+  },
+  tray: { action: '出手-托盘', fly: { kind: '托盘', track: 'boomerang', hitFx: '命中-星' } },
+  slingshot: { action: '出手-弹弓', fly: { kind: '星星糖', track: 'line', hitFx: '命中-星' } },
   juggle: {
     action: '出手-三球',
     fly: { kind: '彩球', track: 'arc', hitFx: '命中-彩星', react: '受击-砸头', hueStep: 120, gapMs: 160 },
@@ -218,6 +250,15 @@ export const ATTACK_SHOW: Record<string, AttackShow> = {
   'blue-whale': {
     action: '出手-召唤蓝鲸',
     fly: { kind: '蓝鲸', track: 'slam', hitFx: '命中-巨浪', react: '受击-湿身' },
+  },
+  'whale-song': {
+    action: '出手-鲸歌',
+    fly: { kind: '音符', track: 'float', hitFx: '命中-泡泡', react: '受击-犯困', count: 3, gapMs: 260 },
+  },
+  ink: { action: '出手-墨汁', fly: { kind: '墨汁', track: 'line', hitFx: '命中-墨汁', react: '受击-墨汁' } },
+  'whale-gulp': {
+    action: '出手-鲸吞',
+    fly: { kind: '灵光', track: 'line', hitFx: '灵光', count: 6, gapMs: 110, reverse: true },
   },
   // 回血：作用在自己身上，照旧播整段素材，没有飞行物
   bloom: { action: '招式-凭空生花' },
@@ -263,17 +304,28 @@ export const SHOW_ANIMS: string[] = Array.from(
  * 量法：逐帧找人物最靠左的不透明点，手臂（脚、尾巴、枪口、筒口）伸到最远、或道具刚离手的那一帧算出手。
  * 素材重做后按同法重量，改这张表即可。
  */
-export const RELEASE: Record<string, { ms: number; hand: [number, number] }> = {
+export const RELEASE: Record<string, { ms: number; hand: [number, number]; catchMs?: number }> = {
   '战斗-直拳': { ms: 1_660, hand: [180, 222] },
   '出手-水枪': { ms: 1_450, hand: [184, 212] },
   '出手-扑克牌': { ms: 1_500, hand: [196, 170] },
   '战斗-踢': { ms: 1_460, hand: [232, 284] },
-  '出手-气球': { ms: 2_600, hand: [152, 263] },
+  // 雪球在素材里举过头顶才离手：出手点就是它离手那一帧的位置（之后的雪球从素材里擦掉了）
+  '出手-雪球': { ms: 1_970, hand: [105, 95] },
+  // 掸子挥到最远那一刻，羽毛从掸子头飞出去
+  '出手-鸡毛掸子': { ms: 1_830, hand: [60, 220] },
+  // catchMs：素材里伸手接住飞回来的托盘那一刻（回旋飞回手里对准它，见 boomerangTotalMs）
+  '出手-托盘': { ms: 1_400, hand: [180, 210], catchMs: 2_950 },
+  '出手-弹弓': { ms: 1_575, hand: [180, 188] },
+  // 正面唱歌：音符从嘴边飘出去
+  '出手-鲸歌': { ms: 1_200, hand: [300, 205] },
+  '出手-墨汁': { ms: 1_750, hand: [222, 160] },
+  // 鲸吞：灵光飞回嘴边（这是终点，不是起点）
+  '出手-鲸吞': { ms: 1_000, hand: [258, 200] },
   '出手-三球': { ms: 2_050, hand: [202, 184] },
   '出手-陀螺': { ms: 1_250, hand: [185, 280] },
   '出手-鲸尾': { ms: 2_450, hand: [50, 300] },
   '出手-烟花': { ms: 1_750, hand: [152, 112] },
-  '战斗-吼': { ms: 750, hand: [195, 195] },
+  '战斗-吼': { ms: 1_150, hand: [205, 212] },
   '出手-召唤蓝鲸': { ms: 1_960, hand: [192, 194] },
   '出手-召唤灵兽': { ms: 1_250, hand: [160, 185] },
   '战斗-连拳': { ms: 1_000, hand: [204, 232] },
@@ -285,10 +337,26 @@ export function animLength(anim: string, rate: number): number {
   return Math.round((ANIM_MS[anim] ?? DEFAULT_ANIM_MS) / rate);
 }
 
+/**
+ * 个别出手素材不压进 `SLOT_MS`、播得舒展一点：银托盘要等回旋飞一圈回到手里，2.4 秒压得太赶（回程只剩 0.2 秒）
+ */
+const ACTION_WINDOW_MS: Record<string, number> = { '出手-托盘': 3_000 };
+
+/** 出手素材的倍速（多数压进 `SLOT_MS`，个别见 `ACTION_WINDOW_MS`） */
+export function actionRate(action: string): number {
+  return rateFor(action, ACTION_WINDOW_MS[action] ?? SLOT_MS);
+}
+
 /** 离手比动作起播晚多久：原速的出手时刻 ÷ 倍速（倍速把素材压进格子，离手的真实时刻也跟着压缩） */
 export function releaseOffset(action: string): number {
   const entry = RELEASE[action];
-  return entry ? Math.round(entry.ms / rateFor(action, SLOT_MS)) : 0;
+  return entry ? Math.round(entry.ms / actionRate(action)) : 0;
+}
+
+/** 银托盘放出后多久飞回手里：素材里接住的那一刻 − 离手那一刻（都按倍速换算） */
+function boomerangTotalMs(action: string): number {
+  const entry = RELEASE[action];
+  return entry?.catchMs ? Math.round((entry.catchMs - entry.ms) / actionRate(action)) : BOOMERANG_TOTAL_MS;
 }
 
 /**
@@ -335,6 +403,14 @@ export interface Shot {
   blocked?: boolean;
   /** 从天上来（渡劫的雷）：目标就是这一步的 `who` 自己，起点在它头顶上方 */
   sky?: boolean;
+  /** 被墨汁糊了眼打歪（X8 `miss` 事件）：远远地从对方头顶飞过去，不画命中特效、对方不反应 */
+  wild?: boolean;
+  /** 打在水母分身上（X8 `decoy` 事件）：对方原地留一只水母替身挨这一下，碎成泡泡 */
+  decoy?: boolean;
+  /** 反向（鲸吞）：从对方身上飞回出手方嘴边 */
+  reverse?: boolean;
+  /** 银托盘的回旋（X8）：第二段绕到背后磕的时刻、飞回手里的时刻，以及第二段的结果 */
+  boomerang?: { secondMs: number; totalMs: number; second: 'hit' | 'blocked' | 'decoy' | 'miss' | 'none' };
 }
 
 /**
@@ -440,6 +516,8 @@ interface Slot {
   gap: number;
   /** 这一格最后还有一下灵兽没出（引擎：带灵兽的一方前 3 次法宝 / 空手出手之后追加一击，对方还站着就一定出） */
   beast: boolean;
+  /** 银托盘：第一段放出的时刻（第二段的命中按它算） */
+  boomerangLaunch?: number;
 }
 
 /**
@@ -548,23 +626,72 @@ export function timeline(
     action: string | null,
     fly: Fly,
     hp: [number, number],
-    extra: { count?: number; hue?: number; miss?: boolean; blocked?: boolean; sky?: boolean } = {},
+    extra: {
+      count?: number;
+      gapMs?: number;
+      hue?: number;
+      miss?: boolean;
+      blocked?: boolean;
+      sky?: boolean;
+      wild?: boolean;
+      decoy?: boolean;
+      boomerang?: Shot['boomerang'];
+    } = {},
   ): number => {
     const shot: Shot = {
       kind: fly.kind,
       track: fly.track,
       flightMs: FLIGHT_MS[fly.track],
       count: extra.count ?? fly.count ?? 1,
-      gapMs: fly.gapMs ?? 0,
+      gapMs: extra.gapMs ?? fly.gapMs ?? 0,
       hitFx: fly.hitFx,
       hand: [...((action && RELEASE[action]?.hand) || [0, 0])] as [number, number],
       ...(extra.hue === undefined ? {} : { hue: extra.hue }),
       ...(extra.miss ? { miss: true } : {}),
       ...(extra.blocked ? { blocked: true } : {}),
       ...(extra.sky ? { sky: true } : {}),
+      ...(extra.wild ? { wild: true } : {}),
+      ...(extra.decoy ? { decoy: true } : {}),
+      ...(fly.reverse ? { reverse: true } : {}),
+      ...(extra.boomerang ? { boomerang: extra.boomerang } : {}),
     };
     steps.push({ at, who, shot, hp });
-    return at + shot.flightMs;
+    // 命中按第一发到达算（水枪三发、声波三道）；反向的鲸吞按最后一颗灵光飞回嘴边算（那一刻回血）
+    return at + shot.flightMs + (fly.reverse ? (shot.count - 1) * shot.gapMs : 0);
+  };
+
+  /**
+   * 放这一格里下一段的飞行物，返回放出 / 命中时刻与这一段要不要让对方起反应。
+   * 银托盘（回旋）只在第一段放一发，带上第二段的结果（往后找）；第二段不另放，命中 = 放出 + BOOMERANG_SECOND_MS
+   */
+  const launchSegment = (
+    current: Slot,
+    index: number,
+    hp: [number, number],
+    flags: { miss?: boolean; blocked?: boolean; wild?: boolean; decoy?: boolean; twin?: boolean },
+  ): { launch: number; impact: number; reacts: boolean } => {
+    const segment = takeSegment(current);
+    const k = current.segments - 1;
+    const { twin, ...rest } = flags;
+    if (current.fly.track === 'boomerang' && k < current.hits) {
+      if (k === 0) {
+        current.boomerangLaunch = segment.at;
+        const second = secondOf(events, index);
+        const totalMs = Math.max(BOOMERANG_SECOND_MS + 200, boomerangTotalMs(current.show.action));
+        const boomerang = { secondMs: BOOMERANG_SECOND_MS, totalMs, second };
+        const impact = pushShot(segment.at, current.who, current.show.action, current.fly, hp, { ...rest, boomerang });
+        return { launch: segment.at, impact, reacts: segment.reacts };
+      }
+      const launch = current.boomerangLaunch ?? segment.at;
+      return { launch, impact: launch + BOOMERANG_SECOND_MS, reacts: segment.reacts };
+    }
+    const impact = pushShot(segment.at, current.who, current.show.action, current.fly, hp, {
+      ...segment.extra,
+      ...rest,
+      // 弹弓一发打两颗：两颗星星糖几乎一起飞出去
+      ...(twin ? { count: 2, gapMs: TWIN_GAP_MS } : {}),
+    });
+    return { launch: segment.at, impact, reacts: segment.reacts };
   };
 
   /**
@@ -599,7 +726,7 @@ export function timeline(
     if (event.kind === 'decide') {
       closeSlot();
       const show = ATTACK_SHOW[showKeyOf(event.action)];
-      pushAnim({ at: cursor, who: event.actor, anim: show.action, rate: rateFor(show.action, SLOT_MS), hp: event.hp });
+      pushAnim({ at: cursor, who: event.actor, anim: show.action, rate: actionRate(show.action), hp: event.hp });
       if (show.fly) {
         slot = {
           who: event.actor,
@@ -720,11 +847,6 @@ export function timeline(
       }
       // 灵兽那一下被躲开（引擎只记一条 dodge）：它是这一格的最后一件事。灵兽照样召出来冲过去，只是扑了个空
       const beast = current.beast && current.who !== event.actor && lastOfSlot(events, i);
-      let launch: number;
-      let fly = current.fly;
-      let action: string = current.show.action;
-      let extra: { count?: number; hue?: number } = {};
-      let reacts = true;
       const append = ATTACK_SHOW['spirit-beast'];
       if (beast && append.fly) {
         current.beast = false;
@@ -737,18 +859,14 @@ export function timeline(
           rate: rateFor(append.action, SLOT_MS),
           hp: hpBefore,
         });
-        launch = moment + releaseOffset(append.action);
-        fly = append.fly;
-        action = append.action;
-      } else {
-        const segment = takeSegment(current);
-        launch = segment.at;
-        extra = segment.extra;
-        reacts = segment.reacts;
+        const launch = moment + releaseOffset(append.action);
+        const impact = pushShot(launch, current.who, append.action, append.fly, hpBefore, { miss: true });
+        pushReaction(impact, event.actor, anim, event.hp, line);
+        continue;
       }
-      const impact = pushShot(launch, current.who, action, fly, hpBefore, { ...extra, miss: true });
-      if (reacts) pushReaction(impact, event.actor, anim, event.hp, line);
-      else if (line !== undefined) steps.push({ at: impact, who: event.actor, line, hp: event.hp });
+      const segment = launchSegment(current, i, hpBefore, { miss: true });
+      if (segment.reacts) pushReaction(segment.impact, event.actor, anim, event.hp, line);
+      else if (line !== undefined) steps.push({ at: segment.impact, who: event.actor, line, hp: event.hp });
       continue;
     }
 
@@ -770,10 +888,46 @@ export function timeline(
       continue;
     }
 
-    if (isDamageOnFoe(event)) {
+    if (event.kind === 'miss' || event.kind === 'decoy') {
+      // 致盲打空（actor = 攻击方）/ 水母分身替挨（actor = 挨打方）：照样占这一格的一段、放一发——
+      // 打空的远远飞过去、对方不反应；分身那一下水母碎掉，本体侧身躲开（闪避对准命中）
+      const attacker = event.kind === 'miss' ? event.actor : ((event.actor ^ 1) as 0 | 1);
+      const current = slot;
+      if (!current || current.who !== attacker) {
+        if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
+        continue;
+      }
+      const shot = launchSegment(current, i, hpBefore, event.kind === 'miss' ? { wild: true } : { decoy: true });
+      if (event.kind === 'decoy' && shot.reacts) pushReaction(shot.impact, event.actor, DODGE_ANIM, event.hp, line);
+      else if (line !== undefined) steps.push({ at: shot.impact, who: event.actor, line, hp: event.hp });
+      continue;
+    }
+
+    if (event.kind === 'skip' && (event.cause === 'sleep' || event.cause === 'freeze')) {
+      // 睡着 / 冻住跳过的那一拍：再演一遍犯困 / 冻僵（一眼看得出它为什么不动）
+      const anim = event.cause === 'sleep' ? SLEEP_ANIM : FREEZE_ANIM;
+      pushAnim({
+        at: Math.max(at, busy[event.actor]),
+        who: event.actor,
+        anim,
+        rate: reactRate(anim),
+        ...(line === undefined ? {} : { line }),
+        hp: event.hp,
+      });
+      continue;
+    }
+
+    // 没有伤害、但有飞行物的主动招式（鲸歌、墨汁）也走下面这一支：放一发、对方按招式反应
+    const castOnFoe =
+      event.kind === 'skill' &&
+      event.damage === undefined &&
+      event.heal === undefined &&
+      ATTACK_SHOW[event.skill]?.fly !== undefined;
+    if (isDamageOnFoe(event) || castOnFoe) {
       const shooter = event.actor;
       const victim = (event.actor ^ 1) as 0 | 1;
       const react = !playDeadAfter(events, i);
+      const blocked = blockedHere(event);
       // 灵兽与第六感各有自己的出手（动作 + 飞行物），排在出手方上一段播完之后：
       // 灵兽等主攻的动作收势再召唤，第六感等自己挨完那一下回到站姿再反劈（「先挨后反」）
       const append: AttackShow | null =
@@ -782,72 +936,51 @@ export function timeline(
           : event.kind === 'counter'
             ? ATTACK_SHOW['sixth-sense']
             : null;
-      let launch: number;
-      let fly: Fly;
-      let action: string;
-      let extra: { count?: number; hue?: number } = {};
-      let reacts = react;
       if (event.kind === 'beast' && slot?.beast) {
         slot.beast = false;
         beastLeft[shooter] -= 1;
       }
+      /** 这一下：放出时刻、命中时刻、用的哪种飞行物、要不要让对方起反应 */
+      let shot: { launch: number; impact: number; fly: Fly; reacts: boolean };
+      /** 另起一段出手动作再放一发（灵兽、第六感、无影手）：排在出手方上一段播完之后 */
+      const separate = (show: AttackShow & { fly: Fly }, earliest: number): typeof shot => {
+        const moment = Math.max(earliest, busy[shooter]);
+        pushAnim({ at: moment, who: shooter, anim: show.action, rate: rateFor(show.action, SLOT_MS), hp: hpBefore });
+        const launch = moment + releaseOffset(show.action);
+        const impact = pushShot(launch, shooter, show.action, show.fly, hpBefore, blocked ? { blocked: true } : {});
+        return { launch, impact, fly: show.fly, reacts: react };
+      };
+      const fists =
+        event.kind === 'combo' && hasSkill(shooter, 'shadow-fists', skillSets) ? ATTACK_SHOW['shadow-fists'] : null;
       if (append?.fly) {
         const earliest = event.kind === 'counter' ? (lastImpact ?? at) + SIXTH_SENSE_AFTER_MS : at;
-        const moment = Math.max(earliest, busy[shooter]);
-        pushAnim({
-          at: moment,
-          who: shooter,
-          anim: append.action,
-          rate: rateFor(append.action, SLOT_MS),
-          hp: hpBefore,
-        });
-        launch = moment + releaseOffset(append.action);
-        fly = append.fly;
-        action = append.action;
-      } else if (slot) {
+        shot = separate({ ...append, fly: append.fly }, earliest);
+      } else if (slot && fists?.fly) {
+        // 无影手的追击：等主攻的动作收势，再播「战斗-连拳」，拳影按连拳自己的出手时刻齐发
         const segment = takeSegment(slot);
-        // 无影手的追击：等主攻的动作收势，再播「战斗-连拳」，拳影按连拳自己的出手时刻齐发；
-        // 出手方没这门招式时 combo 不另播动作（手还伸着，再放一发同一格攻击的飞行物）
-        const fists =
-          event.kind === 'combo' && hasSkill(shooter, 'shadow-fists', skillSets) ? ATTACK_SHOW['shadow-fists'] : null;
-        if (fists?.fly) {
-          const moment = Math.max(segment.at, busy[shooter]);
-          pushAnim({
-            at: moment,
-            who: shooter,
-            anim: fists.action,
-            rate: rateFor(fists.action, SLOT_MS),
-            hp: hpBefore,
-          });
-          launch = moment + releaseOffset(fists.action);
-          fly = fists.fly;
-          action = fists.action;
-        } else {
-          launch = segment.at;
-          fly = slot.fly;
-          action = slot.show.action;
-          extra = segment.extra;
-          reacts = react && segment.reacts;
-        }
+        shot = separate({ ...fists, fly: fists.fly }, segment.at);
+      } else if (slot) {
+        // 这一格的主攻（含没有无影手的追击：手还伸着，再放一发同一格攻击的飞行物）
+        const twin = (event.kind === 'hit' || event.kind === 'combo') && event.twin === true;
+        const segment = launchSegment(slot, i, hpBefore, { ...(blocked ? { blocked: true } : {}), twin });
+        shot = { launch: segment.launch, impact: segment.impact, fly: slot.fly, reacts: react && segment.reacts };
       } else {
         // 手喂的事件序列里这一格没有出手：台词与受击照老口径排在 `at` 附近
         if (line !== undefined) steps.push({ at, who: shooter, line, hp: event.hp });
-        if (react) pushReaction(at + REACT_MS, victim, blockedHere(event) ? BUBBLE_ANIM : HIT_ANIM, event.hp);
+        if (react) pushReaction(at + REACT_MS, victim, blocked ? BUBBLE_ANIM : HIT_ANIM, event.hp);
         continue;
       }
-      const impact = pushShot(launch, shooter, action, fly, hpBefore, {
-        ...extra,
-        ...(blockedHere(event) ? { blocked: true } : {}),
-      });
-      lastImpact = impact;
-      // 挡下的那一下改播挨打方自己的泡泡护体；其余按这一招的受击方式（湿身、炸黑、砸头……）
-      if (reacts) pushReaction(impact, victim, blockedHere(event) ? BUBBLE_ANIM : (fly.react ?? HIT_ANIM), hpBefore);
-      // 掉血与结算台词都在命中那一刻
-      steps.push({ at: impact, who: shooter, ...(line === undefined ? {} : { line }), hp: event.hp });
+      lastImpact = shot.impact;
+      // 挡下的那一下改播挨打方自己的泡泡护体；其余按这一招的受击方式（湿身、炸黑、砸头、冻僵……）。
+      // 鲸吞是反向的：灵光从对方身上被吸走的那一刻（放出时）对方就起反应，飞回嘴边那一刻回血
+      const reactAnim = blocked ? BUBBLE_ANIM : (shot.fly.react ?? HIT_ANIM);
+      if (shot.reacts) pushReaction(shot.fly.reverse ? shot.launch : shot.impact, victim, reactAnim, hpBefore);
+      // 掉血与结算台词都在命中那一刻（鲸吞的伤害和回血一起，在灵光飞回嘴边时结算）
+      steps.push({ at: shot.impact, who: shooter, ...(line === undefined ? {} : { line }), hp: event.hp });
       continue;
     }
 
-    // skip（被定住）、回血：只有台词、没有飞行物
+    // skip（被定住 / 晕了）、回血：只有台词、没有飞行物
     if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
   }
   return steps.sort((a, b) => a.at - b.at);
@@ -863,9 +996,24 @@ function primaryOf(events: BattleEvent[], decideIndex: number, hits: number): nu
     const event = events[j];
     if (event.kind === 'decide' || event.kind === 'end' || event.kind === 'combo') break;
     if (event.kind === 'hit' || (event.kind === 'skill' && event.damage !== undefined)) return segment + 1;
-    if (event.kind === 'dodge') segment += 1;
+    if (event.kind === 'dodge' || event.kind === 'miss' || event.kind === 'decoy') segment += 1;
   }
   return 1;
+}
+
+/**
+ * 银托盘第二段（飞回来从背后磕的那一下）的结果：从第一段往后找这一格的下一段（反击、假死夹在中间跳过；
+ * 碰到追击、下一格、收场就停）。对方第一段就倒下了、根本没有第二段是 `none`
+ */
+function secondOf(events: BattleEvent[], index: number): 'hit' | 'blocked' | 'decoy' | 'miss' | 'none' {
+  for (let j = index + 1; j < events.length; j += 1) {
+    const event = events[j];
+    if (event.kind === 'decide' || event.kind === 'end' || event.kind === 'combo') return 'none';
+    if (event.kind === 'hit') return event.blocked ? 'blocked' : 'hit';
+    if (event.kind === 'decoy') return 'decoy';
+    if (event.kind === 'dodge' || event.kind === 'miss') return 'miss';
+  }
+  return 'none';
 }
 
 /** 这一件事是不是这一格的最后一件（后面紧跟下一格的 decide、收场，或者事件序列到头了） */
