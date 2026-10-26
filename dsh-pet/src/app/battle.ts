@@ -436,8 +436,8 @@ const GULP_HP_SHARE = 0.5;
 const CHANT_HP_SHARE = 0.5;
 /** 五指拳心剑伤害里吃的破势份额（X9） */
 const FIST_HP_SHARE = 0.8;
-/** 万我：分出几重魂影（X9；改成 3 / 7 就是「三重 / 七重战神」） */
-const MYRIAD_MIRRORS = 2;
+/** 万我：分出几重魂影（X9；用户选了 3 重，再往上就是「七重战神」） */
+const MYRIAD_MIRRORS = 3;
 
 export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Controller, Controller]): BattleEvent[] {
   // 结算随机数只由种子决定，是 fight 内部的局部状态

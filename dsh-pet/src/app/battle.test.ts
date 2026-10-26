@@ -606,10 +606,11 @@ const castOnce = (skill: SkillId): Controller => ({
   decide: (view) => (view.you.used.includes(skill) ? { kind: 'unarmed' } : { kind: 'skill', skill }),
 });
 
-test('X9 万我：两重魂影替本体挨两次普通攻击，第三下才打到本体', () => {
+test('X9 万我：三重魂影替本体挨三次普通攻击，第四下才打到本体', () => {
   let seen = 0;
   for (let i = 0; i < 60; i++) {
-    const a = { ...fighterAt(8, seededRng(i)), weapons: [], agility: 0, hp: 9_999 };
+    // 甲身法拉满、带化鸽遁：挨打的次数少了才活得够久，能对着乙连出三下以上
+    const a = { ...fighterAt(8, seededRng(i)), weapons: [], agility: 30, skills: ['dove' as const], hp: 9_999 };
     const b = {
       ...fighterAt(8, seededRng(i + 3)),
       skills: ['myriad-self' as const],
@@ -623,15 +624,15 @@ test('X9 万我：两重魂影替本体挨两次普通攻击，第三下才打�
     seen++;
     // 甲打乙的每一次落点：前两下是魂影，之后才是打在本体上的 hit（actor 0）
     const taken: string[] = [];
-    for (let j = k + 1; j < events.length && taken.length < 3; j++) {
+    for (let j = k + 1; j < events.length && taken.length < 4; j++) {
       const e = events[j];
       if (e.kind === 'mirror') taken.push('mirror');
       else if (e.kind === 'hit' && e.actor === 0) taken.push('hit');
     }
-    assert.deepEqual(taken.slice(0, 2), ['mirror', 'mirror'], `第 ${i} 场：${taken.join(',')}`);
-    assert.equal(taken[2] ?? 'hit', 'hit', `魂影用完就该打到本体：${taken.join(',')}`);
+    assert.deepEqual(taken.slice(0, 3), ['mirror', 'mirror', 'mirror'], `第 ${i} 场：${taken.join(',')}`);
+    assert.equal(taken[3] ?? 'hit', 'hit', `魂影用完就该打到本体：${taken.join(',')}`);
     const mirrors = events.filter((e) => e.kind === 'mirror');
-    assert.equal(mirrors.length, 2, '就两重魂影');
+    assert.equal(mirrors.length, 3, '就三重魂影');
     for (const m of mirrors) {
       assert.equal(m.actor, 1, '魂影是挨打那一方的');
       assert.deepEqual(m.hp, events[events.indexOf(m) - 1].hp, '魂影替挨的那一下不掉血');

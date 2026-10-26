@@ -108,6 +108,8 @@ const SCENES = {
       { actor: 0, kind: 'mirror', hp },
       decide(1, { kind: 'unarmed' }),
       { actor: 0, kind: 'mirror', hp },
+      decide(1, { kind: 'unarmed' }),
+      { actor: 0, kind: 'mirror', hp },
     ],
   },
   魂牵梦绕: {
