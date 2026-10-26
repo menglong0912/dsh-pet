@@ -74,6 +74,11 @@ const SLEEP_ANIM = '受击-犯困';
 const FREEZE_ANIM = '受击-冻僵';
 /** 魂牵梦绕把人牵进梦里：跳过那一拍再演一遍入梦（X9） */
 const DREAM_ANIM = '受击-入梦';
+/**
+ * 魂牵梦绕的四句咒（原著里配着「幽魂魔尊」那一段的原文）：
+ * 「魂牵梦绕风云荡，星圆土方三界坛。生死轮回一门开，再启杀劫洗铅华。」
+ */
+const DREAM_CHANT = '魂牵梦绕风云荡，星圆土方三界坛。生死轮回一门开，再启杀劫洗铅华。';
 /** 挨打（正面挨一下：拳、牌、拳影、掌劈、灵兽一撞）与挡下的反应素材 */
 const HIT_ANIM = '受击-正面';
 const BUBBLE_ANIM = '招式-泡泡护体';
@@ -756,6 +761,10 @@ export function timeline(
       closeSlot();
       const show = ATTACK_SHOW[showKeyOf(event.action)];
       pushAnim({ at: cursor, who: event.actor, anim: show.action, rate: actionRate(show.action), hp: event.hp });
+      // 魂牵梦绕（X9）：原著那四句咒先念出来，命中那一刻再接结算台词（一句顶一句，正好铺满这一格）
+      if (event.action.kind === 'skill' && event.action.skill === 'dream-chant') {
+        steps.push({ at: cursor, who: event.actor, line: DREAM_CHANT, hp: event.hp });
+      }
       if (show.fly) {
         slot = {
           who: event.actor,
