@@ -168,6 +168,7 @@ const FX_SIZE: Record<FxAssetName, { size: number; spin?: number; grow?: number 
   灵光: { size: 0.08 },
   '命中-雪花': { size: 0.44 },
   '命中-墨汁': { size: 0.46 },
+  '命中-魂碎': { size: 0.44 },
 };
 
 /** 自家宠物的画布矩形（口径同 `guestBounds`：舞台顶 = box.top + bottomPad、画布高 = 宽 × 9/16） */
@@ -314,8 +315,8 @@ export function fxSpec(
   const art = FX_SIZE[shot.kind];
   const px = (ratio: number): number => Math.max(8, Math.round(ratio * target.height));
   const size = px(art.size);
-  // 分身挨的那一下：水母碎成泡泡（不画法宝自己的命中特效）
-  const hitFx: FxAssetName = shot.decoy ? '命中-泡泡' : shot.hitFx;
+  // 分身 / 魂影挨的那一下：水母碎成泡泡、魂影碎成魂屑（不画法宝自己的命中特效）
+  const hitFx: FxAssetName = shot.decoy ? '命中-泡泡' : shot.mirror ? '命中-魂碎' : shot.hitFx;
   const hitSize = px(FX_SIZE[hitFx].size);
   const local = (point: [number, number]): [number, number] => [
     Math.round(point[0] - bounds.x),

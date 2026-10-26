@@ -107,7 +107,10 @@ export type SkillId =
   | 'whale-song'
   | 'ink'
   | 'whale-gulp'
-  | 'jelly-clone';
+  | 'jelly-clone'
+  | 'myriad-self'
+  | 'dream-chant'
+  | 'finger-sword';
 
 export interface SkillDef {
   id: SkillId;
@@ -137,6 +140,9 @@ export const SKILLS: Record<SkillId, SkillDef> = {
   ink: skill('ink', '墨汁喷射', '主动'),
   'whale-gulp': skill('whale-gulp', '鲸吞', '主动'),
   'jelly-clone': skill('jelly-clone', '水母分身', '被动'),
+  'myriad-self': skill('myriad-self', '万我', '主动'),
+  'dream-chant': skill('dream-chant', '魂牵梦绕', '主动'),
+  'finger-sword': skill('finger-sword', '五指拳心剑', '主动'),
 };
 
 export const SKILL_IDS = Object.keys(SKILLS) as SkillId[];
@@ -145,10 +151,20 @@ export const SKILL_IDS = Object.keys(SKILLS) as SkillId[];
  * 引擎版本（X5 名帖的 v）：结算规则、图鉴内容变了就 +1。切磋双方在名帖里各带一份，
  * 两边不同就切不了（谁也不知道对方那版引擎会打出什么）。
  */
-export const BATTLE_VERSION = 2;
+export const BATTLE_VERSION = 3;
 
 /** 主动招式（Action 里允许出现的） */
-const ACTIVE_SKILLS: readonly SkillId[] = ['bloom', 'lion-roar', 'blue-whale', 'whale-song', 'ink', 'whale-gulp'];
+const ACTIVE_SKILLS: readonly SkillId[] = [
+  'bloom',
+  'lion-roar',
+  'blue-whale',
+  'whale-song',
+  'ink',
+  'whale-gulp',
+  'myriad-self',
+  'dream-chant',
+  'finger-sword',
+];
 
 export interface Fighter {
   name: string; // 显示用
@@ -180,6 +196,9 @@ export interface Controller {
   decide(view: BattleView): Action;
 }
 
+/** 跳过出手的原因：陀螺 / 狮子吼是晕，雪球是冻住，鲸歌是睡着，魂牵梦绕是入梦（X9） */
+export type SkipCause = 'stun' | 'freeze' | 'sleep' | 'dream';
+
 export type BattleEvent =
   | { actor: 0 | 1; kind: 'start'; hp: [number, number] }
   | { actor: 0 | 1; kind: 'decide'; action: Action; hp: [number, number] }
@@ -210,14 +229,25 @@ export type BattleEvent =
   | { actor: 0 | 1; kind: 'dodge'; hp: [number, number] }
   | { actor: 0 | 1; kind: 'counter'; damage: number; blocked: boolean; hp: [number, number] }
   | { actor: 0 | 1; kind: 'beast'; damage: number; blocked: boolean; hp: [number, number] }
-  /** 跳过一次出手；`cause`：陀螺 / 狮子吼是晕（stun），雪球是冻住（freeze），鲸歌是睡着（sleep） */
-  | { actor: 0 | 1; kind: 'skip'; cause?: 'stun' | 'freeze' | 'sleep'; hp: [number, number] }
+  /** 跳过一次出手；`cause`：陀螺 / 狮子吼是晕（stun），雪球是冻住（freeze），鲸歌是睡着（sleep），魂牵梦绕是入梦（dream） */
+  | { actor: 0 | 1; kind: 'skip'; cause?: SkipCause; hp: [number, number] }
   /** 被墨汁糊了眼，这一下打空（X8；actor 是出手的那一方） */
   | { actor: 0 | 1; kind: 'miss'; hp: [number, number] }
   /** 水母分身替挨了这一下（X8；actor 是挨打的那一方） */
   | { actor: 0 | 1; kind: 'decoy'; hp: [number, number] }
+  /** 万我的魂影替挨了这一下（X9；actor 是挨打的那一方，同 decoy） */
+  | { actor: 0 | 1; kind: 'mirror'; hp: [number, number] }
   | { actor: 0 | 1; kind: 'play-dead'; hp: [number, number] }
-  | { actor: 0 | 1; kind: 'skill'; skill: SkillId; damage?: number; heal?: number; hp: [number, number] }
+  | {
+      actor: 0 | 1;
+      kind: 'skill';
+      skill: SkillId;
+      damage?: number;
+      heal?: number;
+      /** 五指拳心剑穿了护体（X9） */
+      pierce?: true;
+      hp: [number, number];
+    }
   | { actor: 0 | 1; kind: 'strike'; index: number; damage: number; blocked: boolean; hp: [number, number] }
   | { actor: 0 | 1; kind: 'end'; winner: 0 | 1; reason: 'ko' | 'timeout'; hp: [number, number] };
 
@@ -271,10 +301,12 @@ interface Side {
   next: number;
   /** 下一次出手是否被定住跳过 */
   skip: boolean;
-  /** 跳过的原因（演出与解说用） */
-  skipCause: 'stun' | 'freeze' | 'sleep';
+  /** 跳过的原因（演出与解说用）：晕、冻住、睡着、被魂牵梦绕牵进梦里 */
+  skipCause: SkipCause;
   /** 墨汁：接下来还有几次出手被糊着眼 */
   blind: number;
+  /** 万我：还剩几重魂影能替自己挨打（X9） */
+  mirror: number;
   used: Set<SkillId>;
   /** 泡泡护体这场还能挡几次 */
   bubbles: number;
@@ -290,6 +322,7 @@ function makeSide(f: Fighter, initialDelay: number): Side {
     skip: false,
     skipCause: 'stun',
     blind: 0,
+    mirror: 0,
     used: new Set(),
     bubbles: f.skills.includes('bubble') ? 2 : 0,
     beastLeft: f.skills.includes('spirit-beast') ? 3 : 0,
@@ -304,10 +337,17 @@ function hpPair(a: Side, b: Side): [number, number] {
   return [a.hp, b.hp];
 }
 
-/** 结算一次伤害：泡泡护体挡一半（向下取整），致命一击被假死遁救下时留 1 点（一场一次） */
-function applyDamage(target: Side, raw: number): { damage: number; blocked: boolean; playDead: boolean } {
+/**
+ * 结算一次伤害：泡泡护体挡一半（向下取整），致命一击被假死遁救下时留 1 点（一场一次）。
+ * `pierce`（X9 的五指拳心剑）：穿护体——不消耗泡泡、也不打折。
+ */
+function applyDamage(
+  target: Side,
+  raw: number,
+  opts: { pierce?: boolean } = {},
+): { damage: number; blocked: boolean; playDead: boolean } {
   let damage = raw;
-  const blocked = target.bubbles > 0;
+  const blocked = !opts.pierce && target.bubbles > 0;
   if (blocked) {
     target.bubbles -= 1;
     damage = Math.floor(damage * BUBBLE_FACTOR);
@@ -328,10 +368,17 @@ export function autoController(rng: () => number): Controller {
     decide(view: BattleView): Action {
       const hp = view.hp[view.self];
       const maxHp = view.maxHp[view.self];
+      const foeSide = view.self === 0 ? 1 : 0;
+      const foeHp = view.hp[foeSide];
+      const foeMax = view.maxHp[foeSide];
       const unused = view.you.skills.filter((s) => ACTIVE_SKILLS.includes(s) && !view.you.used.includes(s));
       if (unused.includes('bloom') && hp * 2 < maxHp) return { kind: 'skill', skill: 'bloom' };
       // 鲸吞带回血：气血低于七成时先用
       if (unused.includes('whale-gulp') && hp * 10 < maxHp * 7) return { kind: 'skill', skill: 'whale-gulp' };
+      // 五指拳心剑收人头（X9）：对方剩不到三成半就捅
+      if (unused.includes('finger-sword') && foeHp * 100 < foeMax * 35) return { kind: 'skill', skill: 'finger-sword' };
+      // 魂牵梦绕先把入梦挂上（X9）：对方还满着就先念咒
+      if (unused.includes('dream-chant') && foeHp * 10 > foeMax * 7) return { kind: 'skill', skill: 'dream-chant' };
       const actives = unused.filter((s) => s !== 'bloom');
       if (actives.length > 0 && rng() < 0.25) return { kind: 'skill', skill: pick(rng, actives) };
       if (view.you.weapons.length > 0 && rng() >= 0.2) return { kind: 'weapon', weapon: pick(rng, view.you.weapons) };
@@ -382,6 +429,15 @@ const DECOY_FROM = 0.9;
 const SLOW_FACTOR = 0.5;
 /** 鲸吞伤害里吃的破势份额 */
 const GULP_HP_SHARE = 0.5;
+/**
+ * 魂牵梦绕伤害里吃的破势份额（X9）。起点是 20 + 破势×0.8，实测持有方胜率 0.70（上限 0.65）——
+ * 大伤害＋入梦（白送一拍）叠在一起太强，按扫描降到 14 + 破势×0.5，落在 0.61。
+ */
+const CHANT_HP_SHARE = 0.5;
+/** 五指拳心剑伤害里吃的破势份额（X9） */
+const FIST_HP_SHARE = 0.8;
+/** 万我：分出几重魂影（X9；改成 3 / 7 就是「三重 / 七重战神」） */
+const MYRIAD_MIRRORS = 2;
 
 export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Controller, Controller]): BattleEvent[] {
   // 结算随机数只由种子决定，是 fight 内部的局部状态
@@ -404,8 +460,8 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
     };
   };
 
-  /** 对方睡着（鲸歌）：睡着期间挨的攻击都不判闪避 */
-  const asleep = (side: Side): boolean => side.skip && side.skipCause === 'sleep';
+  /** 对方睡着 / 被牵进梦里（鲸歌、魂牵梦绕）：这会儿挨的攻击都不判闪避 */
+  const asleep = (side: Side): boolean => side.skip && (side.skipCause === 'sleep' || side.skipCause === 'dream');
 
   /**
    * 一次攻击（法宝或空手）：命中、会心、连击、定身、反击、灵兽都从这进。
@@ -431,10 +487,16 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
         events.push({ actor: self, kind: 'miss', hp: hpPair(sides[0], sides[1]) });
         continue;
       }
-      // 必中：烟花；银托盘最后一段从背后回旋磕过来；对方睡着
+      // 必中：烟花；银托盘最后一段从背后回旋磕过来；对方睡着 / 入梦
       const sure = def?.mustHit || (def?.returnSure && hit === hits - 1) || asleep(foe);
       if (!sure && dodgeRoll < dodgeRate(foe.f)) {
         events.push({ actor: (self ^ 1) as 0 | 1, kind: 'dodge', hp: hpPair(sides[0], sides[1]) });
+        continue;
+      }
+      // 万我的魂影（X9）：替本体挨这一下。必中（烟花、托盘回旋末段）和睡着时打的是本体
+      if (!sure && foe.mirror > 0) {
+        foe.mirror -= 1;
+        events.push({ actor: (self ^ 1) as 0 | 1, kind: 'mirror', hp: hpPair(sides[0], sides[1]) });
         continue;
       }
       // 水母分身：counterRoll 的高段（反击用低段；分身作废后本来就不判反击）
@@ -610,6 +672,50 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
           skill: 'whale-gulp',
           damage: applied.damage,
           heal,
+          hp: hpPair(sides[0], sides[1]),
+        });
+        if (applied.playDead)
+          events.push({ actor: (self ^ 1) as 0 | 1, kind: 'play-dead', hp: hpPair(sides[0], sides[1]) });
+      }
+      if (action.skill === 'myriad-self') {
+        // 万我：分出几重魂影——无数个「我」，杀不尽的替身；必中的照样打本体（见 attack）
+        me.mirror += MYRIAD_MIRRORS;
+        events.push({ actor: self, kind: 'skill', skill: 'myriad-self', hp: hpPair(sides[0], sides[1]) });
+      }
+      if (action.skill === 'dream-chant') {
+        // 魂牵梦绕：必中；把对方神魂牵进梦里，下一拍动不了（入梦期间挨打不判闪避，同睡着）
+        const applied = applyDamage(
+          foe,
+          14 + Math.floor(me.f.power * POWER_FACTOR) + Math.floor(foe.f.hp * HP_BONUS * CHANT_HP_SHARE),
+        );
+        if (foe.hp > 0) {
+          foe.skip = true;
+          foe.skipCause = 'dream';
+        }
+        events.push({
+          actor: self,
+          kind: 'skill',
+          skill: 'dream-chant',
+          damage: applied.damage,
+          hp: hpPair(sides[0], sides[1]),
+        });
+        if (applied.playDead)
+          events.push({ actor: (self ^ 1) as 0 | 1, kind: 'play-dead', hp: hpPair(sides[0], sides[1]) });
+      }
+      if (action.skill === 'finger-sword') {
+        // 五指拳心剑：拳心藏剑，剑气穿体——必中，且护体挡不住（不消耗泡泡、不打折）
+        const pierced = foe.bubbles > 0;
+        const applied = applyDamage(
+          foe,
+          16 + Math.floor(me.f.power * POWER_FACTOR) + Math.floor(foe.f.hp * HP_BONUS * FIST_HP_SHARE),
+          { pierce: true },
+        );
+        events.push({
+          actor: self,
+          kind: 'skill',
+          skill: 'finger-sword',
+          damage: applied.damage,
+          ...(pierced ? { pierce: true as const } : {}),
           hp: hpPair(sides[0], sides[1]),
         });
         if (applied.playDead)

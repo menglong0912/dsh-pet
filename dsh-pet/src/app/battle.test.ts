@@ -133,7 +133,17 @@ test('出招者交代不合法的动作时按空手处理：不会递归、不�
 });
 
 test('主动招式都会被用出来，事件里带招式编号', () => {
-  const actives: SkillId[] = ['bloom', 'lion-roar', 'blue-whale', 'whale-song', 'ink', 'whale-gulp'];
+  const actives: SkillId[] = [
+    'bloom',
+    'lion-roar',
+    'blue-whale',
+    'whale-song',
+    'ink',
+    'whale-gulp',
+    'myriad-self',
+    'dream-chant',
+    'finger-sword',
+  ];
   for (const skill of actives) {
     const events = findFight(
       (rng) => {
@@ -300,16 +310,19 @@ test('tribulate：同种子同结果，事件以 end 收尾', () => {
 
 // 4000 场的 1σ ≈ 0.008：有招式的期望胜率贴着下限（约 0.41），600 场的噪声（1σ ≈ 0.02）会随机翻过界
 const BALANCE_N = 4_000;
+// 单件法宝 / 招式的持有方胜率贴着 0.65 的上限（假死遁、泡泡护体都在 0.63 上下），
+// 4000 场的 1σ 有 0.008，够把 0.635 的期望抽成 0.650 翻过界——这一组用 8000 场（1σ ≈ 0.005）
+const ITEM_BALANCE_N = 8_000;
 
-const balanceRate = (make: (i: number) => [Fighter, Fighter]): number => {
+const balanceRate = (make: (i: number) => [Fighter, Fighter], n = BALANCE_N): number => {
   let wins = 0;
-  for (let i = 0; i < BALANCE_N; i++) {
+  for (let i = 0; i < n; i++) {
     const [a, b] = make(i);
     const events = fight(named(a, '甲'), named(b, '乙'), `bal-${i}`);
     const end = events[events.length - 1];
     if (end.kind === 'end' && end.winner === 0) wins++;
   }
-  return wins / BALANCE_N;
+  return wins / n;
 };
 
 test('平衡：同境界随机配招，先手方胜率 40%–60%', () => {
@@ -338,7 +351,7 @@ test('平衡：任一法宝或招式，持有方胜率在 40%–65% 之间', () 
       const b = fighterAt(10, seededRng(i + 500));
       b.weapons = b.weapons.filter((w) => w !== id);
       return [a, b];
-    });
+    }, ITEM_BALANCE_N);
     assert.ok(rate >= 0.4 && rate <= 0.65, `法宝 ${id} 实际 ${rate}`);
   }
   for (const id of SKILL_IDS) {
@@ -348,7 +361,7 @@ test('平衡：任一法宝或招式，持有方胜率在 40%–65% 之间', () 
       if (a.skills.length > 0) a.skills[a.skills.length - 1] = id;
       else a.skills = [id];
       return [a, fighterAt(10, seededRng(i + 500))];
-    });
+    }, ITEM_BALANCE_N);
     assert.ok(rate >= 0.4 && rate <= 0.65, `招式 ${id} 实际 ${rate}`);
   }
 });
@@ -586,4 +599,132 @@ test('X8 水母分身：一成的攻击打在分身上（decoy），那一下不
     });
   }
   assert.ok(decoys / attacks > 0.05 && decoys / attacks < 0.15, `分身比例 ${decoys}/${attacks}`);
+});
+
+/** 第一拍放这一招，之后一直空手（X9 的三招都是一场一次） */
+const castOnce = (skill: SkillId): Controller => ({
+  decide: (view) => (view.you.used.includes(skill) ? { kind: 'unarmed' } : { kind: 'skill', skill }),
+});
+
+test('X9 万我：两重魂影替本体挨两次普通攻击，第三下才打到本体', () => {
+  let seen = 0;
+  for (let i = 0; i < 60; i++) {
+    const a = { ...fighterAt(8, seededRng(i)), weapons: [], agility: 0, hp: 9_999 };
+    const b = {
+      ...fighterAt(8, seededRng(i + 3)),
+      skills: ['myriad-self' as const],
+      weapons: [],
+      agility: 0,
+      hp: 9_999,
+    };
+    const events = fight(named(a, '甲'), named(b, '乙'), `myriad-${i}`, [unarmedOnly(), castOnce('myriad-self')]);
+    const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'myriad-self');
+    if (k < 0) continue;
+    seen++;
+    // 甲打乙的每一次落点：前两下是魂影，之后才是打在本体上的 hit（actor 0）
+    const taken: string[] = [];
+    for (let j = k + 1; j < events.length && taken.length < 3; j++) {
+      const e = events[j];
+      if (e.kind === 'mirror') taken.push('mirror');
+      else if (e.kind === 'hit' && e.actor === 0) taken.push('hit');
+    }
+    assert.deepEqual(taken.slice(0, 2), ['mirror', 'mirror'], `第 ${i} 场：${taken.join(',')}`);
+    assert.equal(taken[2] ?? 'hit', 'hit', `魂影用完就该打到本体：${taken.join(',')}`);
+    const mirrors = events.filter((e) => e.kind === 'mirror');
+    assert.equal(mirrors.length, 2, '就两重魂影');
+    for (const m of mirrors) {
+      assert.equal(m.actor, 1, '魂影是挨打那一方的');
+      assert.deepEqual(m.hp, events[events.indexOf(m) - 1].hp, '魂影替挨的那一下不掉血');
+    }
+  }
+  assert.ok(seen > 30, `该有几十场用上万我：${seen}`);
+});
+
+test('X9 万我：必中的（烟花）照样打本体，魂影不顶', () => {
+  let seen = 0;
+  for (let i = 0; i < 40; i++) {
+    const a = { ...fighterAt(8, seededRng(i)), weapons: ['firework' as const], agility: 0, hp: 9_999 };
+    const b = {
+      ...fighterAt(8, seededRng(i + 3)),
+      skills: ['myriad-self' as const],
+      weapons: [],
+      agility: 0,
+      hp: 9_999,
+    };
+    const events = fight(named(a, '甲'), named(b, '乙'), `myriad-sure-${i}`, [
+      always({ kind: 'weapon', weapon: 'firework' }),
+      castOnce('myriad-self'),
+    ]);
+    const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'myriad-self');
+    if (k < 0) continue;
+    seen++;
+    assert.equal(events.slice(k).filter((e) => e.kind === 'mirror').length, 0, '必中的不看魂影');
+    assert.ok(events.slice(k).some((e) => e.kind === 'hit' && e.actor === 0 && e.weapon === 'firework'));
+  }
+  assert.ok(seen > 20, `该有几十场：${seen}`);
+});
+
+test('X9 魂牵梦绕：把对方牵进梦里（skip dream），入梦这一拍挨打不判闪避', () => {
+  let seen = 0;
+  for (let i = 0; i < 60; i++) {
+    const a = { ...fighterAt(8, seededRng(i)), skills: ['dream-chant' as const], weapons: [], hp: 9_999 };
+    const b = {
+      ...fighterAt(8, seededRng(i + 3)),
+      agility: 30,
+      skills: ['dove' as const],
+      weapons: [],
+      hp: 9_999,
+    };
+    const events = fight(named(a, '甲'), named(b, '乙'), `chant-${i}`, [castOnce('dream-chant'), unarmedOnly()]);
+    const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'dream-chant');
+    if (k < 0) continue;
+    seen++;
+    const turn = nextTurn(events, k, 1);
+    assert.deepEqual([turn?.kind, turn?.kind === 'skip' && turn.cause], ['skip', 'dream']);
+    const wake = events.findIndex((e, j) => j > k && e.kind === 'skip' && e.actor === 1);
+    const between = events.slice(k + 1, wake < 0 ? undefined : wake);
+    assert.equal(between.filter((e) => e.kind === 'dodge' && e.actor === 1).length, 0, '入梦时躲不开');
+  }
+  assert.ok(seen > 30, `该有几十场：${seen}`);
+});
+
+test('X9 五指拳心剑：必中、穿护体（不减伤也不消耗泡泡），没护体时不带 pierce', () => {
+  const expected = (a: Fighter, foeMaxHp: number): number =>
+    16 + Math.floor(a.power * 0.75) + Math.floor(foeMaxHp * 0.25 * 0.8);
+  let seen = 0;
+  for (let i = 0; i < 40; i++) {
+    const a = {
+      ...fighterAt(8, seededRng(i)),
+      skills: ['finger-sword' as const],
+      weapons: [],
+      agility: 0,
+      hp: 9_999,
+    };
+    const b = {
+      ...fighterAt(8, seededRng(i + 3)),
+      skills: ['bubble' as const],
+      weapons: [],
+      agility: 0,
+      hp: 9_999,
+    };
+    const events = fight(named(a, '甲'), named(b, '乙'), `fist-${i}`, [castOnce('finger-sword'), unarmedOnly()]);
+    const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'finger-sword');
+    if (k < 0) continue;
+    seen++;
+    const e = events[k];
+    assert.equal(e.kind === 'skill' && e.pierce, true, '这一下标了穿护体');
+    assert.equal(e.kind === 'skill' && e.damage, expected(a, 9_999), '护体没打折');
+    const later = events.slice(k + 1).find((x) => x.kind === 'hit' && x.actor === 0);
+    assert.equal(later?.kind === 'hit' && later.blocked, true, '泡泡没被这一下用掉');
+  }
+  assert.ok(seen > 20, `该有几十场：${seen}`);
+
+  const a = { ...fighterAt(8, seededRng(7)), skills: ['finger-sword' as const], weapons: [] };
+  const events = fight(named(a, '甲'), named(fighterAt(8, seededRng(9)), '乙'), 'fist-no-bubble', [
+    castOnce('finger-sword'),
+    unarmedOnly(),
+  ]);
+  const e = events.find((x) => x.kind === 'skill' && x.skill === 'finger-sword');
+  assert.ok(e, '这一招该用出来');
+  assert.equal(e.kind === 'skill' && e.pierce, undefined, '没护体就不标 pierce');
 });

@@ -31,8 +31,10 @@ const KIND_LINES: Record<string, string[]> = {
   skip: ['{a}被定在原地，动弹不得', '{a}愣在原地错过了出手'],
   skipFreeze: ['{a}冻成了冰棍，动弹不得', '{a}浑身挂着冰，错过了出手'],
   skipSleep: ['{a}站着睡着了，错过了出手', '{a}还在打呼，没想起来出手'],
+  skipDream: ['{a}神魂被牵进梦里，这一拍醒不过来', '{a}眼神一散，陷在梦里没出手'],
   miss: ['{a}眼前一团黑，打歪了', '{a}抹着脸上的墨乱挥，落了空'],
   decoy: ['{a}的水母分身替它挨了这下', '打中的是{a}的水母分身，本体没事'],
+  mirror: ['{a}的一重魂影替本体被斩碎', '斩中的是{a}的一重魂影，本体还在'],
   'play-dead': ['{a}两眼一翻装死过去，硬是留了口气', '{a}直挺挺倒下，又幽幽爬起来'],
   strike: ['一道天雷劈下，-{d}', '雷光轰在{a}头顶，-{d}', '劫雷炸响，-{d}'],
 };
@@ -44,12 +46,16 @@ const SKILL_LINES: Record<string, string[]> = {
   'whale-song': ['{a}唱起鲸歌，{b}听着听着睡着了', '{a}哼了段摇篮曲，{b}眼皮直打架'],
   ink: ['{a}噗地喷出一团墨汁，糊了{b}一脸', '{a}一口墨汁喷过去，{b}眼前一黑'],
   'whale-gulp': ['{a}一口鲸吞，-{d}，气血 +{h}', '{a}张嘴猛吸，{b}的灵气 -{d}，自己 +{h}'],
+  'myriad-self': ['{a}轻轻一笑，分出两重魂影——我即是我，杀之不尽', '{a}神魂一分为三，两重魂影落在身后'],
+  'dream-chant': ['{a}低声念咒，魂丝缠上{b}的神魂，-{d}', '{a}念完一句，{b}眼神一散，-{d}'],
+  'finger-sword': ['{a}五指并拢，拳心剑出，-{d}', '{a}一拳递出，剑气自拳心穿过{b}，-{d}'],
 };
 
-/** 鸡毛掸子让对方迟缓、弹弓打两颗时的专属句（代替那件法宝的普通句） */
+/** 鸡毛掸子让对方迟缓、弹弓打两颗、五指拳心剑穿护体时的专属句（代替那件法宝 / 那招的普通句） */
 const FLAG_LINES: Record<string, string[]> = {
   slowed: ['{a}的掸子挠得{b}笑岔气，-{d}', '{b}被{a}掸得直乐，慢了一拍，-{d}'],
   twin: ['{a}的弹弓一发两颗，-{d}', '{a}连弹两颗星星糖，-{d}'],
+  pierce: ['{a}的剑气穿过{b}的护体，-{d}', '{b}的泡泡护体被一剑捅破，-{d}'],
 };
 
 const END_LINES = ['{a}赢了！', '{a}站到了最后！', '{b}躺平了，{a}获胜'];
@@ -108,7 +114,9 @@ export function lineOf(
             ? KIND_LINES.skipFreeze
             : event.cause === 'sleep'
               ? KIND_LINES.skipSleep
-              : KIND_LINES.skip,
+              : event.cause === 'dream'
+                ? KIND_LINES.skipDream
+                : KIND_LINES.skip,
         ),
         a,
       );
@@ -116,9 +124,12 @@ export function lineOf(
       return fill(pick(KIND_LINES.miss), a);
     case 'decoy':
       return fill(pick(KIND_LINES.decoy), a);
+    case 'mirror':
+      return fill(pick(KIND_LINES.mirror), a);
     case 'play-dead':
       return fill(pick(KIND_LINES['play-dead']), a);
     case 'skill':
+      if (event.pierce) return decorate(fill(pick(FLAG_LINES.pierce), a, b, event.damage ?? 0));
       return decorate(fill(pick(SKILL_LINES[event.skill]), a, b, event.damage ?? 0, event.heal ?? 0));
     case 'strike':
       return decorate(fill(pick(KIND_LINES.strike), a, b, event.damage));

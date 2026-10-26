@@ -72,6 +72,8 @@ const TWIN_GAP_MS = 70;
 /** 睡着 / 冻住跳过那一拍再演一遍的素材（和鲸歌、雪球的受击同一段） */
 const SLEEP_ANIM = '受击-犯困';
 const FREEZE_ANIM = '受击-冻僵';
+/** 魂牵梦绕把人牵进梦里：跳过那一拍再演一遍入梦（X9） */
+const DREAM_ANIM = '受击-入梦';
 /** 挨打（正面挨一下：拳、牌、拳影、掌劈、灵兽一撞）与挡下的反应素材 */
 const HIT_ANIM = '受击-正面';
 const BUBBLE_ANIM = '招式-泡泡护体';
@@ -111,6 +113,8 @@ const REACTION_WINDUP_MS: Record<string, number> = {
   '受击-挠痒': 167,
   '受击-犯困': 125,
   '受击-墨汁': 125,
+  // 入梦：低下头、眨眼的那一刻（实测 292ms）
+  '受击-入梦': 292,
   '受击-震耳': 250,
   '受击-绊脚': 292,
   '受击-砸头': 292,
@@ -168,7 +172,8 @@ export type FxAssetName =
   | '命中-斩'
   | '命中-电光'
   | '命中-雪花'
-  | '命中-墨汁';
+  | '命中-墨汁'
+  | '命中-魂碎';
 
 /** 各轨迹的飞行时间（`bolt` = 乌云淡入 + 闪电劈下） */
 const FLIGHT_MS: Record<FxTrack, number> = {
@@ -261,6 +266,15 @@ export const ATTACK_SHOW: Record<string, AttackShow> = {
     action: '出手-鲸吞',
     fly: { kind: '灵光', track: 'line', hitFx: '灵光', count: 6, gapMs: 110, reverse: true },
   },
+  // 万我（X9）：没有飞行物，只演结印；魂影和魂碎在 `mirror` 事件时由特效窗口画
+  'myriad-self': { action: '出手-万我' },
+  // 魂牵梦绕（X9）：魂丝化成灵光一串飘过去，命中那一刻对方被牵进梦里
+  'dream-chant': {
+    action: '出手-魂牵梦绕',
+    fly: { kind: '灵光', track: 'float', hitFx: '命中-魂碎', react: '受击-入梦', count: 8, gapMs: 90 },
+  },
+  // 五指拳心剑（X9）：拳风飞出去，到对方面前才展开成一道剑气
+  'finger-sword': { action: '出手-拳心剑', fly: { kind: '拳风', track: 'line', hitFx: '命中-斩' } },
   // 回血：作用在自己身上，照旧播整段素材，没有飞行物
   bloom: { action: '招式-凭空生花' },
   // 三种追加出手
@@ -278,6 +292,8 @@ export const FX_ASSETS: FxAssetName[] = Array.from(
     ...[...Object.values(ATTACK_SHOW).map((show) => show.fly), TRIBULATION_FLY].flatMap((fly) =>
       fly ? [fly.kind, fly.hitFx] : [],
     ),
+    // 魂屑（X9）：万我的 `mirror` 事件和魂牵梦绕的命中都用它，不在出手表的飞行物里
+    '命中-魂碎',
     '乌云',
   ]),
 );
@@ -331,6 +347,10 @@ export const RELEASE: Record<string, { ms: number; hand: [number, number]; catch
   '出手-召唤灵兽': { ms: 1_250, hand: [160, 185] },
   '战斗-连拳': { ms: 1_000, hand: [204, 232] },
   '出手-第六感': { ms: 1_850, hand: [206, 216] },
+  // 魂牵梦绕：双手捧在胸前念咒，魂丝从两手之间飘出去（X9）
+  '出手-魂牵梦绕': { ms: 1_600, hand: [305, 200] },
+  // 五指拳心剑：拳头递到最左那一刻，剑气从拳心射出（实测 1.75 秒最左 182,188，之后一直停在 196）（X9）
+  '出手-拳心剑': { ms: 1_750, hand: [182, 188] },
 };
 
 /** 一段素材按这个倍速播完要多久 */
@@ -408,6 +428,8 @@ export interface Shot {
   wild?: boolean;
   /** 打在水母分身上（X8 `decoy` 事件）：对方原地留一只水母替身挨这一下，碎成泡泡 */
   decoy?: boolean;
+  /** 打碎万我的一重魂影（X9 `mirror` 事件）：飞行物飞过去、命中画魂屑，不画替身（魂影只在出手素材里） */
+  mirror?: boolean;
   /** 反向（鲸吞）：从对方身上飞回出手方嘴边 */
   reverse?: boolean;
   /** 银托盘的回旋（X8）：第二段绕到背后磕的时刻、飞回手里的时刻，以及第二段的结果 */
@@ -636,6 +658,7 @@ export function timeline(
       sky?: boolean;
       wild?: boolean;
       decoy?: boolean;
+      mirror?: boolean;
       boomerang?: Shot['boomerang'];
     } = {},
   ): number => {
@@ -652,6 +675,7 @@ export function timeline(
       ...(extra.blocked ? { blocked: true } : {}),
       ...(extra.sky ? { sky: true } : {}),
       ...(extra.wild ? { wild: true } : {}),
+      ...(extra.mirror ? { mirror: true } : {}),
       ...(extra.decoy ? { decoy: true } : {}),
       ...(fly.reverse ? { reverse: true } : {}),
       ...(extra.boomerang ? { boomerang: extra.boomerang } : {}),
@@ -669,7 +693,7 @@ export function timeline(
     current: Slot,
     index: number,
     hp: [number, number],
-    flags: { miss?: boolean; blocked?: boolean; wild?: boolean; decoy?: boolean; twin?: boolean },
+    flags: { miss?: boolean; blocked?: boolean; wild?: boolean; decoy?: boolean; mirror?: boolean; twin?: boolean },
   ): { launch: number; impact: number; reacts: boolean } => {
     const segment = takeSegment(current);
     const k = current.segments - 1;
@@ -889,24 +913,29 @@ export function timeline(
       continue;
     }
 
-    if (event.kind === 'miss' || event.kind === 'decoy') {
-      // 致盲打空（actor = 攻击方）/ 水母分身替挨（actor = 挨打方）：照样占这一格的一段、放一发——
-      // 打空的远远飞过去、对方不反应；分身那一下水母碎掉，本体侧身躲开（闪避对准命中）
+    if (event.kind === 'miss' || event.kind === 'decoy' || event.kind === 'mirror') {
+      // 致盲打空（actor = 攻击方）/ 水母分身、万我魂影替挨（actor = 挨打方）：照样占这一格的一段、放一发——
+      // 打空的远远飞过去、对方不反应；替身那一下碎掉（水母碎成泡泡、魂影碎成魂屑），本体侧身躲开（闪避对准命中）
       const attacker = event.kind === 'miss' ? event.actor : ((event.actor ^ 1) as 0 | 1);
       const current = slot;
       if (!current || current.who !== attacker) {
         if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
         continue;
       }
-      const shot = launchSegment(current, i, hpBefore, event.kind === 'miss' ? { wild: true } : { decoy: true });
-      if (event.kind === 'decoy' && shot.reacts) pushReaction(shot.impact, event.actor, DODGE_ANIM, event.hp, line);
+      const shot = launchSegment(
+        current,
+        i,
+        hpBefore,
+        event.kind === 'miss' ? { wild: true } : event.kind === 'decoy' ? { decoy: true } : { mirror: true },
+      );
+      if (event.kind !== 'miss' && shot.reacts) pushReaction(shot.impact, event.actor, DODGE_ANIM, event.hp, line);
       else if (line !== undefined) steps.push({ at: shot.impact, who: event.actor, line, hp: event.hp });
       continue;
     }
 
-    if (event.kind === 'skip' && (event.cause === 'sleep' || event.cause === 'freeze')) {
-      // 睡着 / 冻住跳过的那一拍：再演一遍犯困 / 冻僵（一眼看得出它为什么不动）
-      const anim = event.cause === 'sleep' ? SLEEP_ANIM : FREEZE_ANIM;
+    if (event.kind === 'skip' && (event.cause === 'sleep' || event.cause === 'freeze' || event.cause === 'dream')) {
+      // 睡着 / 冻住 / 入梦跳过的那一拍：再演一遍犯困 / 冻僵 / 入梦（一眼看得出它为什么不动）
+      const anim = event.cause === 'sleep' ? SLEEP_ANIM : event.cause === 'freeze' ? FREEZE_ANIM : DREAM_ANIM;
       pushAnim({
         at: Math.max(at, busy[event.actor]),
         who: event.actor,
@@ -997,7 +1026,8 @@ function primaryOf(events: BattleEvent[], decideIndex: number, hits: number): nu
     const event = events[j];
     if (event.kind === 'decide' || event.kind === 'end' || event.kind === 'combo') break;
     if (event.kind === 'hit' || (event.kind === 'skill' && event.damage !== undefined)) return segment + 1;
-    if (event.kind === 'dodge' || event.kind === 'miss' || event.kind === 'decoy') segment += 1;
+    if (event.kind === 'dodge' || event.kind === 'miss' || event.kind === 'decoy' || event.kind === 'mirror')
+      segment += 1;
   }
   return 1;
 }

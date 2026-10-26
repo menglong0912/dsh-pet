@@ -99,6 +99,32 @@ const SCENES = {
     events: [start, decide(0, weapon('firework')), { actor: 1, kind: 'decoy', hp }],
     skillSets: [[], ['jelly-clone']],
   },
+  万我: {
+    events: [
+      start,
+      decide(0, skill('myriad-self')),
+      { actor: 0, kind: 'skill', skill: 'myriad-self', hp },
+      decide(1, { kind: 'unarmed' }),
+      { actor: 0, kind: 'mirror', hp },
+      decide(1, { kind: 'unarmed' }),
+      { actor: 0, kind: 'mirror', hp },
+    ],
+  },
+  魂牵梦绕: {
+    events: [
+      start,
+      decide(0, skill('dream-chant')),
+      { actor: 0, kind: 'skill', skill: 'dream-chant', damage: 14, hp },
+      { actor: 1, kind: 'skip', cause: 'dream', hp },
+    ],
+  },
+  五指拳心剑: {
+    events: [
+      start,
+      decide(0, skill('finger-sword')),
+      { actor: 0, kind: 'skill', skill: 'finger-sword', damage: 30, pierce: true, hp },
+    ],
+  },
   三球: { events: [start, decide(0, weapon('juggle')), whit(0, 'juggle'), whit(0, 'juggle'), whit(0, 'juggle')] },
   陀螺: { events: [start, decide(0, weapon('top')), whit(0, 'top')] },
   鲸尾: { events: [start, decide(0, weapon('whale-tail')), whit(0, 'whale-tail')] },

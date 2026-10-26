@@ -164,3 +164,29 @@ test('X8：新法宝的迟缓 / 两颗、跳过按原因、打空、分身、三
     }
   }
 });
+
+test('X9：魂影替挨、入梦、穿护体、三个新主动都有台词，不超过 40 字', () => {
+  const names: [string, string] = ['阿鲸', '心魔'];
+  const cases: Array<[BattleEvent, (line: string) => boolean]> = [
+    [{ actor: 0, kind: 'mirror', hp: [10, 10] }, (l) => l.includes(names[0]) && l.includes('魂影')],
+    [{ actor: 1, kind: 'skip', cause: 'dream', hp: [10, 10] }, (l) => l.includes(names[1]) && /梦/.test(l)],
+    [{ actor: 0, kind: 'skill', skill: 'myriad-self', hp: [10, 10] }, (l) => l.includes(names[0])],
+    [
+      { actor: 0, kind: 'skill', skill: 'dream-chant', damage: 21, hp: [10, 4] },
+      (l) => l.includes('21') && l.includes(names[1]),
+    ],
+    [{ actor: 0, kind: 'skill', skill: 'finger-sword', damage: 26, hp: [10, 4] }, (l) => l.includes('26')],
+    [
+      { actor: 0, kind: 'skill', skill: 'finger-sword', damage: 26, pierce: true, hp: [10, 4] },
+      (l) => l.includes('26') && /护体/.test(l),
+    ],
+  ];
+  for (const [event, check] of cases) {
+    for (const roll of [0.01, 0.99]) {
+      const line = lineOf(event, names, () => roll);
+      assert.ok(line !== null, `${event.kind} 应该有台词`);
+      assert.ok(check(line!), `${event.kind} 台词内容不对：${line}`);
+      assert.ok(line!.length <= 40, `${event.kind} 台词超长：${line}`);
+    }
+  }
+});
