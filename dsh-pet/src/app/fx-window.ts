@@ -137,7 +137,8 @@ const FX_SIZE: Record<FxAssetName, { size: number; spin?: number; grow?: number 
   陀螺: { size: 0.14, spin: 1_080 },
   水浪: { size: 0.32 },
   烟花弹: { size: 0.24 },
-  声波: { size: 0.22, grow: 0.55 },
+  // 狮子吼的声波是一圈冲出去的冲击波：在嘴边很小、飞到对方时明显散开变大（约 2.9 倍）
+  声波: { size: 0.52, grow: 0.2 },
   蓝鲸: { size: 0.7 },
   灵兽: { size: 0.32 },
   拳风: { size: 0.18, grow: 0.7 },
