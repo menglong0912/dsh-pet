@@ -35,6 +35,7 @@ import { promisify } from 'node:util';
 
 import { findPetInstance, flattenPetList, readAllConfig } from '../host/config';
 import type { ConfigPaths } from '../host/config';
+import { LOCK_MAX_TTL_MS } from '../host/lock';
 import { composeSystemPrompt, petPersona } from '../host/persona';
 import type { StandaloneAiService } from '../standalone/ai-provider';
 import { ActivityTracker, describeActivity, durationText } from './activity';
@@ -42,7 +43,7 @@ import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
 import { SKILLS, WEAPONS, fight, shadowOf, tribulate } from './battle';
 import { BattleShow, FX_ASSETS, LINE_MS, SHOW_ANIMS, timeline } from './battle-show';
-import type { Shot } from './battle-show';
+import type { Shot, Step } from './battle-show';
 import { arenaScoreboard, openArenaWindow } from './arena-window';
 import { foeStage, homeStage, openFxWindow } from './fx-window';
 import type { FxWindow, Stage } from './fx-window';
@@ -155,6 +156,8 @@ const SCREEN_ACTIVE_IDLE_SEC = 60;
 const SPOKE_HOLD_MS = 15_000;
 /** 打完到关掉心魔窗口 / 擂台之间的停顿（§X3：3 秒） */
 const CLOSE_HOLD_MS = 3_000;
+/** 演出占着宠物的锁比时间线多留这么久：演完还要停 CLOSE_HOLD_MS 才放，定时器也会有点漂 */
+const SHOW_LOCK_SPARE_MS = 30_000;
 /** 切磋等客人应战 / 亮随机数的时限（§X5：对不上或 30 秒没来，按客人认输记） */
 const SPAR_WAIT_MS = 30_000;
 /** 客人的赛后感言最多编这么久（跟着 reveal 带过去；模型磨蹭就退回模板，别把 reveal 拖过时限） */
@@ -381,10 +384,36 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
   }
 
+  /**
+   * 演出期间占着自家宠物的占用锁（`/lock` 的 lockId）：持锁时渲染端的随机链（堆雪人这类随机活动、
+   * 自己走开、转身）和自动来源的工作状态 / 余额表现都停下，两段演出动画之间宠物停在站姿上。
+   * 应用自己的请求统一带着它（petRequest），所以提醒、串门这些照常能说话、播动画。
+   */
+  let showLock: string | null = null;
+  /** 演完挂着的放锁定时器（下一场赶在放锁前开演就取消它、续上同一把锁） */
+  let showLockRelease: ReturnType<typeof setTimeout> | null = null;
+
+  /** 发一个插件请求；演出占着宠物时带上那把锁（见 holdPet），锁没了就不带它重发一次 */
   async function petRequest(method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
+    const lockId = showLock;
+    const result = await petFetch(method, path, body, lockId);
+    if (lockId === null || result.reason !== 'lock-lost') return result;
+    // 演出的锁没了（用户点了 / 拖了宠物，或者到期了）：接下来照没锁的老样子演，这一下不带锁重发
+    if (showLock === lockId) showLock = null;
+    log(`演出的占用锁没了（${String(result.cause)}），接着不占着宠物演`);
+    return petFetch(method, path, body, null);
+  }
+
+  async function petFetch(
+    method: string,
+    path: string,
+    body: unknown,
+    lockId: string | null,
+  ): Promise<Record<string, unknown>> {
     const url = new URL(deps.petBase + path);
     url.searchParams.set('pet', petId());
     url.searchParams.set('surface', 'any');
+    if (lockId !== null) url.searchParams.set('lock', lockId);
     const response = await fetch(url, {
       method,
       headers: body === undefined ? undefined : { 'content-type': 'application/json' },
@@ -393,6 +422,48 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     });
     if (response.status === 204) return { ok: true };
     return (await response.json()) as Record<string, unknown>;
+  }
+
+  /**
+   * 开演前占住自家宠物（见 showLock）：锁的时长按这一场的时间线算，再留出收场的余量。
+   * 上一场刚演完、锁还没放：续上同一把（续不上就重新拿）。拿不到只记一行，照没锁的老样子演。
+   */
+  async function holdPet(steps: Step[]): Promise<void> {
+    if (showLockRelease !== null) clearTimeout(showLockRelease);
+    showLockRelease = null;
+    const showMs = steps.length ? steps[steps.length - 1].at + LINE_MS : 0;
+    const ttl = Math.min(LOCK_MAX_TTL_MS, showMs + SHOW_LOCK_SPARE_MS);
+    let failure = '';
+    for (const lockId of showLock === null ? [null] : [showLock, null]) {
+      try {
+        const result = await petFetch('POST', '/lock', lockId === null ? { ttl } : { lockId, ttl }, null);
+        if (result.ok === true && typeof result.lockId === 'string') {
+          showLock = result.lockId;
+          return;
+        }
+        failure = JSON.stringify(result);
+      } catch (error) {
+        failure = errorText(error);
+      }
+    }
+    showLock = null;
+    log(`演出占不住宠物：${failure}`);
+  }
+
+  /** 演完放开宠物（等收场的动作播完、在最后一帧停一会儿；退出时立刻放） */
+  function releasePet(afterMs: number): void {
+    if (showLockRelease !== null) clearTimeout(showLockRelease);
+    showLockRelease = setTimeout(() => {
+      showLockRelease = null;
+      const lockId = showLock;
+      if (lockId === null) return;
+      showLock = null;
+      petFetch('POST', '/lock/release', { lockId }, null)
+        .then((result) => {
+          if (result.ok !== true) log(`演出放开宠物失败：${JSON.stringify(result)}`);
+        })
+        .catch((error: unknown) => log(`演出放开宠物失败：${errorText(error)}`));
+    }, afterMs);
   }
 
   /** 说一句话的选项：配图（表情包池里的名称，插件按池校验）；要不要联动播一段说话动画；气泡显示多久 */
@@ -1822,8 +1893,12 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     void refreshMenu();
     const end = events[events.length - 1];
     const won = end.kind === 'end' && end.winner === 0;
-    await battle.run();
+    // 先占住宠物再开演：两段动画之间别插播随机活动（等锁的这一下可能被退出打断，所以留住这一场）
+    const show = battle;
+    await holdPet(steps);
+    await show.run();
     battle = null;
+    releasePet(disposed ? 0 : CLOSE_HOLD_MS);
     // 中途退出了（dispose）：别再把这场算进存档
     if (disposed) return;
     // 奖励（修为进账、掉法宝、战绩都在 trialDone 里；冒泡与日记在 onCultivation）
@@ -1906,8 +1981,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     void refreshMenu();
     const end = events[events.length - 1];
     const survived = end.kind === 'end' && end.winner === 0;
-    await battle.run();
+    const show = battle;
+    await holdPet(steps);
+    await show.run();
     battle = null;
+    releasePet(disposed ? 0 : CLOSE_HOLD_MS);
     closeTribulationFx(CLOSE_HOLD_MS);
     // 中途退出了（dispose）：这场不算，境界与修为都不动
     if (disposed) return;
@@ -2144,8 +2222,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
     });
     void refreshMenu();
-    await battle.run();
+    const show = battle;
+    await holdPet(steps);
+    await show.run();
     battle = null; // 不清零的话「快进」常驻菜单、下一场被 guard 挡住（真机踩过）
+    releasePet(disposed ? 0 : CLOSE_HOLD_MS);
     const cancelled = spar !== state || disposed;
     if (spar === state) spar = null;
     if (cancelled) return;

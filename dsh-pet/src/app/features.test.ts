@@ -157,11 +157,12 @@ function cultivationSeed(): Record<string, unknown> {
   };
 }
 
-/** withFeatures 顺带记下来的：最近一次注册的菜单 labels、播过的 /anim 请求体、应用的日志 */
+/** withFeatures 顺带记下来的：最近一次注册的菜单 labels、播过的 /anim 请求体、应用的日志、按先后记的全部请求（带的占用锁） */
 interface FeaturesExtras {
   menus: string[][];
   anims: Array<Record<string, unknown>>;
   logs: string[];
+  requests: Array<{ path: string; lock: string | null; body: Record<string, unknown> }>;
 }
 
 /**
@@ -184,6 +185,8 @@ async function withFeatures(
     sparWaitMs?: number;
     /** 信标的端口与发往地址（测试注入：绑随机端口、不往真实广播地址发） */
     beacon?: { port?: number; targets?: () => Array<{ address: string; port: number }> };
+    /** 占用锁已经被用户撤掉：带锁的 /anim、/broadcast 一律回 lock-lost（不带锁的照常成功） */
+    lockLost?: boolean;
   },
   fn: (
     features: AppFeatures,
@@ -198,8 +201,10 @@ async function withFeatures(
   const menus: string[][] = [];
   const anims: Array<Record<string, unknown>> = [];
   const logs: string[] = [];
+  const requests: FeaturesExtras['requests'] = [];
   const server = createServer((req, res) => {
-    const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    const { pathname: path, searchParams } = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const lock = searchParams.get('lock');
     const reply = (body: unknown) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
@@ -208,7 +213,12 @@ async function withFeatures(
     req.on('data', (chunk: Buffer) => (raw += chunk.toString('utf8')));
     req.once('end', () => {
       const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
-      if (path.endsWith('/broadcast')) {
+      requests.push({ path: path.replace(/^\/dsh-pet-7340/, ''), lock, body });
+      if (options.lockLost && lock !== null && (path.endsWith('/anim') || path.endsWith('/broadcast'))) {
+        reply({ ok: false, reason: 'lock-lost', cause: 'preempted' });
+      } else if (path.endsWith('/lock')) {
+        reply({ ok: true, lockId: typeof body.lockId === 'string' ? body.lockId : 'show-lock', expiresAt: 0 });
+      } else if (path.endsWith('/broadcast')) {
         bodies.push(body);
         said.push(String(body.text));
         reply(options.broadcast ?? { ok: true });
@@ -248,7 +258,7 @@ async function withFeatures(
   };
   const features = startAppFeatures(deps);
   try {
-    await fn(features, said, bodies, home, { menus, anims, logs });
+    await fn(features, said, bodies, home, { menus, anims, logs, requests });
   } finally {
     features.dispose();
     // 等挂着的菜单长轮询回来、看到 disposed 再关服务，免得它进入失败重试的 5 秒等待
@@ -721,6 +731,65 @@ test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线�
       'menu back',
     );
   });
+});
+
+test('心魔试炼：开演前占住宠物（两段动画之间不插播随机活动），演出的动画与台词都带着锁，演完放开', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, _said, _bodies, _home, extras) => {
+    const { menus, requests } = extras;
+    await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), 'trial menu');
+    clicks.push('修炼/心魔试炼');
+    await until(() => requests.some((r) => r.path === '/anim'), 'opening anim');
+    // 回归（X9 真机：两段演出动画之间宠物插播堆雪人、吃糖葫芦）：先拿锁，再播第一段
+    const hold = requests.findIndex((r) => r.path === '/lock');
+    assert.ok(hold >= 0 && hold < requests.findIndex((r) => r.path === '/anim'), '拿锁在开场动画之前');
+    const ttl = Number(requests[hold].body.ttl);
+    assert.ok(ttl > 0 && ttl <= 30 * 60 * 1000, `锁的时长在 /lock 允许的区间：${ttl}`);
+    await until(() => requests.some((r) => r.path === '/broadcast'), 'show line', 400);
+    clicks.push('修炼/快进');
+    // 演完停 3 秒（收场动作播完、在最后一帧停一会儿）才放锁
+    await until(() => requests.some((r) => r.path === '/lock/release'), 'release', 400);
+    const release = requests.findIndex((r) => r.path === '/lock/release');
+    assert.equal(requests[release].body.lockId, 'show-lock');
+    const during = requests.slice(hold + 1, release).filter((r) => r.path === '/anim' || r.path === '/broadcast');
+    assert.ok(during.length > 0);
+    assert.ok(
+      during.every((r) => r.lock === 'show-lock'),
+      '占着的时候应用自己的动画与台词都带锁（不带会被宿主当成别人、回 lock-required）',
+    );
+  });
+});
+
+test('心魔试炼：锁被用户撤掉（点了 / 拖了宠物）就不带锁重发，接着照常演，演完也不再放锁', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  await withFeatures(
+    { cultivation: cultivationEarly(), clicks, lockLost: true },
+    async (_features, _said, _bodies, home, extras) => {
+      const { menus, anims, requests, logs } = extras;
+      await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), 'trial menu');
+      clicks.push('修炼/心魔试炼');
+      await until(() => anims.length > 0, 'opening anim resent');
+      const opening = requests.filter((r) => r.path === '/anim').slice(0, 2);
+      assert.deepEqual(
+        opening.map((r) => r.lock),
+        ['show-lock', null],
+        '开场那段先带锁被拒、再不带锁重发',
+      );
+      assert.ok(logs.some((line) => /占用锁没了（preempted）/.test(line)));
+      clicks.push('修炼/快进');
+      await until(() => (cultivationSave(home)?.today as { trial: number }).trial === 1, 'trial counted');
+      await new Promise((done) => setTimeout(done, 3_200));
+      const later = requests.filter((r) => r.path === '/anim' || r.path === '/broadcast').slice(2);
+      assert.ok(later.length > 0);
+      assert.ok(
+        later.every((r) => r.lock === null),
+        '锁没了以后不再带它',
+      );
+      assert.ok(!requests.some((r) => r.path === '/lock/release'), '锁已经不在手里，演完不放');
+    },
+  );
 });
 
 test('修炼：演完一场再点第二场，只有第一场加修为（当天只算一场收益）', async () => {
