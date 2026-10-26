@@ -60,8 +60,13 @@ const FLAG_LINES: Record<string, string[]> = {
 
 const END_LINES = ['{a}赢了！', '{a}站到了最后！', '{b}躺平了，{a}获胜'];
 
+/** 名字本身以「的」结尾时，`{a}的` / `{b}的` 只留一个「的」；只认占位符紧跟一个「的」的写法 */
 function fill(template: string, a: string, b = '', d = 0, h = 0): string {
-  return template.split('{a}').join(a).split('{b}').join(b).split('{d}').join(String(d)).split('{h}').join(String(h));
+  return template.replace(/\{([abdh])\}(的?)/g, (_match, key: string, de: string) => {
+    if (key === 'd' || key === 'h') return String(key === 'd' ? d : h) + de;
+    const name = key === 'a' ? a : b;
+    return de && name.endsWith('的') ? name : name + de;
+  });
 }
 
 /**

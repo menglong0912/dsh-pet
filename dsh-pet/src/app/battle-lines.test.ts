@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { lineOf } from './battle-lines.ts';
-import { WEAPON_IDS, type BattleEvent, type SkillId } from './battle.ts';
+import { SKILLS, SKILL_IDS, WEAPON_IDS, type BattleEvent, type SkillId } from './battle.ts';
 
 /** 名字按 12 字上限来验长度 */
 const names: [string, string] = ['小花小花小花小花', '心魔心魔心魔心魔'];
@@ -189,4 +189,109 @@ test('X9：魂影替挨、入梦、穿护体、三个新主动都有台词，不
       assert.ok(line!.length <= 40, `${event.kind} 台词超长：${line}`);
     }
   }
+});
+
+test('X11：名字以「的」结尾时，所有 {a}的 / {b}的 模板都不重复「的」', () => {
+  const deNames: [string, string] = ['吃白饭的', '吃白饭的'];
+  const hp: [number, number] = [10, 10];
+  // 每个事件都固定对应一个模板数组；数组都少于 128 句，rng 扫满 [0, 1) 就能挑到每一句
+  const events: BattleEvent[] = [
+    ...WEAPON_IDS.map((weapon): BattleEvent => ({
+      actor: 0,
+      kind: 'hit',
+      weapon,
+      damage: 9,
+      crit: false,
+      blocked: false,
+      hp,
+    })),
+    { actor: 0, kind: 'hit', damage: 9, crit: false, blocked: false, hp },
+    { actor: 0, kind: 'hit', weapon: 'duster', damage: 9, crit: false, blocked: false, slowed: true, hp },
+    { actor: 0, kind: 'hit', weapon: 'slingshot', damage: 9, crit: false, blocked: false, twin: true, hp },
+    { actor: 0, kind: 'combo', damage: 9, crit: false, blocked: false, hp },
+    { actor: 0, kind: 'dodge', hp },
+    { actor: 0, kind: 'counter', damage: 9, blocked: false, hp },
+    { actor: 0, kind: 'beast', damage: 9, blocked: false, hp },
+    { actor: 0, kind: 'skip', hp },
+    { actor: 0, kind: 'skip', cause: 'freeze', hp },
+    { actor: 0, kind: 'skip', cause: 'sleep', hp },
+    { actor: 0, kind: 'skip', cause: 'dream', hp },
+    { actor: 0, kind: 'miss', hp },
+    { actor: 0, kind: 'decoy', hp },
+    { actor: 0, kind: 'mirror', hp },
+    { actor: 0, kind: 'play-dead', hp },
+    ...SKILL_IDS.filter((skill) => SKILLS[skill].kind === '主动').map((skill): BattleEvent => ({
+      actor: 0,
+      kind: 'skill',
+      skill,
+      damage: 9,
+      heal: 3,
+      hp,
+    })),
+    { actor: 0, kind: 'skill', skill: 'finger-sword', damage: 9, pierce: true, hp },
+    { actor: 0, kind: 'strike', index: 0, damage: 9, blocked: false, hp },
+    { actor: 0, kind: 'end', winner: 0, reason: 'ko', hp },
+  ];
+  const seen = new Set<string>();
+  for (const event of events) {
+    for (let i = 0; i < 128; i++) {
+      const line = lineOf(event, deNames, () => (i + 0.5) / 128);
+      assert.ok(line !== null, `${event.kind} 应该有台词`);
+      seen.add(line!);
+      assert.ok(!line!.includes('的的'), `「的」重复了：${line}`);
+    }
+  }
+  // 主角、对手两个位置都真的覆盖到了
+  for (const expected of [
+    '吃白饭的王牌划过空气，-9',
+    '吃白饭的雪球啪地糊在吃白饭的身上，-9',
+    '吃白饭的掸子扫过吃白饭的鼻尖，-9',
+    '吃白饭的灵兽窜上去咬了一口，-9',
+    '吃白饭的水母分身替它挨了这下',
+    '吃白饭的掸子挠得吃白饭的笑岔气，-9',
+    '吃白饭的弹弓一发两颗，-9',
+    '吃白饭的张嘴猛吸，吃白饭的灵气 -9，自己 +3',
+    '吃白饭的低声念咒，魂丝缠上吃白饭的神魂，-9',
+    '吃白饭的剑气穿过吃白饭的护体，-9',
+  ]) {
+    assert.ok(seen.has(expected), `没覆盖到：${expected}`);
+  }
+});
+
+test('X11：普通名字照旧补「的」，名字中间的「的」不受影响', () => {
+  const snowball: BattleEvent = {
+    actor: 0,
+    kind: 'hit',
+    weapon: 'snowball',
+    damage: 5,
+    crit: false,
+    blocked: false,
+    hp: [10, 10],
+  };
+  assert.equal(
+    lineOf(snowball, ['小蓝', '心魔'], () => 0.75),
+    '小蓝的雪球啪地糊在心魔身上，-5',
+  );
+  assert.equal(
+    lineOf(snowball, ['我的猫', '心魔'], () => 0.75),
+    '我的猫的雪球啪地糊在心魔身上，-5',
+  );
+  // 只有名字以「的」结尾才不补；对手位置也一样
+  const duster: BattleEvent = {
+    actor: 0,
+    kind: 'hit',
+    weapon: 'duster',
+    damage: 6,
+    crit: false,
+    blocked: false,
+    hp: [10, 10],
+  };
+  assert.equal(
+    lineOf(duster, ['小蓝', '吃白饭的'], () => 0.75),
+    '小蓝的掸子扫过吃白饭的鼻尖，-6',
+  );
+  assert.equal(
+    lineOf(duster, ['吃白饭的', '小蓝'], () => 0.75),
+    '吃白饭的掸子扫过小蓝的鼻尖，-6',
+  );
 });
