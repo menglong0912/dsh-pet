@@ -10,7 +10,10 @@ import {
   cardFighter,
   cleanText,
   encodeBeacon,
+  encodeProbe,
   isLanAddress,
+  isPeerAddress,
+  isProbe,
   isSparNonce,
   knockOn,
   Neighborhood,
@@ -22,6 +25,7 @@ import {
   sendNote,
   sendReveal,
   sendSpar,
+  shouldReply,
   sparCardOf,
   sparCommit,
   sparFight,
@@ -38,6 +42,16 @@ import { generateVisitIdentity, knockMessage, welcomeMessage } from './visit-ide
 import type { VisitIdentity } from './visit-identity.ts';
 
 const me = { owner: '小王', pet: '小鱼' };
+
+/** 等一会儿（测试里的 UDP 往返） */
+const delay = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
+
+/** 等条件成立，超时就断言失败 */
+async function waitUntil(check: () => boolean, what: string, timeoutMs = 2_000): Promise<void> {
+  const end = Date.now() + timeoutMs;
+  while (!check() && Date.now() < end) await delay(10);
+  assert.ok(check(), `等待超时 ${what}`);
+}
 
 test('cleanText drops control and bidi characters, squeezes spaces, and cuts by characters', () => {
   assert.equal(cleanText('  你好\n\t世界\u202e反过来\u0000 ', 60), '你好 世界 反过来');
@@ -102,6 +116,232 @@ test('only private, link-local, CGNAT and loopback addresses count as the LAN', 
   }
   for (const address of ['8.8.8.8', '172.32.0.1', '100.128.0.1', '2001:db8::1', '', undefined]) {
     assert.equal(isLanAddress(address), false, String(address));
+  }
+});
+
+test('manual peers must be dotted LAN IPv4 addresses', () => {
+  for (const address of ['10.1.2.3', '172.16.0.1', '192.168.11.23', '100.64.0.1', '127.0.0.1']) {
+    assert.equal(isPeerAddress(address), true, address);
+  }
+  for (const address of [
+    '8.8.8.8',
+    '1.1.1.1',
+    '256.1.1.1',
+    '192.168.1.256',
+    ' 192.168.1.2',
+    '192.168.1.2 ',
+    '192.168.1',
+    '192.168.1.2.3',
+    '010.1.1.1',
+    '192.168.01.2',
+    '::1',
+    'fe80::1',
+    'localhost',
+    'example.com',
+    '',
+    '192.168.1.-1',
+  ]) {
+    assert.equal(isPeerAddress(address), false, JSON.stringify(address));
+  }
+});
+
+test('a reply is only due for LAN addresses that our own broadcast cannot reach', () => {
+  const iface = (address: string, netmask: string, extra: Partial<NetworkInterfaceInfo> = {}): NetworkInterfaceInfo =>
+    ({ address, netmask, family: 'IPv4', internal: false, mac: '', cidr: null, ...extra }) as NetworkInterfaceInfo;
+  const interfaces = {
+    lo0: [iface('127.0.0.1', '255.0.0.0', { internal: true })],
+    en0: [iface('192.168.1.23', '255.255.255.0')],
+    en1: [iface('10.0.5.7', '255.255.0.0')],
+    utun4: [iface('100.101.102.103', '255.255.255.255')],
+  };
+  // 本网段的邻居已经被广播覆盖，不用回发
+  assert.equal(shouldReply('192.168.1.99', interfaces), false);
+  assert.equal(shouldReply('10.0.9.9', interfaces), false);
+  // 别的局域网段：回发
+  assert.equal(shouldReply('192.168.11.23', interfaces), true);
+  assert.equal(shouldReply('10.1.2.3', interfaces), true);
+  // 公网：不回
+  assert.equal(shouldReply('8.8.8.8', interfaces), false);
+  // 只有 /32 的 Tailscale 网卡不算覆盖，本机和回环都要回发
+  assert.equal(shouldReply('100.101.102.104', interfaces), true);
+  assert.equal(shouldReply('127.0.0.1', interfaces), true);
+});
+
+test('a probe is not a beacon: old versions drop it, and isProbe only knows probes', () => {
+  assert.equal(parseBeacon(encodeProbe()), null);
+  assert.equal(isProbe(encodeProbe()), true);
+  assert.equal(
+    isProbe(
+      Buffer.from(JSON.stringify({ app: 'dsh-pet', v: 1, id: 'a'.repeat(16), owner: '小王', pet: '小鱼', port: 1 })),
+    ),
+    false,
+  );
+  assert.equal(isProbe(Buffer.from('junk')), false);
+  assert.equal(isProbe(Buffer.from(JSON.stringify({ app: 'dsh-pet', v: 1, probe: 'yes' }))), false);
+  assert.equal(isProbe(Buffer.from(JSON.stringify({ app: 'dsh-pet', v: 2, probe: true }))), false);
+  assert.equal(isProbe(Buffer.from('x'.repeat(600))), false);
+});
+
+test('manual peers are appended to the broadcast targets, not replacing them', async () => {
+  const logs: string[] = [];
+  const b = new Neighborhood({
+    id: 'bbbbbbbb-other',
+    announce: () => ({ owner: '小李', pet: '阿花', port: 2222 }),
+    log: (m) => logs.push(m),
+    port: 0,
+    targets: () => [],
+    intervalMs: 100,
+  });
+  const a = new Neighborhood({
+    id: 'aaaaaaaa-self',
+    announce: () => ({ owner: '小王', pet: '小鱼', port: 1111 }),
+    log: (m) => logs.push(m),
+    port: 0,
+    targets: () => [],
+    peers: () => [{ address: '127.0.0.1', port: b.port() }],
+    intervalMs: 100,
+  });
+  try {
+    await b.start();
+    await a.start();
+    // targets 是空的，照样靠 peers 让 b 听见 a：peers 是追加，不是替换
+    await waitUntil(() => b.list().some((neighbor) => neighbor.id === 'aaaaaaaa-self'), 'b 听到手动填的 a');
+    assert.deepEqual(logs, []);
+  } finally {
+    a.stop();
+    b.stop();
+  }
+});
+
+test('a new manual peer gets a beacon back right away, without waiting for the next interval', async () => {
+  const b = new Neighborhood({
+    id: 'bbbbbbbb-other',
+    announce: () => ({ owner: '小李', pet: '阿花', port: 2222 }),
+    log: () => undefined,
+    port: 0,
+    targets: () => [],
+    // 周期足够长：这一拍只有「新地址立刻回一条」能送到
+    intervalMs: 60_000,
+  });
+  const a = new Neighborhood({
+    id: 'aaaaaaaa-self',
+    announce: () => ({ owner: '小王', pet: '小鱼', port: 1111 }),
+    log: () => undefined,
+    port: 0,
+    targets: () => [],
+    peers: () => [{ address: '127.0.0.1', port: b.port() }],
+    intervalMs: 60_000,
+  });
+  try {
+    await b.start();
+    await a.start();
+    await waitUntil(() => a.list().some((neighbor) => neighbor.id === 'bbbbbbbb-other'), 'a 立刻看到 b', 1_000);
+  } finally {
+    a.stop();
+    b.stop();
+  }
+});
+
+test('a listener that does not host probes its manual peers, sees them, and stays invisible itself', async () => {
+  const b = new Neighborhood({
+    id: 'bbbbbbbb-other',
+    announce: () => ({ owner: '小李', pet: '阿花', port: 2222 }),
+    log: () => undefined,
+    port: 0,
+    targets: () => [],
+    intervalMs: 60_000,
+  });
+  const a = new Neighborhood({
+    id: 'aaaaaaaa-self',
+    announce: () => null,
+    log: () => undefined,
+    port: 0,
+    targets: () => [],
+    peers: () => [{ address: '127.0.0.1', port: b.port() }],
+    intervalMs: 60_000,
+  });
+  try {
+    await b.start();
+    await a.start();
+    await waitUntil(() => a.list().some((neighbor) => neighbor.id === 'bbbbbbbb-other'), 'a 收到 b 的回发');
+    // 探测不进邻居列表：b 看不到不接待的 a
+    await delay(100);
+    assert.deepEqual(b.list(), []);
+  } finally {
+    a.stop();
+    b.stop();
+  }
+});
+
+test('a reply address expires: no more beacons after NEIGHBOR_TTL_MS without hearing from it again', async () => {
+  let clock = 1_000_000;
+  const logs: string[] = [];
+  const b = new Neighborhood({
+    id: 'bbbbbbbb-other',
+    announce: () => ({ owner: '小李', pet: '阿花', port: 2222 }),
+    log: (m) => logs.push(m),
+    port: 0,
+    targets: () => [],
+    intervalMs: 20,
+    now: () => clock,
+  });
+  const listener = createSocket('udp4');
+  let heard = 0;
+  listener.on('message', () => (heard += 1));
+  await new Promise<void>((done) => listener.bind(0, '127.0.0.1', done));
+  try {
+    await b.start();
+    listener.send(encodeProbe(), b.port(), '127.0.0.1', () => {});
+    // 探测到了：立刻回一条，之后每拍也发
+    await waitUntil(() => heard > 0, '收到回发');
+    clock += 20_001;
+    await delay(100); // 让过期后的几拍都跑完
+    heard = 0;
+    await delay(120);
+    assert.equal(heard, 0, '回发名单过期后不再给它发');
+    assert.deepEqual(logs, []);
+  } finally {
+    listener.close();
+    b.stop();
+  }
+});
+
+test('the reply list keeps at most 32 addresses, dropping the one heard from longest ago', async () => {
+  let clock = 1_000_000;
+  const b = new Neighborhood({
+    id: 'bbbbbbbb-other',
+    announce: () => ({ owner: '小李', pet: '阿花', port: 2222 }),
+    log: () => undefined,
+    port: 0,
+    targets: () => [],
+    intervalMs: 20,
+    now: () => clock,
+  });
+  const senders = Array.from({ length: 33 }, () => createSocket('udp4'));
+  const heard = new Array<number>(33).fill(0);
+  senders.forEach((sender, index) => sender.on('message', () => (heard[index] += 1)));
+  for (const sender of senders) await new Promise<void>((done) => sender.bind(0, '127.0.0.1', done));
+  try {
+    await b.start();
+    const probe = async (index: number) => {
+      senders[index].send(encodeProbe(), b.port(), '127.0.0.1', () => {});
+      clock += 1;
+      await delay(5); // 保证按顺序处理
+    };
+    for (let index = 0; index < 32; index += 1) await probe(index);
+    // 第一个又来了一次：它不再是最久没收到的，满了该丢第二个
+    await probe(0);
+    await probe(32);
+    await delay(50); // 排空前面攒下的回发
+    heard.fill(0);
+    await delay(150);
+    assert.equal(heard[1], 0, '最久没收到的被丢掉');
+    assert.ok(heard[0] > 0, '刚又收到过的还在名单里');
+    assert.ok(heard[32] > 0, '最新的还在名单里');
+    assert.ok(heard.filter((count) => count > 0).length >= 31);
+  } finally {
+    for (const sender of senders) sender.close();
+    b.stop();
   }
 });
 

@@ -98,6 +98,7 @@ test('an older file without offWork / visit still loads, keeping its own values 
       stayMin: 10,
       autoAdmitFriends: false,
       notes: true,
+      peers: [],
     });
     assert.deepEqual(warnings, []);
     const visit = { ...DEFAULT_APP_CONFIG.visit, enabled: true };
@@ -134,7 +135,7 @@ test('an older visit section without autoAdmitFriends still loads, filling the d
     writeFileSync(path, JSON.stringify(older));
     const config = createAppConfig(path, (m) => warnings.push(m));
     // 只补 autoAdmitFriends，其余自己设的值不动；补的是 false，升级后不会自动给熟人开门
-    assert.deepEqual(config().visit, { ...older.visit, autoAdmitFriends: false, notes: true });
+    assert.deepEqual(config().visit, { ...older.visit, autoAdmitFriends: false, notes: true, peers: [] });
     assert.deepEqual(warnings, []);
     assert.throws(() =>
       saveAppConfig(path, { ...DEFAULT_APP_CONFIG, visit: { ...older.visit, autoAdmitFriends: 'yes' } }),
@@ -165,7 +166,7 @@ test('an older visit section without notes still loads, filling the default (on)
     writeFileSync(path, JSON.stringify(older));
     const config = createAppConfig(path, (m) => warnings.push(m));
     // 只补 notes，其余自己设的值不动；补的是 true，升级后熟人间捎话默认开着
-    assert.deepEqual(config().visit, { ...older.visit, notes: true });
+    assert.deepEqual(config().visit, { ...older.visit, notes: true, peers: [] });
     assert.deepEqual(warnings, []);
     assert.throws(() => saveAppConfig(path, { ...DEFAULT_APP_CONFIG, visit: { ...older.visit, notes: 'yes' } }));
   } finally {
@@ -186,6 +187,56 @@ test('an older file without cultivation still loads, filling the default (on)', 
     assert.deepEqual(config().cultivation, { enabled: true });
     assert.deepEqual(warnings, []);
     assert.throws(() => saveAppConfig(path, { ...DEFAULT_APP_CONFIG, cultivation: { enabled: 'yes' } }));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an older visit section without peers still loads (empty), and bad peer addresses are rejected', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pet-app-config-'));
+  const path = join(dir, 'app-config.json');
+  const warnings: string[] = [];
+  try {
+    const older = {
+      ...DEFAULT_APP_CONFIG,
+      visit: {
+        enabled: true,
+        hosting: true,
+        visiting: true,
+        chat: true,
+        nickname: '小李',
+        stayMin: 10,
+        autoAdmitFriends: false,
+        notes: true,
+      },
+    };
+    writeFileSync(path, JSON.stringify(older));
+    const config = createAppConfig(path, (m) => warnings.push(m));
+    // 缺 peers：只补空数组，其余自己设的值不动
+    assert.deepEqual(config().visit, { ...older.visit, peers: [] });
+    assert.deepEqual(warnings, []);
+    // 合格的手动邻居照常保存
+    const peers = ['192.168.11.23', '10.0.0.2', '100.64.0.9'];
+    assert.deepEqual(
+      saveAppConfig(path, { ...DEFAULT_APP_CONFIG, visit: { ...older.visit, peers } }).visit.peers,
+      peers,
+    );
+    // 公网 / 格式不对 / 超过 20 项：整份拒绝
+    for (const bad of [
+      ['8.8.8.8'],
+      ['192.168.1'],
+      ['192.168.1.256'],
+      [' 192.168.1.2'],
+      ['::1'],
+      ['localhost'],
+      Array.from({ length: 21 }, (_, index) => `192.168.1.${index + 1}`),
+    ]) {
+      assert.throws(
+        () => saveAppConfig(path, { ...DEFAULT_APP_CONFIG, visit: { ...older.visit, peers: bad } }),
+        Error,
+        JSON.stringify(bad),
+      );
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

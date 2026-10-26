@@ -78,6 +78,8 @@ export const settingsPage = `<!doctype html>
 <p id="notes-note" class="hint">右键「捎话给 X」写一句话，让宠物带给熟人（串门时带给对方主人，家里来熟客时托它带回去）；也只收熟人的捎话。</p>
 <div class="pair"><div><label for="visitNickname">邻居看到的昵称</label><input id="visitNickname" type="text" maxlength="12" placeholder="留空用电脑登录名" spellcheck="false"></div>
 <div><label for="visitStayMin">出门做客待多久（分钟）</label><input id="visitStayMin" type="number" min="1" max="60" step="1" value="10"></div></div>
+<label for="visitPeers">别的网段里的邻居（对方电脑的 IP，一行一个）</label><textarea id="visitPeers" rows="3" spellcheck="false" placeholder="192.168.11.23" aria-describedby="visit-peers-note"></textarea>
+<p id="visit-peers-note" class="hint">在不同网段（比如公司里另一层楼，或有线和 Wi-Fi 分在两个网段）时广播过不去，彼此看不到。填上对方电脑的 IP（在对方的「系统设置 → 网络」里能看到），这台电脑就会把信标直接发过去，对方会回发，所以一边填就够；要被看到的一方得开着「允许别人来我家做客」。对方的 IP 变了要重填。只能填局域网地址（10.x、172.16–31.x、192.168.x，Tailscale 的 100.x 也行）。两边之间的防火墙要放行 UDP 47340 和接待端口；只 ping 得通不算数。</p>
 </div>
 </fieldset>
 <fieldset id="neighbors-settings" hidden><legend>邻居</legend>
@@ -139,9 +141,30 @@ export const settingsScript = `
   // 「陪伴与提醒」「局域网串门」只有独立应用有（/standalone-ai/app-settings）；CLI 里是 404，这两节保持隐藏
   const appSections = [get('app-settings'), get('visit-settings')];
   // 串门的细节开关挂在总开关下面：总开关关着时置灰（值照常保存，再打开时还是原来的选择）
-  const visitDetails = ['visitHosting', 'visitVisiting', 'visitChat', 'visitAutoAdmit', 'visitNotes', 'visitNickname', 'visitStayMin'];
+  const visitDetails = ['visitHosting', 'visitVisiting', 'visitChat', 'visitAutoAdmit', 'visitNotes', 'visitNickname', 'visitStayMin', 'visitPeers'];
   function syncVisitDetails() { for (const id of visitDetails) get(id).disabled = !get('visitEnabled').checked; }
   get('visitEnabled').addEventListener('change', syncVisitDetails);
+  // 手动填的邻居：按空白、中英文逗号、顿号、分号切开，去掉空项并去重；每一项都必须是局域网 IPv4，最多 20 项。
+  // 校验口径与服务端（visit.ts 的 isPeerAddress / PEER_MAX）一致，前端只负责拦住并点名哪一项不对，服务端仍是准绳
+  function peerList() {
+    const items = get('visitPeers').value.split(/[\\s,，、;；]+/u).filter(Boolean);
+    return items.filter((item, index) => items.indexOf(item) === index);
+  }
+  function isPeerAddress(value) {
+    if (!/^(0|[1-9]\\d{0,2})(\\.(0|[1-9]\\d{0,2})){3}$/.test(value)) return false;
+    const parts = value.split('.').map(Number);
+    if (!parts.every(part => part <= 255)) return false;
+    const [a, b] = parts;
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+      (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
+  }
+  function syncVisitPeersValidity() {
+    const peers = peerList();
+    const bad = peers.find(peer => !isPeerAddress(peer));
+    get('visitPeers').setCustomValidity(bad ? '这个不是局域网 IPv4 地址：' + bad
+      : peers.length > 20 ? '最多填 20 个邻居，现在有 ' + peers.length + ' 个' : '');
+  }
+  get('visitPeers').addEventListener('input', syncVisitPeersValidity);
   let appAvailable = false;
   async function appRequest(method, body) {
     const response = await fetch('/standalone-ai/app-settings', {
@@ -174,6 +197,7 @@ export const settingsScript = `
     get('visitNotes').checked = data.visit.notes !== false;
     get('visitNickname').value = data.visit.nickname;
     get('visitStayMin').value = String(data.visit.stayMin);
+    get('visitPeers').value = Array.isArray(data.visit.peers) ? data.visit.peers.join('\\n') : '';
     get('cultivationEnabled').checked = data.cultivation.enabled !== false;
     syncVisitDetails();
   }
@@ -393,6 +417,7 @@ export const settingsScript = `
   }
   form.addEventListener('submit', async event => {
     event.preventDefault();
+    syncVisitPeersValidity();
     if (!form.reportValidity()) return;
     save.disabled = true;
     message('正在保存到本机…');
@@ -420,7 +445,7 @@ export const settingsScript = `
           visit: {
             enabled: get('visitEnabled').checked, hosting: get('visitHosting').checked, visiting: get('visitVisiting').checked,
             chat: get('visitChat').checked, autoAdmitFriends: get('visitAutoAdmit').checked, notes: get('visitNotes').checked,
-            nickname: get('visitNickname').value.trim(), stayMin: num('visitStayMin')
+            nickname: get('visitNickname').value.trim(), stayMin: num('visitStayMin'), peers: peerList()
           },
           cultivation: { enabled: get('cultivationEnabled').checked }
         }));

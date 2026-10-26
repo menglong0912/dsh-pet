@@ -3,8 +3,10 @@
  * 不碰 Electron、不调模型；窗口与说话在 `features.ts` 里接线。
  *
  * 发现：允许别人来做客的桌宠每 BEACON_MS 往本机每块局域网网卡的广播地址发一条 UDP 信标（端口 BEACON_PORT），
- *   只带身份 id（每台电脑固定一对密钥，见 visit-identity.ts）、主人昵称、宠物名与接待端口；收到别人的信标就记成邻居，NEIGHBOR_TTL_MS 没再收到就忘掉。
- *   不接待客人时只听不发：别人看不到自己，自己照样能出门。
+ *   只带身份 id（每台电脑固定一对密钥，见 visit-identity.ts）、主人昵称、宠物名与接待端口；设置里手动填的邻居
+ *   （跨网段用）再单播一份，收到别人的信标或探测时也给不在广播覆盖范围内的地址回发。收到别人的信标就记成邻居，
+ *   NEIGHBOR_TTL_MS 没再收到就忘掉。不接待客人时只听不发：别人看不到自己，自己照样能出门（只给手动填的
+ *   邻居发探测，让对方知道往哪儿回）。
  * 接待：另开一个只处理串门协议的 HTTP 监听——127.0.0.1 上那个本机服务的接口一个也不放到局域网上：
  *   POST /v1/knock { owner, pet, id?, pub?, ts?, sig? }    敲门：挂着等主人在右键菜单里点「让进 / 不让进」，最多 KNOCK_WAIT_MS
  *                                    （带身份的客人另加签名四件套；应答也带上主人家的 id / pub / sig，见 visit-identity.ts）
@@ -35,6 +37,7 @@ import { createSocket } from 'node:dgram';
 import type { Socket } from 'node:dgram';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { isIPv4 } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { z } from 'zod';
@@ -48,6 +51,10 @@ import type { VisitIdentity } from './visit-identity';
 export const BEACON_PORT = 47340;
 const BEACON_MS = 5_000;
 const NEIGHBOR_TTL_MS = 20_000;
+/** 回发名单最多记几个：满了丢最久没收到的那位 */
+const REPLY_MAX = 32;
+/** 设置页手动填的邻居最多几个 */
+export const PEER_MAX = 20;
 /** 敲门最多等主人这么久 */
 export const KNOCK_WAIT_MS = 60_000;
 const KNOCK_COOLDOWN_MS = 30_000;
@@ -236,6 +243,22 @@ export function parseBeacon(raw: Buffer): Beacon | null {
   }
 }
 
+/** 探测：只出门、不接待的一方也能让对方知道「往这儿回」；不带身份、昵称、宠物名 */
+export function encodeProbe(): Buffer {
+  return Buffer.from(JSON.stringify({ app: 'dsh-pet', v: 1, probe: true }), 'utf8');
+}
+
+/** 是不是一条探测（旧版本 parseBeacon 解析失败，直接当垃圾丢掉） */
+export function isProbe(raw: Buffer): boolean {
+  if (raw.length > MAX_BEACON_BYTES) return false;
+  try {
+    const value = JSON.parse(raw.toString('utf8')) as Record<string, unknown> | null;
+    return value?.app === 'dsh-pet' && value.v === 1 && value.probe === true;
+  } catch {
+    return false;
+  }
+}
+
 const ipv4ToInt = (address: string): number => address.split('.').reduce((acc, part) => acc * 256 + Number(part), 0);
 const intToIpv4 = (value: number): string => [24, 16, 8, 0].map((shift) => (value >>> shift) & 255).join('.');
 
@@ -272,6 +295,31 @@ export function isLanAddress(raw: string | undefined): boolean {
   );
 }
 
+/** 设置页手动填的邻居：点分 IPv4（每段 0–255，不带前导零），而且是局域网地址；不合格整份配置拒收 */
+export function isPeerAddress(value: string): boolean {
+  return isIPv4(value) && isLanAddress(value);
+}
+
+/**
+ * 收到对方的信标 / 探测后要不要单播回一条：局域网地址，而且不在本机任何一块「有广播地址」的
+ * IPv4 网卡的网段里（本网段的邻居已经被广播覆盖；回环网卡与 /31、/32 的 VPN 隧道不算覆盖）。
+ */
+export function shouldReply(address: string, interfaces = networkInterfaces()): boolean {
+  const ip = (address ?? '').replace(/^::ffff:/, '');
+  if (!isLanAddress(ip)) return false;
+  // 回环的 IPv6（::1）按本机处理，下面只比 IPv4 网段
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return true;
+  for (const list of Object.values(interfaces)) {
+    for (const item of list ?? []) {
+      if (item.family !== 'IPv4' || item.internal) continue;
+      const mask = ipv4ToInt(item.netmask);
+      if (mask >= 0xfffffffe) continue;
+      if ((ipv4ToInt(item.address) & mask) >>> 0 === (ipv4ToInt(ip) & mask) >>> 0) return false;
+    }
+  }
+  return true;
+}
+
 export interface NeighborhoodOptions {
   /** 串门身份 id（认出自己发的信标） */
   id: string;
@@ -285,7 +333,18 @@ export interface NeighborhoodOptions {
   port?: number;
   /** 信标发往哪些地址（默认每块网卡的广播地址 + BEACON_PORT） */
   targets?: () => Array<{ address: string; port: number }>;
+  /** 设置页手动填的邻居：追加在默认广播地址（或 targets）后面，每次发送时现取 */
+  peers?: () => Array<{ address: string; port: number }>;
+  /** 发信标的间隔（测试用，默认 BEACON_MS） */
+  intervalMs?: number;
   now?: () => number;
+}
+
+/** 回发名单里的一位：收到过对方的信标 / 探测，回发时单播给它 */
+interface ReplyTarget {
+  address: string;
+  port: number;
+  seenAt: number;
 }
 
 export class Neighborhood {
@@ -293,6 +352,7 @@ export class Neighborhood {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSendError = '';
   private readonly neighbors = new Map<string, Neighbor>();
+  private readonly replies = new Map<string, ReplyTarget>();
   private readonly options: NeighborhoodOptions;
 
   constructor(options: NeighborhoodOptions) {
@@ -310,11 +370,11 @@ export class Neighborhood {
       });
     });
     socket.setBroadcast(true);
-    socket.on('message', (raw, info) => this.receive(raw, info.address));
+    socket.on('message', (raw, info) => this.receive(raw, info.address, info.port));
     socket.on('error', (error) => this.options.log(`串门：信标出错：${error.message}`));
     this.socket = socket;
     this.send();
-    this.timer = setInterval(() => this.send(), BEACON_MS);
+    this.timer = setInterval(() => this.send(), this.options.intervalMs ?? BEACON_MS);
   }
 
   stop(): void {
@@ -323,6 +383,7 @@ export class Neighborhood {
     this.socket?.close();
     this.socket = null;
     this.neighbors.clear();
+    this.replies.clear();
   }
 
   /** 实际绑定的信标端口（测试用） */
@@ -345,29 +406,87 @@ export class Neighborhood {
 
   private send(): void {
     const socket = this.socket;
+    if (!socket) return;
+    const now = this.now();
     const self = this.options.announce();
-    if (!socket || !self) return;
-    const payload = encodeBeacon({ id: this.options.id, ...self });
-    const targets = this.options.targets?.() ?? broadcastAddresses().map((address) => ({ address, port: BEACON_PORT }));
-    for (const target of targets) {
-      socket.send(payload, target.port, target.address, (error) => {
-        // 没授权「本地网络」时每一条都会失败：同样的错只记一次，恢复后再出错再记
-        const message = error ? `${target.address}：${error.message}` : '';
-        if (message && message !== this.lastSendError) this.options.log(`串门：信标发不出去 ${message}`);
-        this.lastSendError = message;
-      });
+    // 不接待客人时只听不发：只把手动填的邻居用探测告诉一声，让它们知道「往这儿回」
+    if (!self) {
+      const peers = uniqueTargets(this.options.peers?.() ?? []);
+      if (peers.length === 0) return;
+      const probe = encodeProbe();
+      for (const target of peers) this.sendTo(socket, probe, target);
+      return;
     }
+    this.pruneReplies(now);
+    const payload = encodeBeacon({ id: this.options.id, ...self });
+    const targets = uniqueTargets([
+      ...(this.options.targets?.() ?? broadcastAddresses().map((address) => ({ address, port: BEACON_PORT }))),
+      ...(this.options.peers?.() ?? []),
+      ...[...this.replies.values()].map(({ address, port }) => ({ address, port })),
+    ]);
+    for (const target of targets) this.sendTo(socket, payload, target);
   }
 
-  private receive(raw: Buffer, address: string): void {
+  private sendTo(socket: Socket, payload: Buffer, target: { address: string; port: number }): void {
+    socket.send(payload, target.port, target.address, (error) => {
+      // 没授权「本地网络」时每一条都会失败：同样的错只记一次，恢复后再出错再记
+      const message = error ? `${target.address}：${error.message}` : '';
+      if (message && message !== this.lastSendError) this.options.log(`串门：信标发不出去 ${message}`);
+      this.lastSendError = message;
+    });
+  }
+
+  private receive(raw: Buffer, address: string, port: number): void {
     const beacon = parseBeacon(raw);
-    if (!beacon || beacon.id === this.options.id) return;
-    this.neighbors.set(beacon.id, { ...beacon, address, seenAt: this.now() });
+    if (beacon) {
+      if (beacon.id === this.options.id) return;
+      this.neighbors.set(beacon.id, { ...beacon, address, seenAt: this.now() });
+      this.rememberReply(address, port);
+      return;
+    }
+    // 探测只影响回发名单，不进邻居列表
+    if (isProbe(raw)) this.rememberReply(address, port);
+  }
+
+  /**
+   * 记下「要单播回去」的地址：只记局域网里、不在本机广播覆盖范围内的（收到信标或探测时）。
+   * 新地址立刻回一条信标，免得跨网段的邻居要等下一个 5 秒；已经在名单里的只刷新时间，不额外发。
+   */
+  private rememberReply(address: string, port: number): void {
+    if (!shouldReply(address)) return;
+    const now = this.now();
+    this.pruneReplies(now);
+    const key = `${address}:${port}`;
+    const known = this.replies.delete(key);
+    // 删了再放回去：Map 按放进去的先后排，排头的就是最久没收到的那位，满了从它丢
+    this.replies.set(key, { address, port, seenAt: now });
+    if (known) return;
+    while (this.replies.size > REPLY_MAX) this.replies.delete(this.replies.keys().next().value as string);
+    const socket = this.socket;
+    const self = this.options.announce();
+    if (!socket || !self) return;
+    this.sendTo(socket, encodeBeacon({ id: this.options.id, ...self }), { address, port });
+  }
+
+  /** 丢掉过期（NEIGHBOR_TTL_MS 内没再收到）的回发地址 */
+  private pruneReplies(now: number): void {
+    for (const [key, reply] of this.replies) if (now - reply.seenAt > NEIGHBOR_TTL_MS) this.replies.delete(key);
   }
 
   private now(): number {
     return (this.options.now ?? Date.now)();
   }
+}
+
+/** 按 address:port 去重，保留头一次出现的顺序 */
+function uniqueTargets(targets: Array<{ address: string; port: number }>): Array<{ address: string; port: number }> {
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    const key = `${target.address}:${target.port}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // ---------- 接待 ----------

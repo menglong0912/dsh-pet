@@ -70,6 +70,8 @@ test('settings browser script strips fragment, keeps key write-only and explicit
     listeners: Record<string, (event?: unknown) => Promise<void> | void>;
     addEventListener: (name: string, fn: (event?: unknown) => Promise<void> | void) => void;
     reportValidity: () => boolean;
+    validationMessage: string;
+    setCustomValidity: (message: string) => void;
   };
   const elements = new Map<string, Element>();
   const element = (id: string): Element => {
@@ -85,6 +87,10 @@ test('settings browser script strips fragment, keeps key write-only and explicit
           this.listeners[name] = fn;
         },
         reportValidity: () => true,
+        validationMessage: '',
+        setCustomValidity(message: string) {
+          this.validationMessage = message;
+        },
       });
     return elements.get(id)!;
   };
@@ -182,6 +188,8 @@ test('settings browser script shows and saves the app section when the app serve
     listeners: Record<string, (event?: unknown) => Promise<void> | void>;
     addEventListener: (name: string, fn: (event?: unknown) => Promise<void> | void) => void;
     reportValidity: () => boolean;
+    validationMessage: string;
+    setCustomValidity: (message: string) => void;
   };
   const elements = new Map<string, Element>();
   const element = (id: string): Element => {
@@ -197,7 +205,12 @@ test('settings browser script shows and saves the app section when the app serve
         addEventListener(name, fn) {
           this.listeners[name] = fn;
         },
-        reportValidity: () => true,
+        // 表单的 reportValidity 跟着手动邻居那一项的校验结果走（不合格就拦下保存）
+        reportValidity: () => element('visitPeers').validationMessage === '',
+        validationMessage: '',
+        setCustomValidity(message: string) {
+          this.validationMessage = message;
+        },
       });
     return elements.get(id)!;
   };
@@ -217,6 +230,7 @@ test('settings browser script shows and saves the app section when the app serve
       stayMin: 10,
       autoAdmitFriends: false,
       notes: true,
+      peers: ['192.168.11.23', '10.0.0.2'],
     },
     cultivation: { enabled: true },
   };
@@ -246,9 +260,12 @@ test('settings browser script shows and saves the app section when the app serve
   assert.equal(element('visitEnabled').checked, false);
   assert.equal(element('visitHosting').checked, true);
   assert.equal(element('visitStayMin').value, '10');
+  // 回填：一行一个
+  assert.equal(element('visitPeers').value, '192.168.11.23\n10.0.0.2');
   // 总开关关着：细节开关置灰；打开总开关就能改
   assert.equal(element('visitHosting').disabled, true);
   assert.equal(element('visitStayMin').disabled, true);
+  assert.equal(element('visitPeers').disabled, true);
   element('screenIntervalMin').value = '30';
   element('waterEnabled').checked = false;
   element('offWorkTime').value = '17:30';
@@ -257,10 +274,13 @@ test('settings browser script shows and saves the app section when the app serve
   element('visitEnabled').listeners.change();
   assert.equal(element('visitHosting').disabled, false);
   assert.equal(element('visitStayMin').disabled, false);
+  assert.equal(element('visitPeers').disabled, false);
   element('visitHosting').checked = false;
   element('visitChat').checked = false;
   element('visitNickname').value = ' 小王 ';
   element('visitStayMin').value = '20';
+  // 混合分隔符、重复项：切开、去掉空项、去重后再发
+  element('visitPeers').value = ' 192.168.11.23,10.0.0.2，192.168.11.23、10.0.0.3; 100.64.0.9\n';
   await element('settings').listeners.submit({ preventDefault() {} });
   const post = requests.find(({ url, options }) => url === '/standalone-ai/app-settings' && options.method === 'POST');
   assert.deepEqual(JSON.parse(post?.options.body ?? '{}'), {
@@ -277,8 +297,21 @@ test('settings browser script shows and saves the app section when the app serve
       stayMin: 20,
       autoAdmitFriends: false,
       notes: true,
+      peers: ['192.168.11.23', '10.0.0.2', '10.0.0.3', '100.64.0.9'],
     },
   });
+  // 不合格：拦住保存，提示里点名是哪一项；服务端的 zod 校验仍是准绳
+  const saved = () =>
+    requests.filter(({ url, options }) => url === '/standalone-ai/app-settings' && options.method === 'POST').length;
+  const before = saved();
+  element('visitPeers').value = '192.168.11.23, 8.8.8.8';
+  await element('settings').listeners.submit({ preventDefault() {} });
+  assert.match(element('visitPeers').validationMessage, /8\.8\.8\.8/);
+  assert.equal(saved(), before, '不合格的项没有发出去');
+  element('visitPeers').value = Array.from({ length: 21 }, (_, index) => `192.168.1.${index + 1}`).join('\n');
+  await element('settings').listeners.submit({ preventDefault() {} });
+  assert.match(element('visitPeers').validationMessage, /20/);
+  assert.equal(saved(), before, '超过 20 项也没有发出去');
 });
 
 test('settings browser script edits the first desktop pet and shows one automatic-whisper switch', async () => {
@@ -305,6 +338,10 @@ test('settings browser script edits the first desktop pet and shows one automati
           (this as Element).listeners[name] = fn;
         },
         reportValidity: () => true,
+        validationMessage: '',
+        setCustomValidity(message: string) {
+          this.validationMessage = message;
+        },
       });
     return elements.get(id)!;
   };
@@ -426,6 +463,10 @@ test('settings browser script renders the neighbors section and fires immediate 
           stub.listeners[name] = fn;
         },
         reportValidity: () => true,
+        validationMessage: '',
+        setCustomValidity(message: string) {
+          this.validationMessage = message;
+        },
         appendChild(child) {
           stub.children.push(child);
         },
@@ -567,6 +608,10 @@ test('settings browser script renders the cultivation view and saves its switch 
             stub.listeners[name] = fn;
           },
           reportValidity: () => true,
+          validationMessage: '',
+          setCustomValidity(message: string) {
+            this.validationMessage = message;
+          },
           appendChild(child) {
             stub.children.push(child);
           },
@@ -620,6 +665,7 @@ test('settings browser script renders the cultivation view and saves its switch 
       stayMin: 10,
       autoAdmitFriends: false,
       notes: true,
+      peers: [],
     },
     cultivation: { enabled: true },
   };

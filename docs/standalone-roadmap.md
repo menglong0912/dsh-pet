@@ -4,6 +4,7 @@
 
 - **基线**：`custom` 分支 `fb4ccae`，`npm test` 1093 个全过，typecheck / lint / prettier 干净。
 - **进度**（2026-10-24）：T0–T7 全部完成，经主会话核验（含真机）后已提交到 `custom`，`npm test` 1125 个全过。真机没能验证的项目见 §5。
+- **进度**（2026-10-26）：T8 完成，经主会话核验后提交，`npm test` 1322 个全过。真机验了回发、探测、手动 IP 单播（改配置即时生效）；设置页那一节用无头浏览器加假接口验证。两台不同网段的真电脑见 §5。
 - **路径**：下文代码路径都相对包目录 `dsh-pet/`；仓库根是它的上一级（本文就在根目录的 `docs/` 下）。
 
 ## 0. 范围
@@ -24,6 +25,7 @@
 | T5   | 熟人自动开门、设置页邻居 | T4                 | `app-config.ts`、`app-routes.ts`、`main.ts`、`settings-page.ts`、`features.ts`   | 中   |
 | T6   | 回访与邻居排序           | T4                 | `features.ts`                                                                    | 小   |
 | T7   | 捎话                     | T5                 | `src/app/note-window.ts`（新）、`visit.ts`、`features.ts`、`app-routes.ts`       | 中   |
+| T8   | 跨网段：手动填邻居 IP    | 无                 | `visit.ts`、`app-config.ts`、`settings-page.ts`、`features.ts`、`visit-peer.mjs` | 中   |
 
 **执行顺序**：
 
@@ -33,6 +35,7 @@
 4. T5。
 5. T6。
 6. T7。
+7. T8（2026-10-26 加，不依赖别的任务）。
 
 T5、T6、T7 都改 `features.ts` 里的 `visitActions`，必须串行。
 
@@ -578,6 +581,108 @@ node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev
 - 不是熟人时，菜单里没有捎话这一项。
 - 在小输入窗里用中文输入法打字。
 
+### T8 跨网段：手动填邻居 IP
+
+**现状**：信标只发往本机各网卡的广播地址（`broadcastAddresses`），路由器不转发广播，所以两台电脑在不同网段（比如公司里 192.168.10.x 和 192.168.11.x）时互相看不到。看到之后的敲门、聊天、切磋走 HTTP，接待端只查 `isLanAddress`，跨网段本来就能连。`Neighborhood` 的 `targets` 选项能改发往地址，但它是**替换**广播地址，而且只有测试在用。
+
+**目标**：设置页填上对方电脑的 IP，信标除了照常广播，再单播一份过去；对方回发，所以**一边填就够**，两边都能看到。
+
+**配置**：
+
+- `visit` 加 `peers: string[]`，默认 `[]`，按 §2.1 改三处。
+- 每一项必须是点分 IPv4（每段 0–255），并且 `isLanAddress` 为真；最多 20 项。不合格整份配置 400，不静默丢掉。
+- 校验函数 `isPeerAddress(value)` 放 `visit.ts` 导出并单测，`app-config.ts` 引它（`visit.ts` 的依赖链里没有 `app-config`，不会循环）。
+
+**协议**：
+
+- **信标不变**：内容、端口、字段都不动。
+- **新增探测**：`{ app: 'dsh-pet', v: 1, probe: true }`，不带身份、昵称、宠物名。导出 `encodeProbe()` 和 `isProbe(raw)`。
+  - 用途：只出门、不接待的一方，`announce()` 是 null，不发信标；它也要让对方知道「往这儿回」。
+  - 旧版本收到探测时，`parseBeacon` 解析失败返回 null，直接丢掉，无害。
+
+**`Neighborhood` 的改法**：
+
+- **新选项** `peers?: () => Array<{ address: string; port: number }>`：手动邻居。它**追加**在默认广播地址（或测试注入的 `targets`）后面，不替换。每次发送时现取，设置页改了下一拍生效。
+- **回发名单**：记下「需要单播回去」的地址。
+  - **什么时候记**：收到信标（不是自己的）或探测，并且 `shouldReply(info.address)` 为真时，记下 `{ address: info.address, port: info.port, seenAt }`。`receive` 要拿到 `info.port`：发信标用的就是绑定的那个 socket，源端口就是对方的监听端口。正式环境里是 47340，测试里是随机端口。
+  - **过期**：`NEIGHBOR_TTL_MS` 内没再收到就丢。
+  - **上限**：最多 32 个，满了丢最久没收到的。
+  - **`stop()`**：一并清空。
+- **`shouldReply(address, interfaces = networkInterfaces())`**（纯函数，导出并单测）：`isLanAddress(address)` 为真，并且这个地址不在本机任何一块「有广播地址」的 IPv4 网卡的网段里。
+  - 本网段的邻居已经被广播覆盖，不用回发。
+  - `internal`（回环）网卡和 /31、/32 网卡（VPN 隧道、Tailscale）不算覆盖。所以 `127.0.0.1` 和 Tailscale 的 `100.x` 都要回发；测试和假邻居脚本都靠这一点。
+- **`send()`**：
+  - `announce()` 不是 null 时：信标发往 默认广播（或 `targets`）+ `peers()` + 回发名单里没过期的，按 `address:port` 去重。
+  - `announce()` 是 null 时：只往 `peers()` 发探测。不发广播，不发给回发名单。
+- **新地址立刻回一条**：回发名单里**新加**一个地址、并且 `announce()` 不是 null 时，马上单播一条信标给它，不等下一个 5 秒。已经在名单里的只刷新 `seenAt`，不额外发，免得来回放大。
+- **探测不进邻居列表**：探测只影响回发名单。
+- **测试钩子**：测试里等 5 秒太慢的话，可以加一个只给测试用的 `intervalMs` 选项，照 `port` / `now` 的写法。
+
+**接线（`features.ts`）**：
+
+- `openNeighborhood` 传 `peers: () => deps.appConfig().visit.peers.map((address) => ({ address, port: deps.beacon?.peerPort ?? BEACON_PORT }))`。
+- `FeatureDeps.beacon` 加 `peerPort?: number`，注释写明只给测试用。
+- `features.ts` 只接线，回发、探测、去重都在 `visit.ts` 里。
+
+**设置页（`settings-page.ts`）**：
+
+- 「局域网串门」一节，昵称 / 停留时长那一对下面加一个 `<textarea id="visitPeers" rows="3" spellcheck="false" placeholder="192.168.11.23">`。
+  - 标签：「别的网段里的邻居（对方电脑的 IP，一行一个）」。
+  - 加进 `visitDetails`，跟着总开关变灰。
+- **回填**：`data.visit.peers` 用 `\n` 连起来。
+- **保存**：按空白、英文逗号、中文逗号、顿号、分号切开，去掉空项，去重，发数组。
+- **前端校验**：有不合格的项（不是局域网 IPv4，或者超过 20 项）时，用 `setCustomValidity` 写明是哪一项不对，让 `reportValidity` 拦住保存。服务端的 zod 校验仍是准绳。
+- **说明文字**（`aria-describedby`）：
+
+  > 在不同网段（比如公司里另一层楼，或有线和 Wi-Fi 分在两个网段）时广播过不去，彼此看不到。填上对方电脑的 IP（在对方的「系统设置 → 网络」里能看到），这台电脑就会把信标直接发过去，对方会回发，所以一边填就够；要被看到的一方得开着「允许别人来我家做客」。对方的 IP 变了要重填。只能填局域网地址（10.x、172.16–31.x、192.168.x，Tailscale 的 100.x 也行）。两边之间的防火墙要放行 UDP 47340 和接待端口；只 ping 得通不算数。
+
+**假邻居脚本（`scripts/dev/visit-peer.mjs`）跟着升级**：
+
+- **host 模式**：打印发信标的那个 socket 收到的信标，比如「听到 X 家的信标（回发）」。新版 app 会回发，真机能看到。
+- **新增 `listen` 模式**：扮演只出门、不接待的新版本。每 2 秒往 `127.0.0.1:47340` 发探测，打印收到的信标，10 分钟自动退出。头注释的用法跟着补上。
+
+**§2.2 边界**：
+
+- 信标内容不变。
+- 单播只发往两类地址：设置里填的局域网地址；主动联系过来、并且 `isLanAddress` 的地址。
+- 探测里什么都不带。
+
+**和旧版本互通**：
+
+- 旧版本收到单播信标照常显示，探测直接丢掉。
+- 旧版本不会回发：跨网段时，旧版本能看到新版本、能来做客；新版本看不到旧版本。这是已知限制，不用特判。
+
+**README**：仓库根 `README.md` 「局域网串门」那一格补一句：不在同一网段、广播过不去时，在设置里填上对方电脑的 IP 就能互相看到。手动改，**不要**跑 prettier。
+
+**模型调用**：不增加。
+
+**测试**：
+
+- `visit.test.ts`：
+  - `isPeerAddress`：合格的局域网 IPv4 通过；公网地址、256、首尾带空格、IPv6、主机名、空串都不通过。
+  - `shouldReply`：用假的 `networkInterfaces`。同网段 → false；别的局域网段 → true；公网 → false；本机只有 /32 的 Tailscale 网卡时，`100.x` → true；`127.0.0.1` → true。
+  - 探测：`parseBeacon(encodeProbe())` 是 null（旧版本当垃圾丢掉）；`isProbe` 不认信标、不认垃圾。
+  - `Neighborhood`：
+    - `targets: () => []` 加 `peers: [b]` 时，b 能看到 a（证明是追加，不是替换）。
+    - a 填了 b、b 没填 a，a 很快就能看到 b，不用等 5 秒（立刻回一条）。
+    - a 不接待（`announce` 是 null）、填了 b 时，a 能看到 b；b 的邻居列表里没有 a。
+    - 回发名单过期后不再给它发（用假时钟，必要时配 `intervalMs`）。
+    - 超过 32 个时丢最久没收到的那个。
+- `app-config.test.ts`：旧文件缺 `peers` 时补 `[]`；公网地址、格式不对、超过 20 项都被拒。
+- `src/standalone/settings.test.ts`：
+  - 回填。
+  - 保存时的请求体：混合分隔符、去重。
+  - 不合格的项拦住保存，提示里点名是哪一项。
+  - 总开关关着时变灰。
+- `features.test.ts`：配置里 `peers: ['127.0.0.1']`，`beacon.peerPort` 指向测试自己开的 UDP socket。接待开着时，这个 socket 收到信标；关掉「允许别人来我家做客」后，收到的是探测。
+
+**真机**（主会话做）：
+
+- 真 app 开着串门，跑 `visit-peer host`：脚本打印出 app 回发的信标，右键「串门」里照旧有「去 测试邻居 家」。
+- 跑 `visit-peer listen`：脚本收到 app 的信标；关掉 app 的「允许别人来我家做客」后，就收不到了。
+- 设置页的「别的网段里的邻居」：填一个公网地址被拦住；填合格的地址，保存后 `app-config.json` 里有 `peers`。
+- 两台在不同网段的真电脑：主会话做不了，列进 §5。
+
 ## 4. 想法池（先不排期）
 
 | 想法                     | 说明                                                                                     |
@@ -592,6 +697,7 @@ node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev
 
 - **真鼠标点客人**：T0 做好后一个人就能测——跑 visit 模式让客人进门，用鼠标点粉色客人。
 - **两台真电脑互访**：到现在只在本机测过。公司网络可能拦广播，或者需要授权「本地网络」，这些问题只有两台电脑之间才会暴露。
+- **跨网段**（T8）：两台不同网段的电脑，只在一边填对方的 IP，两边都应当能在右键「串门」里看到对方，并且能互相做客。只出门、不接待的那一边填了对方的 IP，也要能看到对方。
 - **设置页保存**：在 app 里从右键「打开网站」进入设置页，保存一次（走令牌校验）。顺带看一眼 T5 的「邻居」一节：列表、熟人勾选、忘掉、重置身份（令牌只在右键打开时生成，主会话测不到浏览器里的这一节）。
 - **熟人直接请进**（T5）：开着「熟人来敲门直接请进」、人在电脑前时，熟人敲门应当不用点头直接进门。核验时主人一直不在电脑前，只验了「不在时照旧等点头」。
 - **在小输入窗里打字**（T7）：用中文输入法写一句捎话，回车发送；组字时的回车 / Esc 不应发送或关窗。主会话不模拟键盘输入，只验了小窗能弹出、拿到焦点、超时自动关。

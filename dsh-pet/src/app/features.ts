@@ -63,6 +63,7 @@ import { createNoteOpener } from './note-window';
 import { composeWorkStatus, sameStatus } from './status';
 import type { WorkStatus } from './status';
 import {
+  BEACON_PORT,
   cleanText,
   cardFighter,
   knockOn,
@@ -312,7 +313,12 @@ export interface FeatureDeps {
   /** 切磋等客人应战 / 亮随机数的时限（默认 30 秒，超时按客人认输）；只给测试调短用 */
   sparWaitMs?: number;
   /** 信标的端口与发往地址（默认 BEACON_PORT + 每块网卡的广播地址）；只给测试注入用，不往真实网络发 */
-  beacon?: { port?: number; targets?: () => Array<{ address: string; port: number }> };
+  beacon?: {
+    port?: number;
+    targets?: () => Array<{ address: string; port: number }>;
+    /** 手动填的邻居发往哪个端口（默认 BEACON_PORT）；只给测试用 */
+    peerPort?: number;
+  };
   /** 插件路由前缀的完整地址，如 http://127.0.0.1:53624/dsh-pet-7340 */
   petBase: string;
   log: (message: string) => void;
@@ -1049,6 +1055,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       // 端口与发往地址默认照常（BEACON_PORT + 每块网卡的广播地址）；测试里注入成随机的、不往外发
       ...(deps.beacon?.port !== undefined ? { port: deps.beacon.port } : {}),
       ...(deps.beacon?.targets ? { targets: deps.beacon.targets } : {}),
+      // 设置页手动填的邻居：广播之外再单播一份（跨网段用），每次发送时现取，改了下一拍生效
+      peers: () =>
+        deps.appConfig().visit.peers.map((address) => ({ address, port: deps.beacon?.peerPort ?? BEACON_PORT })),
     });
     try {
       await hood.start();

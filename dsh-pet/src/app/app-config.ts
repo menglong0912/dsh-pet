@@ -10,6 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { z } from 'zod';
+import { isPeerAddress, PEER_MAX } from './visit';
 
 const schema = z
   .object({
@@ -57,6 +58,8 @@ const schema = z
         autoAdmitFriends: z.boolean().default(false),
         /** 和熟人互相捎话（主人亲手写的话，只对熟人收发）；比 autoAdmitFriends 晚加，同样缺了按默认补 */
         notes: z.boolean().default(true),
+        /** 别的网段里的邻居（对方电脑的 IP）：信标照常广播，另外单播一份过去；后加的字段，同样缺了按默认补 */
+        peers: z.array(z.string().refine(isPeerAddress)).max(PEER_MAX).default([]),
       })
       .default({
         enabled: false,
@@ -67,6 +70,7 @@ const schema = z
         stayMin: 10,
         autoAdmitFriends: false,
         notes: true,
+        peers: [],
       }),
     /** 修炼；后加的字段，旧文件里没有时按默认值补上（设置页的开关在 X6） */
     cultivation: z
@@ -117,6 +121,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     stayMin: 10,
     autoAdmitFriends: false,
     notes: true,
+    peers: [],
   },
   cultivation: { enabled: true },
 };

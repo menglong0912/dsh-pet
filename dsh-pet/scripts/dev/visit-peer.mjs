@@ -3,12 +3,16 @@
  *
  * host  扮演主人家：开一个接待监听，每 2 秒往 127.0.0.1:47340 发一条信标，真 app 开着串门时右键「串门」里
  *       就会出现「去 测试邻居 家」；app 来敲门时按 --accept 处理（auto 1 秒后让进，ask 等标准输入 y / n），
- *       客人说话回一句固定的话，敲门、说话、告辞这些事都打印出来。
+ *       客人说话回一句固定的话，敲门、说话、告辞这些事都打印出来。新版 app 会往发信标的源端口回一条，
+ *       这个 socket 收到就打印「听到 X 家的信标（回发）」。
+ * listen 扮演只出门、不接待的新版本：每 2 秒往 127.0.0.1:47340 发一条探测（不带昵称、宠物名），
+ *       打印收到的信标；发探测用的 socket 就是收信标的 socket，对方回发到源端口。
  * visit 扮演客人：往真 app 敲门进门（不给 --port 时，从 app.log 最后一条「串门：接待开了，端口 N」里读端口），
  *       进门后每 5 秒报一次平安，收到的事（它家宠物说话、摸一下、一起玩、请吃零食）都打印出来。
  *
  * 用法（参照 dev/mock-server.mjs；strip-types 与 test-register 的说明见 scripts/test-ts-resolver.mjs）：
  *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--identity <路径>|none]
+ *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs listen
  *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]
  *
  * --identity 给了路径才落盘（脚本与真 app 互相验明正身、日志里看 verified 用）；缺省在内存里生成，不写文件；
@@ -33,7 +37,9 @@ import {
   VisitHost,
   cardFighter,
   encodeBeacon,
+  encodeProbe,
   knockOn,
+  parseBeacon,
   randomSparNonce,
   sendNote,
   sendReveal,
@@ -71,11 +77,12 @@ const fakeCard = sparCardOf(fakeFighter, 2);
 
 const USAGE = `用法：
   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--identity <路径>|none]
+  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs listen
   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]`;
 
 function parseArgs(argv) {
   const [mode, ...rest] = argv;
-  if (mode !== 'host' && mode !== 'visit') return null;
+  if (mode !== 'host' && mode !== 'listen' && mode !== 'visit') return null;
   const options = { mode, owner: OWNER_DEFAULT, pet: PET_DEFAULT, accept: 'auto', port: 0, hostId: '', identity: '' };
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i];
@@ -190,9 +197,14 @@ async function runHost(options) {
   print(`接待开了，端口 ${port}`);
   print(`信标每 ${BEACON_MS / 1000} 秒发往 127.0.0.1:${BEACON_PORT}（owner=${options.owner}，pet=${options.pet}）`);
 
-  // 信标只发不收：真 app 在 BEACON_PORT 上听；那边没开串门也没关系，UDP 发出去就不管了
+  // 信标只发不收：真 app 在 BEACON_PORT 上听；那边没开串门也没关系，UDP 发出去就不管了。
+  // 新版 app 会往发信标的源端口回发一条，这个 socket 顺便打印出来（真机看回发用）
   const beacon = createSocket({ type: 'udp4' });
   beacon.on('error', () => {});
+  beacon.on('message', (raw) => {
+    const heard = parseBeacon(raw);
+    if (heard) print(`听到 ${heard.owner} 家的信标（回发）`);
+  });
   const payload = encodeBeacon({
     id: identity ? identity.id : randomUUID(),
     owner: options.owner,
@@ -267,6 +279,30 @@ async function runHost(options) {
         }
     }
   });
+}
+
+// ---------- listen 模式 ----------
+
+/** 扮演只出门、不接待的新版本：只往真 app 的 47340 发探测，等对方回信标 */
+async function runListen() {
+  const socket = createSocket({ type: 'udp4' });
+  socket.on('error', (error) => print(`信标出错：${errorText(error)}`));
+  await new Promise((resolve, reject) => {
+    socket.once('error', reject);
+    socket.bind(0, '127.0.0.1', () => {
+      socket.off('error', reject);
+      resolve();
+    });
+  });
+  socket.on('message', (raw) => {
+    const heard = parseBeacon(raw);
+    if (heard) print(`听到 ${heard.owner} 家的 ${heard.pet}（接待端口 ${heard.port}）`);
+  });
+  print(`只出门、不接待：每 ${BEACON_MS / 1000} 秒往 127.0.0.1:${BEACON_PORT} 发探测，等对方回信标`);
+  const probe = encodeProbe();
+  const sendProbe = () => socket.send(probe, BEACON_PORT, '127.0.0.1', () => {});
+  sendProbe();
+  setInterval(sendProbe, BEACON_MS);
 }
 
 // ---------- visit 模式 ----------
@@ -446,6 +482,7 @@ setTimeout(() => {
 }, AUTO_EXIT_MS);
 try {
   if (options.mode === 'host') await runHost(options);
+  else if (options.mode === 'listen') await runListen();
   else await runVisit(options);
 } catch (error) {
   print(`跑不起来：${errorText(error)}`);
