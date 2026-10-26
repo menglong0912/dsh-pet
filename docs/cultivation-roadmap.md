@@ -574,6 +574,11 @@
 - **这次踩到的新坑**：① 素材的 webm 带 alpha（VP9 alpha），`ffmpeg` 默认只解 RGB——已经抠掉的飞行物在 RGB 里还留着，拿 ffmpeg 量位置会量到「其实透明」的那一颗；量素材得用浏览器解（canvas `getImageData` 读 alpha）。② `fx-preview.mjs` 报 `Target page, context or browser has been closed`、`--out` 目录里 0 帧：收尾时 `Page.screencastFrameAck` 在会话关掉之后才回，未捕获的 promise 直接杀掉进程，帧还没落盘；给 ack 加 `.catch` 就好。③ 无头浏览器里 seek 完立刻截图拿到的是旧帧（要等 `requestVideoFrameCallback`），CDP screencast 还会丢帧（一次 266ms）——挑帧时别把「没抓到」当成「画面没有」。
 - **验证**：`npx prettier --check`（改动文件）、`npm run typecheck`、`npm run lint` 干净；全量测试 **1300/1300**（`--test-force-exit`）。注意本机这套命令要换真 node 跑：DSH 的 shell 里 `node` 是 Electron helper（`ELECTRON_RUN_AS_NODE=1`），`src/host/helper-process.test.ts` 两条「spawn 失败后修复可执行文件重新拉起」会因此失败（它 spawn 的 `process.execPath` 是 Electron，而 helper 会从子进程环境里删掉 `ELECTRON_RUN_AS_NODE`），换 `~/.nvm/versions/node/v24.14.1/bin/node` 就全过——与本次改动无关。
 
+**X8 之后的两次微调**（2026-10-26 11:00，用户提的）：
+
+- **狮子吼的音波越飞越大**：`FX_SIZE.声波` 从 `size 0.22 / grow 0.55` 改成 `0.52 / 0.2`。原来全程只从 29px 长到 49px，看不出「冲击波扩散」；现在起点还是贴着嘴边的 33px，飞到对面 112px（3.4 倍），三道按 180ms 错开时能看出由近到远一圈圈放大。
+- **烟花的轨迹改 `arc`**（原来是 `line`）：`出手-烟花` 是朝上举着烟花筒放的，`line` 会「一出手就往对面身上斜下去」；改成抛物线后先顺着筒口往上冲、划过头顶再落到对面，飞行 620ms（原 380ms），命中时刻跟着往后挪。
+
 ## 4. 主会话的核验清单
 
 照 `standalone-roadmap.md` §6，另外：

@@ -242,7 +242,8 @@ export const ATTACK_SHOW: Record<string, AttackShow> = {
   },
   top: { action: '出手-陀螺', fly: { kind: '陀螺', track: 'ground', hitFx: '命中-旋风', react: '受击-绊脚' } },
   'whale-tail': { action: '出手-鲸尾', fly: { kind: '水浪', track: 'ground', hitFx: '命中-巨浪', react: '受击-湿身' } },
-  firework: { action: '出手-烟花', fly: { kind: '烟花弹', track: 'line', hitFx: '命中-烟花', react: '受击-炸黑' } },
+  // 烟花筒是朝上放的：先往上冲一段、划个弧再落到对面头顶（`line` 会显得一出手就往下打）
+  firework: { action: '出手-烟花', fly: { kind: '烟花弹', track: 'arc', hitFx: '命中-烟花', react: '受击-炸黑' } },
   'lion-roar': {
     action: '战斗-吼',
     fly: { kind: '声波', track: 'line', hitFx: '命中-声震', react: '受击-震耳', count: 3, gapMs: 180 },
