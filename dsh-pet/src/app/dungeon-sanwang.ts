@@ -634,6 +634,10 @@ export const SANWANG: DungeonDef = {
   nodes: SANWANG_NODES,
   layers: SANWANG_LAYERS,
   blessings: SANWANG_BLESSINGS,
+  endings: [
+    { id: 'second-void', name: '第二空窍' },
+    { id: 'ding-xian-you', name: '定仙游' },
+  ],
   lines: {
     retreat: ['你捏碎手里的蛊，一阵天旋地转，人已躺在三叉山下。', '怀里那点东西，还在。'],
     lose: ['福地的裂缝轰然张开，你被大同风吹出三叉山。', '伤得不轻，可已经拿到手的照拿。'],

@@ -48,6 +48,10 @@ import type { Shot, Step } from './battle-show';
 import { arenaScoreboard, openArenaWindow } from './arena-window';
 import { foeStage, homeStage, openFxWindow } from './fx-window';
 import type { FxWindow, Stage } from './fx-window';
+import { AdventureFlow } from './adventure-flow';
+import { createAdventureShows } from './adventure-show';
+import { openAdventureWindow } from './adventure-window';
+import { SANWANG } from './dungeon-sanwang';
 import { ClaudeSessions } from './claude-hooks';
 import { Cultivation, stageLabel } from './cultivation';
 import type { CultivationEvent, CultivationView } from './cultivation';
@@ -119,7 +123,15 @@ import {
   tripRounds,
 } from './visit-talk';
 import type { PlayThing } from './visit-talk';
-import { AWAY_OPACITY, fadeHome, openGuestWindow, RELAY_OPACITY, watchHomePet } from './visit-windows';
+import {
+  AWAY_OPACITY,
+  fadeHome,
+  guestBounds,
+  guestSide,
+  openGuestWindow,
+  RELAY_OPACITY,
+  watchHomePet,
+} from './visit-windows';
 import type { ArenaWindow } from './arena-window';
 import type { GuestWindow, Rect, WindowElectron } from './visit-windows';
 
@@ -138,11 +150,11 @@ const MENU_CULTIVATION_GROUP = '修炼';
 /** 平时打坐的间隔：40–60 分钟随机一次（在电脑前、没出门、没在说话时） */
 const MEDITATE_GAP_MIN = 40;
 const MEDITATE_JITTER_MIN = 20;
-/** 插件每个 owner 最多 20 项（`>` 就整份拒掉、菜单从此不再更新）：根上固定 2 项，修炼最多 4 项
- * （信息 + 渡劫 + 服丹后渡劫 + 心魔试炼／快进；待选二选一那两项只在没圆满时出现），邻居最多列这么多
+/** 插件每个 owner 最多 20 项（`>` 就整份拒掉、菜单从此不再更新）：根上固定 2 项，修炼最多 5 项
+ * （信息 + 历练 + 渡劫 + 服丹后渡劫 + 心魔试炼／快进；待选二选一那两项只在没圆满时出现），邻居最多列这么多
  * （回访占名额）= 恰好 20。家里有客时换成送客 + 切磋 + 一起玩 + 请吃零食 + 熟人 + 捎话，至多 17 项，
  * 加上修炼的项会超 20：wantedLabels 按优先级兜底截断，先少的是尾巴上的零食和捎话。 */
-const MENU_NEIGHBORS_MAX = 14;
+const MENU_NEIGHBORS_MAX = 13;
 /** 宿主每个 owner 的菜单项上限（src/host/menu.ts 的 ITEMS_MAX，`>` 才拒） */
 const MENU_ITEMS_MAX = 20;
 /** 做客时转播回自家的气泡显示多久（窗口同时调亮这么久） */
@@ -340,6 +352,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let diaryCheckedFor: string | null = null;
   let disposed = false;
   let lastStatus: WorkStatus | null = null;
+  /** 历练小窗与流程（Y3）：修炼开着才有；菜单、敲门、出门、退出都看它 */
+  let adventure: AdventureFlow | null = null;
   let lastScreenAt = Date.now();
   let menuLabels: string[] = [];
   let tickTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1091,8 +1105,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     canHost: () => trip === null && knockingOn === null,
     knocked(visitor) {
       log(`串门：${visitor.owner}（${visitor.address}）家的 ${visitor.pet} 来敲门`);
-      // 正在演一场（心魔）：照常接待，先把这场快进结束——客人窗口要站在宠物旁边，不能让两只叠着
+      // 正在演一场（心魔 / 历练）：照常接待，先把这场快进结束——客人窗口要站在宠物旁边，不能让两只叠着
       skipTrial();
+      // 历练小窗也收起：进度都在存档里，客人走了再从菜单接着走
+      adventure?.suspend();
+      adventureShows.closeAll(0);
       // 熟人 + 开了「直接请进」 + 主人在电脑前：不用主人点头（VisitHost.knock 调这里之前就挂好了 pending，同步让进是安全的）
       if (shouldAutoAdmit(neighbors, visitor, deps.appConfig().visit.autoAdmitFriends, tracker.snapshot()?.present)) {
         void say(`熟人 ${visitor.owner} 家的 ${visitor.pet} 来啦，直接请它进来～`);
@@ -1425,6 +1442,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       return;
     }
     if (trip || knockingOn || visitHost?.guest() || visitHost?.knocking() || !deps.appConfig().visit.visiting) return;
+    // 出门前先收起历练小窗；正在打或者正在赶路时不能出门（进度在存档里，等这一趟走完再去）
+    if (adventure && !adventure.beforeTrip()) {
+      await say('这边正打着呢，等这一趟走完再去吧～');
+      return;
+    }
     knockingOn = neighbor;
     void refreshMenu();
     void say(`我去 ${neighbor.owner} 家敲门啦～`);
@@ -1858,6 +1880,82 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     );
   }
 
+  // ---------- 历练（Y3） ----------
+
+  /** 演一场（Y2 对手窗口 + 擂台 + 特效层，速战 / 完整）与收窗口；流程只拿到「演一场」这个 Promise */
+  const adventureShows = createAdventureShows({
+    electron,
+    petBase: deps.petBase,
+    home: homePet.box,
+    openFx: openShowFx,
+    holdPet,
+    releasePet,
+    setBattle: (show) => {
+      battle = show;
+    },
+    refreshMenu: () => void refreshMenu(),
+    playExtra: (anim, options) => void playExtra(anim, options),
+    say: (text, options) => void say(text, options),
+    stageLabel: () => cultivationOn()?.view().label ?? '',
+    disposed: () => disposed,
+    closeHoldMs: CLOSE_HOLD_MS,
+  });
+
+  /** 历练（Y3）：小窗与流程；存读档、演出、宠物动作、模型总结都从外面注入。修炼开着才建（设置里后开的也算） */
+  function ensureAdventure(): AdventureFlow | null {
+    if (adventure) return adventure;
+    const practice = cultivationOn();
+    if (!practice) return null;
+    adventure = new AdventureFlow({
+      def: SANWANG,
+      openWindow: () =>
+        openAdventureWindow(electron, `${new URL(deps.petBase).origin}/app/adventure`, deps.petBase, homePet.box, {
+          prefer: adventurePrefer(),
+        }),
+      fight: adventureShows.fight,
+      skipFight: skipTrial,
+      play: (anim) => void playExtra(anim),
+      say: (text, options) => void say(text, options),
+      compose,
+      getRun: () => practice.adventureRun(),
+      saveRun: (run) => practice.saveRun(Date.now(), run),
+      done: (run, reason) => practice.adventureDone(Date.now(), run, reason),
+      onEvents: (events, now) => onCultivation(now, events, { anim: false }),
+      diary: (text) => diary.note(Date.now(), 'cultivate', text),
+      progress: () => practice.adventureProgress(SANWANG.id),
+      fighter: () => practice.fighter(petName()),
+      stage: () => practice.view().stage,
+      petName,
+      now: () => Date.now(),
+      setTimeout: (callback, ms) => setTimeout(callback, ms),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      random: Math.random,
+      onChange: () => void refreshMenu(),
+    });
+    return adventure;
+  }
+
+  /** 开小窗：存档里有没走完的一趟就接着走 */
+  async function runAdventure(): Promise<void> {
+    const flow = ensureAdventure();
+    if (!flow || trip !== null || hosting !== null) return;
+    await flow.open();
+    void refreshMenu();
+  }
+
+  /** 小窗放宠物哪一边：和对手窗口相反（对手默认站左边，小窗就放右边） */
+  function adventurePrefer(): 'left' | 'right' {
+    const box = homePet.box();
+    if (!box) return 'right';
+    const workArea = electron.screen.getDisplayNearestPoint({
+      x: box.left + box.size / 2,
+      y: box.top + box.size / 4,
+    }).workArea;
+    return guestSide(guestBounds(box, workArea, undefined, { scale: 1, tight: true }), box) === 'left'
+      ? 'right'
+      : 'left';
+  }
+
   // ---------- 心魔试炼（X3 演出） ----------
 
   /**
@@ -2061,7 +2159,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
    * （气血上限 ×1.2，一次最多吃 1 颗）。没在打、没出门、家里没客人时才有，和「心魔试炼」同一口径。
    */
   function tribulationActions(practice: Cultivation, actions: Map<string, () => unknown>): void {
-    if (battle || trip !== null || hosting !== null) return;
+    // 历练小窗开着时不能开心魔试炼和渡劫：先关了小窗再说
+    if (battle || trip !== null || hosting !== null || adventure?.active === true) return;
     const plan = practice.tribulationPlan(Date.now());
     if (!plan) return;
     actions.set(`${MENU_CULTIVATION_GROUP}/渡劫`, () => void runTribulation(false));
@@ -2539,6 +2638,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
           `身法 ${now.stats.agility}、遁速 ${now.stats.speed}，有 ${now.weapons.length} 件法宝～`,
       );
     });
+    // 历练（Y3）：开着修炼才有；存档里有没走完的一趟时带层数
+    if (ensureAdventure()) {
+      const run = practice.adventureRun();
+      actions.set(`${MENU_CULTIVATION_GROUP}/历练${run ? `（第 ${run.layer} 层）` : ''}`, () => void runAdventure());
+    }
     if (view.full) tribulationActions(practice, actions);
     // 二选一：两项「领悟：X」（点了才消失；10 分钟没人挑就由 cultivation 在 tick 里随机定一个）
     if (view.offer) {
@@ -2551,7 +2655,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
     // 心魔试炼：没在打、没出门、家里没客人时才有；打的时候换成「快进」
     if (battle) actions.set(`${MENU_CULTIVATION_GROUP}/快进`, skipTrial);
-    else if (trip === null && hosting === null)
+    else if (trip === null && hosting === null && adventure?.active !== true)
       actions.set(`${MENU_CULTIVATION_GROUP}/心魔试炼`, () => void runTrial());
     return actions;
   }
@@ -2689,6 +2793,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       battle = null;
       closeTrial(0);
       closeTribulationFx(0);
+      // 历练：小窗和这一场的窗口都关掉；run 已经在存档里，不补结算
+      adventure?.dispose();
+      adventureShows.closeAll(0);
       // 在别人家做客：告个辞（不等）；家里的客人窗口关掉
       void comeHome('called');
       if (hosting && hosting.openerTimer !== null) clearTimeout(hosting.openerTimer);

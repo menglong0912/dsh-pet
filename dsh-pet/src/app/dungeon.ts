@@ -323,6 +323,8 @@ export interface DungeonDef {
   nodes: Record<string, NodeDef>;
   layers: LayerDef[];
   blessings: BlessingId[];
+  /** 这个秘境有哪几个结局（小窗上「见过没有」用；不给就只显示见过的编号） */
+  endings?: Array<{ id: string; name: string }>;
   /** 秘境共用的文案 */
   lines: {
     retreat: string[];
@@ -622,6 +624,17 @@ export function reachableNodes(def: DungeonDef, run: Run): string[] {
 /** 这一层要走几步：分支层选一个就走完，线性层要走完 steps 的每一步 */
 function layerSteps(def: DungeonDef, run: Run, layer: LayerDef): number {
   return layer.linear ? layerNodeIds(def, run, layer).length : 1;
+}
+
+/**
+ * 某一层有哪几个节点（小窗画地图用：线性层也要整层的步序，不只是下一步）。
+ * 只看这一层的形状，不改 run；钩子拿到的还是这一趟的状态（「记得」以后大殿的步序会变）。
+ */
+export function layerNodeIdsOf(def: DungeonDef, run: Run, layerIndex: number): string[] {
+  const layer = def.layers.find((item) => item.index === layerIndex);
+  if (!layer) return [];
+  if (layer.linear) return def.rules.steps?.({ ...run, layer: layerIndex, step: 0 }, layer) ?? [];
+  return def.rules.nodes?.({ ...run, layer: layerIndex, step: 0 }, layer) ?? layer.nodes ?? [];
 }
 
 /** 这一场要打的那一只（守护按标记换人） */

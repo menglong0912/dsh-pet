@@ -14,6 +14,8 @@ import { DEFAULT_APP_CONFIG } from './app-config.ts';
 import type { AppConfig } from './app-config.ts';
 import { ANNOUNCE_AFTER_MS } from './claude-hooks.ts';
 import { SKILLS, type Fighter, type SkillId } from './battle.ts';
+import { startRun } from './dungeon.ts';
+import { SANWANG } from './dungeon-sanwang.ts';
 import { swapSides, timeline } from './battle-show.ts';
 import { diaryDate } from './diary.ts';
 import type { DiaryDay } from './diary.ts';
@@ -69,6 +71,7 @@ interface FakeWin {
   focus(): void;
   once(event: 'closed', listener: () => void): void;
   destroy(): void;
+  answerAdv(value: unknown): void;
   webContents: { getURL(): string; executeJavaScript(code: string): Promise<unknown> };
   url: string;
   calls: string[];
@@ -79,6 +82,8 @@ interface FakeWin {
 const windows: FakeWin[] = [];
 
 function fakeWindow(url: string): FakeWin {
+  let advWaiter: ((value: unknown) => void) | null = null;
+  const closedListeners: Array<() => void> = [];
   const win: FakeWin = {
     calls: [],
     destroyed: false,
@@ -97,14 +102,27 @@ function fakeWindow(url: string): FakeWin {
     showInactive: () => undefined,
     show: () => undefined,
     focus: () => undefined,
-    once: () => undefined,
+    once: (_event, listener) => {
+      closedListeners.push(listener);
+    },
     destroy: () => {
       win.destroyed = true;
+      for (const listener of closedListeners.splice(0)) listener();
+    },
+    answerAdv: (value) => {
+      const done = advWaiter;
+      advWaiter = null;
+      done?.(value);
     },
     webContents: {
       getURL: () => win.url,
       executeJavaScript: (code) => {
         win.calls.push(code);
+        if (code === 'adv.wait()') return new Promise((resolve) => (advWaiter = resolve));
+        if (code === 'adv.cancel()') {
+          advWaiter = null;
+          return Promise.resolve(undefined);
+        }
         return Promise.resolve(undefined);
       },
     },
@@ -622,7 +640,7 @@ test('渡劫成功：扛雷演出（无对手窗口）→ 进大境界 → 挂�
       );
       const tail = last(menus)!;
       assert.ok(
-        tail.filter((label) => label.startsWith('修炼/')).length <= 4,
+        tail.filter((label) => label.startsWith('修炼/')).length <= 5,
         `修炼子菜单不超名额：${JSON.stringify(tail)}`,
       );
       clicks.push(`修炼/领悟：${names[0]}`);
@@ -1040,6 +1058,68 @@ test('心魔试炼：第一场的感言在第二场开演以后才回来，就�
       env.memeReplies = [];
       gate.resolve();
     }
+  });
+});
+
+test('历练：菜单里有「修炼/历练」，多了这一项总数仍不超过 20', async () => {
+  await withFeatures({ cultivation: cultivationEarly() }, async (_features, _said, _bodies, _home, { menus }) => {
+    await until(() => menus.some((labels) => labels.includes('修炼/历练')), '历练菜单');
+    assert.ok((last(menus)?.length ?? 0) <= 20, '菜单项不超过宿主上限');
+  });
+});
+
+test('历练：小窗开着时菜单里没有心魔试炼和渡劫，关了小窗再出现', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  await withFeatures(
+    { cultivation: cultivationSeed(), clicks },
+    async (_features, _said, _bodies, _home, { menus }) => {
+      await until(() => (last(menus) ?? []).includes('修炼/渡劫'), '渡劫菜单');
+      await until(() => (last(menus) ?? []).includes('修炼/心魔试炼'), '心魔菜单');
+      clicks.push('修炼/历练');
+      await until(() => windowOn('/app/adventure') !== undefined, '历练小窗');
+      const win = windowOn('/app/adventure')!;
+      await until(
+        () => win.calls.some((code) => code.startsWith('adv.render(') && code.includes('"kind":"entry"')),
+        '入口页',
+      );
+      await until(() => {
+        const latest = last(menus) ?? [];
+        return latest.includes('修炼/历练') && !latest.includes('修炼/心魔试炼') && !latest.includes('修炼/渡劫');
+      }, '小窗开着时藏起心魔与渡劫');
+      win.answerAdv({ kind: 'close' });
+      await until(() => win.destroyed, '小窗关掉');
+      await until(() => {
+        const latest = last(menus) ?? [];
+        return latest.includes('修炼/心魔试炼') && latest.includes('修炼/渡劫');
+      }, '关了小窗，菜单项回来');
+    },
+  );
+});
+
+test('历练：存档里有没走完的一趟，菜单写「修炼/历练（第 N 层）」，点开直接接着走', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const run = startRun(SANWANG, {
+    pet: { name: '阿鱼', hp: 100, power: 10, agility: 10, speed: 10, weapons: [], skills: [] },
+    stage: 8,
+    suppressed: false,
+    nonce: 'resume',
+    now: Date.now(),
+  });
+  run.readyAt = Date.now() - 1;
+  const seed = { ...cultivationSeed(), adventure: { run, cleared: {}, titles: [] } };
+  await withFeatures({ cultivation: seed, clicks }, async (_features, _said, _bodies, _home, { menus }) => {
+    await until(() => (last(menus) ?? []).includes('修炼/历练（第 1 层）'), '带层数的菜单');
+    clicks.push('修炼/历练（第 1 层）');
+    await until(() => windowOn('/app/adventure') !== undefined, '历练小窗');
+    const win = windowOn('/app/adventure')!;
+    await until(
+      () => win.calls.some((code) => code.startsWith('adv.render(') && code.includes('"kind":"run"')),
+      '接着走的一趟',
+    );
+    win.answerAdv({ kind: 'close' });
+    await until(() => win.destroyed, '关掉');
   });
 });
 

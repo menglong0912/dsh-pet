@@ -7,6 +7,7 @@
  *   POST /app/claude-hook   Claude Code hook 的 stdin JSON 原样转进来
  *   GET  /app/guest         串门客人窗口的页面（visit-windows.ts 开的窗口加载它）
  *   GET  /app/foe           历练对手窗口的页面（foe-window.ts 开的窗口加载它）
+ *   GET  /app/adventure     历练小窗的页面（adventure-window.ts 开的窗口加载它）
  *   GET  /app/note          捎话小输入窗的页面（note-window.ts 开的窗口加载它）
  *   GET  /app/arena         擂台小窗的页面（arena-window.ts 开的窗口加载它，对战演出时的两条气血条）
  *   GET  /app/fx            特效层的页面（fx-window.ts 开的窗口加载它，X7 演出时飞在两只中间的飞行物）
@@ -17,6 +18,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { saveAppConfig } from './app-config';
+import { adventurePage } from './adventure-window';
 import { arenaPage } from './arena-window';
 import type { AppConfig } from './app-config';
 import type { AppFeatures } from './features';
@@ -80,6 +82,7 @@ async function handle(
   if (
     pathname === '/app/guest' ||
     pathname === '/app/foe' ||
+    pathname === '/app/adventure' ||
     pathname === '/app/note' ||
     pathname === '/app/arena' ||
     pathname === '/app/fx'
@@ -90,11 +93,13 @@ async function handle(
         ? guestPage
         : pathname === '/app/foe'
           ? foePage
-          : pathname === '/app/note'
-            ? notePage
-            : pathname === '/app/arena'
-              ? arenaPage
-              : fxPage;
+          : pathname === '/app/adventure'
+            ? adventurePage
+            : pathname === '/app/note'
+              ? notePage
+              : pathname === '/app/arena'
+                ? arenaPage
+                : fxPage;
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'content-length': Buffer.byteLength(page),

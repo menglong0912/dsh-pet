@@ -99,7 +99,8 @@ const clearedSchema = z.object({
   sealed: z.boolean().default(false),
 });
 
-type Cleared = z.infer<typeof clearedSchema>;
+/** 某个秘境的通关记录（设置页 / 历练小窗的入口页读它） */
+export type AdventureCleared = z.infer<typeof clearedSchema>;
 
 /** 秘境存档（Y1）：进行中的一趟、各秘境通关记录、称号 */
 const adventureSchema = z
@@ -339,7 +340,7 @@ export class Cultivation {
   /** 进行中的一趟秘境（Y1）；null = 没有 */
   private run: Run | null = null;
   /** 各秘境走完过几次、最高层、守护胜场、结局、压境印章 */
-  private cleared: Record<string, Cleared> = {};
+  private cleared: Record<string, AdventureCleared> = {};
   /** 秘境结局给的称号（去重） */
   private titles: string[] = [];
   /** 读档时发现要补结算的一趟（版本对不上、或者最后一步存下了还没入账）：等下一拍 tick 带着 now 结算 */
@@ -643,6 +644,12 @@ export class Cultivation {
   /** 进行中的一趟（没有就 null） */
   adventureRun(): Run | null {
     return this.run;
+  }
+
+  /** 某个秘境的通关记录（Y3 的入口页用：最好成绩、两种结局见过没有、原著印章） */
+  adventureProgress(id: string): AdventureCleared | null {
+    const found = this.cleared[id];
+    return found ? { ...found, endings: [...found.endings] } : null;
   }
 
   /**
