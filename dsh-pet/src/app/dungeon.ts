@@ -28,7 +28,7 @@ import {
   type MoveId,
   type WeaponId,
 } from './battle';
-import { drawDropWeapon } from './cultivation';
+import { drawDropWeapon } from './drops';
 
 /** 秘境规则版本：秘境规则变了就 +1，旧版本的一趟按撤退结算（任务书 §3 Y0） */
 export const DUNGEON_VERSION = 1;

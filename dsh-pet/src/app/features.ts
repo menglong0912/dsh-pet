@@ -1779,6 +1779,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       } else if (event.kind === 'trial-tired') {
         // 心魔收益随间隔恢复：离上一场不到 10 分钟只给一部分（连点就一点没有），说一声免得以为白打了
         void sayLine(`心魔还没缓过来，这一场收益打了折；再过 ${event.minutes} 分钟打才是满额～`, options);
+      } else if (event.kind === 'title') {
+        // 秘境结局给的称号（Y1 只入账；真正的演出在 Y3 的历练小窗）
+        void sayLine(`得了称号「${event.title}」～`, options);
+        diary.note(now, 'cultivate', `得了称号「${event.title}」`);
       } else {
         // 打赢心魔掉了一件还没有的法宝
         void sayLine(`得到法宝：${WEAPONS[event.weapon].name}～`, options);

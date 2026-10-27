@@ -12,6 +12,18 @@ import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } fro
 import { z } from 'zod';
 import { diaryDate } from './diary';
 import {
+  DUNGEON_VERSION,
+  expired,
+  runSchema,
+  settleByReason,
+  type DungeonDef,
+  type FinishReason,
+  type Loot,
+  type Run,
+} from './dungeon';
+import { SANWANG } from './dungeon-sanwang';
+import { drawDropWeapon } from './drops';
+import {
   SKILLS,
   SKILL_IDS,
   WEAPONS,
@@ -21,6 +33,9 @@ import {
   type SkillId,
   type WeaponId,
 } from './battle';
+
+// 心魔掉法宝的规则搬到 drops.ts（断开 dungeon ⇄ cultivation 的循环），老调用方照旧从这拿
+export { drawDropWeapon };
 
 /** 大境界：名字、小境界名、每个小境界要的修为（炼气九层，之后每个大境界三段） */
 const MAJORS: ReadonlyArray<{ name: string; subs: readonly string[]; req: number }> = [
@@ -61,6 +76,8 @@ const todaySchema = z.object({
   trial: z.number().int().min(0),
   /** 今天切磋算过收益的邻居（同一邻居一天一场，收益每天前 3 场） */
   spars: z.array(z.string().min(1).max(64)).max(16),
+  /** 今天走完了几趟秘境（只给日记和设置页看，不封顶）；旧档没有就当 0 */
+  dungeon: z.number().int().min(0).default(0),
 });
 
 /** 渡劫成功后待选的二选一（X4）：两个招式编号 + 有效期（毫秒时间戳，过期在 tick 里随机定一个） */
@@ -71,6 +88,28 @@ const offerSchema = z.object({
 });
 
 type CultivationOffer = z.infer<typeof offerSchema>;
+
+/** 一个秘境走完过几次、最高到第几层、赢过守护几次、见过哪些结局、压境通关过没有（Y1） */
+const clearedSchema = z.object({
+  runs: z.number().int().min(0).default(0),
+  bestLayer: z.number().int().min(0).default(0),
+  bossWins: z.number().int().min(0).default(0),
+  endings: z.array(z.string().min(1).max(32)).max(16).default([]),
+  /** 压境通关过（小窗上盖「原著印章」） */
+  sealed: z.boolean().default(false),
+});
+
+type Cleared = z.infer<typeof clearedSchema>;
+
+/** 秘境存档（Y1）：进行中的一趟、各秘境通关记录、称号 */
+const adventureSchema = z
+  .object({
+    // run 单独用 runSchema 校验：这里先原样收下，坏了只丢这一趟，不连累整份存档
+    run: z.unknown().nullable().default(null),
+    cleared: z.record(z.string().min(1).max(32), clearedSchema).default({}),
+    titles: z.array(z.string().min(1).max(16)).max(64).default([]),
+  })
+  .default({ run: null, cleared: {}, titles: [] });
 
 const saveSchema = z.object({
   version: z.literal(1),
@@ -86,6 +125,8 @@ const saveSchema = z.object({
   record: z.object({ wins: z.number().int().min(0), losses: z.number().int().min(0) }),
   /** 上一场心魔的时刻（毫秒时间戳，0 = 还没打过）：收益随间隔恢复要用；旧档没有就当没打过 */
   trialAt: z.number().int().nonnegative().default(0),
+  /** 历练（Y1）：旧档没有 adventure，照常读得出来 */
+  adventure: adventureSchema,
 });
 
 export type CultivationSave = z.infer<typeof saveSchema>;
@@ -107,6 +148,8 @@ export type CultivationEvent =
   | { kind: 'rest'; gain: number }
   | { kind: 'pill' }
   | { kind: 'drop'; weapon: WeaponId }
+  /** 秘境结局给的称号（Y1，去重后才发） */
+  | { kind: 'title'; title: string }
   /**
    * 这一笔实际进了账的修为（X3 打完一场要照它冒泡「修为 +30」）。
    * 只在真的加进去时发（amount > 0）：圆满之后多出来的不要、当天不算收益的切磋、离上一场太近一点没恢复的心魔，都不发——
@@ -155,6 +198,8 @@ const REST_WINDOW_MS = 10 * 60_000;
 const MINUTE_MS = 60_000;
 /** 破境丹：库存上限、每天最多炼几颗、每次 Claude 干完活的炼成概率 */
 const PILLS_MAX = 9;
+/** 秘境给的破境丹库存满了以后，多出来的每颗换多少修为（Y1） */
+const PILL_OVERFLOW_XP = 12;
 const PILLS_DAILY_MAX = 3;
 const PILL_CHANCE = 0.2;
 /**
@@ -189,6 +234,9 @@ export const TICK_MAX_ELAPSED_MS = 30_000;
 /** 图鉴删掉 / 改名的法宝：旧编号 → 新编号（X8：气球删了，换成接替它的雪球） */
 const RENAMED_WEAPONS: Record<string, WeaponId> = { balloon: 'snowball' };
 
+/** 现在能走的秘境（Y1 只有三王传承；以后照着加） */
+const DUNGEONS: Record<string, DungeonDef> = { [SANWANG.id]: SANWANG };
+
 /**
  * 读档前先按现在的图鉴迁移（X8）：存档的 zod 校验认图鉴编号，删了的法宝留在档里会整档读不出来、被当成坏档重建。
  * 改了名的换成新编号（已经有了就去掉），其余不认识的法宝 / 招式编号丢掉。`changed` = 动过（要写回）。
@@ -220,11 +268,8 @@ export function migrateCatalog(raw: unknown): { save: unknown; changed: boolean 
   return { save, changed };
 }
 
-/** 掉法宝的品级权重（同 battle-testkit 的成长近似）：凡器 70%、灵器 25%、神器 5% */
-const GRADE_WEIGHT: Record<'凡器' | '灵器' | '神器', number> = { 凡器: 0.7, 灵器: 0.25, 神器: 0.05 };
-
 function emptyToday(date: string): z.infer<typeof todaySchema> {
-  return { date, presence: 0, presenceMs: 0, rests: 0, pills: 0, trial: 0, spars: [] };
+  return { date, presence: 0, presenceMs: 0, rests: 0, pills: 0, trial: 0, spars: [], dungeon: 0 };
 }
 
 /** 「炼气三层」「筑基中期」；full 且是大乘后期时是「大乘圆满」 */
@@ -259,22 +304,6 @@ export function tribulationStrikes(nextStage: number): number {
   return big <= 2 ? 3 : big <= 4 ? 6 : 9;
 }
 
-/**
- * 心魔掉法宝：在还没有的法宝里按品级权重挑（凡器 70%、灵器 25%、神器 5%）。
- * 某个品级已经集齐就把它的权重去掉，其余按比例分；全都集齐返回 null。
- */
-export function drawDropWeapon(owned: WeaponId[], rng: () => number): WeaponId | null {
-  const missing = WEAPON_IDS.filter((id) => !owned.includes(id));
-  if (missing.length === 0) return null;
-  const grades = (Object.keys(GRADE_WEIGHT) as Array<keyof typeof GRADE_WEIGHT>).filter((grade) =>
-    missing.some((id) => WEAPONS[id].grade === grade),
-  );
-  let pickAt = rng() * grades.reduce((sum, grade) => sum + GRADE_WEIGHT[grade], 0);
-  const grade = grades.find((g) => (pickAt -= GRADE_WEIGHT[g]) < 0) ?? grades[grades.length - 1];
-  const pool = missing.filter((id) => WEAPONS[id].grade === grade);
-  return pool[Math.floor(rng() * pool.length)];
-}
-
 /** 灵力 2 / 3 / 4 / 5 各自的权重（合计 12）：见 drawInitialStats */
 const POWER_WEIGHTS = [2, 3, 4, 3];
 
@@ -307,6 +336,14 @@ export class Cultivation {
   private record = { wins: 0, losses: 0 };
   /** 上一场心魔的时刻（0 = 还没打过） */
   private trialAt = 0;
+  /** 进行中的一趟秘境（Y1）；null = 没有 */
+  private run: Run | null = null;
+  /** 各秘境走完过几次、最高层、守护胜场、结局、压境印章 */
+  private cleared: Record<string, Cleared> = {};
+  /** 秘境结局给的称号（去重） */
+  private titles: string[] = [];
+  /** 读档时发现要补结算的一趟（版本对不上、或者最后一步存下了还没入账）：等下一拍 tick 带着 now 结算 */
+  private pendingFinish: { run: Run; reason: FinishReason } | null = null;
   /** 心浮气躁（久坐提醒到主人离开电脑为止）；不落盘，重启就不躁了 */
   private restless = false;
   private lastSitAt = 0;
@@ -347,6 +384,11 @@ export class Cultivation {
       this.today = saved.today;
       this.record = saved.record;
       this.trialAt = saved.trialAt;
+      this.cleared = saved.adventure.cleared;
+      this.titles = saved.adventure.titles;
+      this.restoreRun(saved.adventure.run);
+      // 图鉴迁移 / 丢了一趟：立刻写回，别让旧形状或坏 run 留在文件里
+      if (this.dirty) this.save();
     } else {
       // 第一次建档：drawInitialStats 的初始属性、随机一件凡器、没有招式
       this.stats = drawInitialStats(this.rng);
@@ -379,6 +421,45 @@ export class Cultivation {
       }
       return null;
     }
+  }
+
+  /**
+   * 重开时接回这一趟（Y1）：run 单独用 runSchema 校验，坏了只丢这一趟，不连累整份存档。
+   * 版本对不上按撤退结算（已经拿到的照拿）；内容读不出来丢掉并 warn。
+   * 要补结算的不在这里结：构造时不带 now（本模块不读时钟），记进 pendingFinish，下一拍 tick 带着 now 结。
+   */
+  private restoreRun(raw: unknown): void {
+    if (raw === null || raw === undefined) return;
+    const parsed = runSchema.safeParse(raw);
+    if (!parsed.success) {
+      this.warn(`秘境存档读不了（${parsed.error.message}），这一趟丢了`);
+      this.dirty = true;
+      return;
+    }
+    const run = parsed.data;
+    const def = DUNGEONS[run.dungeon];
+    if (!def) {
+      this.warn(`秘境存档是不认识的秘境 ${run.dungeon}，这一趟丢了`);
+      this.dirty = true;
+      return;
+    }
+    if (run.version !== DUNGEON_VERSION) {
+      this.warn(`秘境存档版本 ${run.version} 对不上（现在 ${DUNGEON_VERSION}），这一趟按撤退结算`);
+      this.pendingFinish = { run, reason: 'retreat' };
+      return;
+    }
+    // 最后一步已经算完、还没来得及 adventureDone 就退出了：重开时补上入账
+    if (run.status === 'over') {
+      const ending = def.rules.ending?.(run) ?? null;
+      const won =
+        ending !== null &&
+        run.layer >= def.layers.length &&
+        (ending.titles.some((title) => run.members.some((member) => member.loot.titles.includes(title))) ||
+          run.members.some((member) => member.id === run.leader && member.hp > 0));
+      this.pendingFinish = { run, reason: won ? 'clear' : 'retreat' };
+      return;
+    }
+    this.run = run;
   }
 
   /** 跨凌晨 4 点换日：各项计数清零，标记下次写入前先备份 */
@@ -431,6 +512,14 @@ export class Cultivation {
     this.rollDay(now);
     // 二选一挂到点：没人挑就随机定一个（§X4）
     const events: CultivationEvent[] = this.expireOffer(now);
+    // 读档时留下的补结算（版本对不上、最后一步没来得及入账）
+    if (this.pendingFinish) {
+      const { run, reason } = this.pendingFinish;
+      this.pendingFinish = null;
+      events.push(...this.completeRun(now, run, reason, false));
+    }
+    // 进了 24 小时还没走完的一趟：按撤退结算（Y1）
+    if (this.run && expired(this.run, now)) events.push(...this.completeRun(now, this.run, 'expired'));
     const raw = this.lastTickAt === null ? 0 : Math.max(0, now - this.lastTickAt);
     // 睡眠 / 合盖后的那一拍间隔很长：最多只计入 maxTickElapsedMs（见常量注释）
     const elapsed = Math.min(raw, this.maxTickElapsedMs);
@@ -538,6 +627,123 @@ export class Cultivation {
     }
     this.save();
     return events;
+  }
+
+  /**
+   * 存下正在走的这一趟（Y1）：每一步推进后写盘，重开时接着这一步。
+   * 先记账再演出：决定算完、结果写进存档，再演给它看；演到一半退出，重开时这一步已经算完。
+   */
+  saveRun(now: number, run: Run): void {
+    this.rollDay(now);
+    this.run = run;
+    this.dirty = true;
+    this.save();
+  }
+
+  /** 进行中的一趟（没有就 null） */
+  adventureRun(): Run | null {
+    return this.run;
+  }
+
+  /**
+   * 一趟走完（Y1）：战利品一次入账，和修为写在同一次存盘里。
+   * `run` 要传 `advance` 收场时返回的那一份（结局的称号和玉简已经并进它的 loot）。
+   */
+  adventureDone(now: number, run: Run, reason: FinishReason): CultivationEvent[] {
+    return this.completeRun(now, run, reason);
+  }
+
+  /**
+   * 一趟的收场：结算战利品、更新通关记录、清掉 run，一次存盘。
+   * @param current 结的是不是正在走的这一趟（读档留下的补结算不是：那时可能已经开了新的一趟，别把它清掉）
+   */
+  private completeRun(now: number, run: Run, reason: FinishReason, current = true): CultivationEvent[] {
+    this.rollDay(now);
+    const def = DUNGEONS[run.dungeon];
+    if (!def) throw new Error(`不认识的秘境：${run.dungeon}`);
+    const events = this.bankLoot(now, settleByReason(def, run, reason));
+    const ending = reason === 'clear' ? (def.rules.ending?.(run) ?? null) : null;
+    const cleared = this.cleared[run.dungeon] ?? {
+      runs: 0,
+      bestLayer: 0,
+      bossWins: 0,
+      endings: [],
+      sealed: false,
+    };
+    cleared.runs += 1;
+    cleared.bestLayer = Math.max(cleared.bestLayer, run.layer);
+    if (reason === 'clear') {
+      cleared.bossWins += 1;
+      if (ending && !cleared.endings.includes(ending.id)) cleared.endings.push(ending.id);
+      if (run.suppressed) cleared.sealed = true;
+    }
+    this.cleared[run.dungeon] = cleared;
+    this.today.dungeon += 1;
+    if (current) this.run = null;
+    this.dirty = true;
+    this.save();
+    return events;
+  }
+
+  /** 战利品入账：修为 → 破境丹 → 法宝 → 功法玉简 → 称号（顺序同任务书 §3 Y1） */
+  private bankLoot(now: number, loot: Loot): CultivationEvent[] {
+    const events: CultivationEvent[] = [];
+    const gained = this.addXp(loot.xp);
+    events.push(...gained.events);
+    if (gained.added > 0) events.unshift({ kind: 'xp', amount: gained.added });
+    for (let i = 0; i < loot.pills; i++) this.addPill(events);
+    for (const weapon of loot.weapons) {
+      if (this.weapons.includes(weapon)) continue;
+      this.weapons.push(weapon);
+      this.dirty = true;
+      events.push({ kind: 'drop', weapon });
+    }
+    for (let i = 0; i < loot.scrolls; i++) this.learnFromScroll(now, events);
+    for (const title of loot.titles) {
+      if (this.titles.includes(title)) continue;
+      this.titles.push(title);
+      this.dirty = true;
+      events.push({ kind: 'title', title });
+    }
+    return events;
+  }
+
+  /** 进一颗破境丹：库存满 9 时多出来的每颗换 +12 修为（Y1） */
+  private addPill(events: CultivationEvent[]): void {
+    if (this.pills < PILLS_MAX) {
+      this.pills += 1;
+      this.dirty = true;
+      events.push({ kind: 'pill' });
+      return;
+    }
+    const gained = this.addXp(PILL_OVERFLOW_XP);
+    const first = events.length;
+    events.push(...gained.events);
+    if (gained.added > 0) events.splice(first, 0, { kind: 'xp', amount: gained.added });
+  }
+
+  /**
+   * 一卷功法玉简（Y1）：还有没学的招式就挂二选一（复用 X4 的 offer）；只剩一门直接领悟；
+   * 已经挂着一个二选一、或者全学会了，换一颗破境丹。
+   */
+  private learnFromScroll(now: number, events: CultivationEvent[]): void {
+    const missing = SKILL_IDS.filter((id) => !this.skills.includes(id));
+    if (this.offer || missing.length === 0) {
+      this.addPill(events);
+      return;
+    }
+    if (missing.length === 1) {
+      const skill = missing[0];
+      this.skills.push(skill);
+      this.dirty = true;
+      events.push({ kind: 'choose', skill });
+      return;
+    }
+    const first = Math.floor(this.rng() * missing.length);
+    const second = (first + 1 + Math.floor(this.rng() * (missing.length - 1))) % missing.length;
+    this.offer = { a: missing[first], b: missing[second], until: now + OFFER_MS };
+    this.dirty = true;
+    events.push({ kind: 'offer', a: this.offer.a, b: this.offer.b });
   }
 
   /**
@@ -710,6 +916,7 @@ export class Cultivation {
       today: this.today,
       record: this.record,
       trialAt: this.trialAt,
+      adventure: { run: this.run, cleared: this.cleared, titles: this.titles },
     };
     try {
       const tmp = `${this.path}.tmp`;

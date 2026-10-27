@@ -4,8 +4,10 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { seededRng } from './battle-testkit.ts';
-import { majorBreaks, statCap, WEAPON_IDS, type SkillId, type WeaponId } from './battle.ts';
+import { majorBreaks, statCap, SKILL_IDS, WEAPON_IDS, type SkillId, type WeaponId } from './battle.ts';
 import { diaryDate } from './diary.ts';
+import { startRun, type Run } from './dungeon.ts';
+import { SANWANG } from './dungeon-sanwang.ts';
 import {
   Cultivation,
   migrateCatalog,
@@ -772,4 +774,336 @@ test('drawDropWeapon picks by grade weight among the missing', () => {
     drawDropWeapon([...WEAPON_IDS], () => 0.999),
     null,
   );
+});
+
+/** 造一趟秘境：从 startRun 起步，再按用例改字段 */
+function runAt(now: number, patch: (run: Run) => void = () => undefined): Run {
+  const run = startRun(SANWANG, {
+    pet: { name: '小鱼', hp: 50, power: 5, agility: 5, speed: 5, weapons: [], skills: [] },
+    stage: 0,
+    suppressed: false,
+    nonce: 'nonce-1',
+    now,
+  });
+  patch(run);
+  return run;
+}
+
+/** 存档里的那趟秘境（读文件，不经过 Cultivation） */
+function savedRun(path: string): unknown {
+  return (JSON.parse(readFileSync(path, 'utf8')) as { adventure: { run: unknown } }).adventure.run;
+}
+
+test('旧档（没有 adventure、today.dungeon）照读，不重建', () => {
+  withPath((path, warns) => {
+    const c = open(path, 5);
+    c.trialDone(at(0), true);
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as { adventure?: unknown; today: { dungeon?: number } };
+    delete raw.adventure;
+    delete raw.today.dungeon;
+    writeFileSync(path, JSON.stringify(raw), 'utf8');
+    const again = new Cultivation(path, (message) => warns.push(message), seededRng(5), 24 * 3_600_000);
+    assert.deepEqual(warns, [], '旧档不当坏档');
+    assert.equal(again.adventureRun(), null);
+    assert.equal(progressOf(path), 30, '修为照旧读得出来');
+    // 下一次写入补上缺的两处
+    again.trialDone(at(0, 13), true);
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as {
+      adventure: unknown;
+      today: { dungeon: number };
+    };
+    assert.deepEqual(saved.adventure, { run: null, cleared: {}, titles: [] });
+    assert.equal(saved.today.dungeon, 0);
+  });
+});
+
+test('一趟走到一半重开 app，run 原样回来', () => {
+  withPath((path) => {
+    const c = open(path, 5);
+    const now = at(0);
+    const run = runAt(now, (r) => {
+      r.layer = 2;
+      r.step = 1;
+      r.path = [1];
+      r.members[0].hp = 31;
+      r.members[0].loot.xp = 8;
+      r.flags.road = 'dog';
+      r.blessings = ['echo'];
+    });
+    c.saveRun(now, run);
+    const again = new Cultivation(path, () => undefined, seededRng(5), 24 * 3_600_000);
+    assert.deepEqual(again.adventureRun(), run);
+    assert.deepEqual(savedRun(path), run, '存档里就是这一份');
+  });
+});
+
+test('adventureDone：修为、破境丹溢出换修为、法宝去重、称号、cleared 一次入账', () => {
+  withPath((path) => {
+    open(path, 5);
+    writeSave(path, { stage: 0, progress: 0, pills: 9, weapons: ['poker'], skills: [] });
+    const c = open(path, 5);
+    const now = at(0);
+    const run = runAt(now, (r) => {
+      r.layer = 5;
+      r.flags.road = 'dog';
+      r.members[0].loot = { xp: 8, pills: 2, weapons: ['poker', 'top'], scrolls: 0, titles: ['第二空窍'] };
+    });
+    const events = c.adventureDone(now, run, 'clear');
+    // 库存满 9：两颗多出来的各换 +12 修为
+    assert.equal(progressOf(path), 8 + 12 + 12);
+    assert.equal(c.view().pills, 9);
+    assert.deepEqual(c.view().weapons, ['扑克牌', '陀螺'], '已有的扑克牌不重复给');
+    assert.deepEqual(
+      events.filter((event) => event.kind === 'drop'),
+      [{ kind: 'drop', weapon: 'top' }],
+    );
+    assert.deepEqual(
+      events.filter((event) => event.kind === 'xp'),
+      [
+        { kind: 'xp', amount: 8 },
+        { kind: 'xp', amount: 12 },
+        { kind: 'xp', amount: 12 },
+      ],
+    );
+    assert.deepEqual(
+      events.filter((event) => event.kind === 'title'),
+      [{ kind: 'title', title: '第二空窍' }],
+    );
+    assert.equal(c.adventureRun(), null);
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as {
+      adventure: { run: unknown; titles: string[]; cleared: Record<string, unknown> };
+      today: { dungeon: number };
+    };
+    assert.equal(saved.adventure.run, null);
+    assert.deepEqual(saved.adventure.titles, ['第二空窍']);
+    assert.deepEqual(saved.adventure.cleared.sanwang, {
+      runs: 1,
+      bestLayer: 5,
+      bossWins: 1,
+      endings: ['second-void'],
+      sealed: false,
+    });
+    assert.equal(saved.today.dungeon, 1);
+    // 压境通关：盖「原著印章」，runs / bossWins 继续累加
+    c.adventureDone(
+      at(0, 13),
+      runAt(at(0, 13), (r) => {
+        r.layer = 5;
+        r.suppressed = true;
+        r.flags.road = 'dog';
+      }),
+      'clear',
+    );
+    const after = JSON.parse(readFileSync(path, 'utf8')) as {
+      adventure: { cleared: Record<string, { runs: number; bossWins: number; sealed: boolean }> };
+      today: { dungeon: number };
+    };
+    assert.equal(after.adventure.cleared.sanwang.runs, 2);
+    assert.equal(after.adventure.cleared.sanwang.bossWins, 2);
+    assert.equal(after.adventure.cleared.sanwang.sealed, true);
+    assert.equal(after.today.dungeon, 2);
+  });
+});
+
+test('功法玉简：挂二选一 / 只剩一门直接领悟 / 全学会了换丹 / 已有二选一换丹', () => {
+  // 还有两门以上没学：挂二选一
+  withPath((path) => {
+    const c = open(path, 5);
+    const offer = pickEvent(
+      c.adventureDone(
+        at(0),
+        runAt(at(0), (r) => {
+          r.members[0].loot.scrolls = 1;
+        }),
+        'retreat',
+      ),
+      'offer',
+    );
+    assert.notEqual(offer.a, offer.b);
+    assert.deepEqual(c.view().offer, { a: offer.a, b: offer.b });
+    assert.deepEqual(c.fighter('我').skills, []);
+    assert.equal(c.view().pills, 0, '没换成丹');
+  });
+  // 只剩一门：直接领悟
+  withPath((path) => {
+    open(path, 5);
+    const last = SKILL_IDS[SKILL_IDS.length - 1];
+    writeSave(path, { skills: SKILL_IDS.slice(0, -1) });
+    const c = open(path, 5);
+    const events = c.adventureDone(
+      at(0),
+      runAt(at(0), (r) => {
+        r.members[0].loot.scrolls = 1;
+      }),
+      'retreat',
+    );
+    assert.deepEqual(pickEvent(events, 'choose'), { kind: 'choose', skill: last });
+    assert.deepEqual(c.fighter('我').skills, [...SKILL_IDS]);
+    assert.equal(c.view().offer, null);
+  });
+  // 全学会了：换一颗破境丹
+  withPath((path) => {
+    open(path, 5);
+    writeSave(path, { skills: [...SKILL_IDS] });
+    const c = open(path, 5);
+    const events = c.adventureDone(
+      at(0),
+      runAt(at(0), (r) => {
+        r.members[0].loot.scrolls = 1;
+      }),
+      'retreat',
+    );
+    assert.equal(events.filter((event) => event.kind === 'pill').length, 1);
+    assert.equal(c.view().pills, 1);
+  });
+  // 已经挂着一个二选一：换一颗破境丹，原来的二选一不动
+  withPath((path) => {
+    open(path, 5);
+    writeSave(path, { offer: { a: SKILL_IDS[0], b: SKILL_IDS[1], until: at(1) } });
+    const c = open(path, 5);
+    const events = c.adventureDone(
+      at(0),
+      runAt(at(0), (r) => {
+        r.members[0].loot.scrolls = 1;
+      }),
+      'retreat',
+    );
+    assert.equal(events.filter((event) => event.kind === 'pill').length, 1);
+    assert.deepEqual(c.view().offer, { a: SKILL_IDS[0], b: SKILL_IDS[1] });
+  });
+});
+
+test('版本对不上的 run 按撤退结算（已经拿到的照拿），读不出来的 run 丢掉，都不连累整份存档', () => {
+  withPath((path, warns) => {
+    open(path, 5);
+    const run = runAt(at(0), (r) => {
+      r.version = 2;
+      r.members[0].loot.xp = 14;
+      r.members[0].loot.weapons = ['top'];
+    });
+    writeSave(path, { stage: 0, progress: 5, weapons: ['poker'], adventure: { run, cleared: {}, titles: [] } });
+    const c = new Cultivation(path, (message) => warns.push(message), seededRng(5), 24 * 3_600_000);
+    assert.equal(c.adventureRun(), null, '旧版本的一趟不再接着走');
+    // 构造时不读时钟：补结算等下一拍 tick 带着 now 结
+    assert.equal(progressOf(path), 5, '读档时还没结');
+    c.tick(at(0), false);
+    assert.equal(progressOf(path), 19, '已经拿到的修为照拿');
+    assert.deepEqual(c.view().weapons, ['扑克牌', '陀螺'], '已经拿到的法宝照拿');
+    assert.ok(
+      warns.some((message) => message.includes('版本')),
+      `该说一声版本对不上：${JSON.stringify(warns)}`,
+    );
+    assert.equal(savedRun(path), null, '结完就把 run 清掉');
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as {
+      adventure: { cleared: Record<string, unknown> };
+    };
+    assert.deepEqual(saved.adventure.cleared.sanwang, {
+      runs: 1,
+      bestLayer: 1,
+      bossWins: 0,
+      endings: [],
+      sealed: false,
+    });
+    assert.ok(!readdirSync(dirname(path)).some((name) => name.includes('.bad-')), '没当坏档重建');
+  });
+  withPath((path, warns) => {
+    const c = open(path, 5);
+    c.trialDone(at(0), true); // 30 修为：验证丢 run 不碰别的
+    writeSave(path, { adventure: { run: { version: 1, dungeon: 'sanwang' }, cleared: {}, titles: [] } });
+    const again = new Cultivation(path, (message) => warns.push(message), seededRng(5), 24 * 3_600_000);
+    assert.equal(again.adventureRun(), null);
+    assert.equal(progressOf(path), 30, '别的字段不受影响');
+    assert.equal(again.view().weapons.length, 1, '法宝也不受影响');
+    assert.ok(
+      warns.some((message) => message.includes('秘境存档读不了')),
+      `该 warn：${JSON.stringify(warns)}`,
+    );
+    assert.equal(savedRun(path), null, '坏 run 从存档里清掉');
+    assert.ok(!readdirSync(dirname(path)).some((name) => name.includes('.bad-')), '没当坏档重建');
+  });
+});
+
+test('进了 24 小时还没走完的一趟，tick 里按撤退结算', () => {
+  withPath((path) => {
+    const c = open(path, 5);
+    const now = at(0);
+    const run = runAt(now, (r) => {
+      r.layer = 2;
+      r.members[0].loot.xp = 8;
+    });
+    run.startedAt = now - 24 * 3_600_000 - 1;
+    c.saveRun(now, run);
+    const events = c.tick(now, false);
+    assert.equal(c.adventureRun(), null);
+    assert.equal(progressOf(path), 8);
+    assert.ok(events.some((event) => event.kind === 'xp' && event.amount === 8));
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as {
+      adventure: { run: unknown; cleared: Record<string, unknown> };
+      today: { dungeon: number };
+    };
+    assert.equal(saved.adventure.run, null);
+    assert.deepEqual(saved.adventure.cleared.sanwang, {
+      runs: 1,
+      bestLayer: 2,
+      bossWins: 0,
+      endings: [],
+      sealed: false,
+    });
+    assert.equal(saved.today.dungeon, 1);
+  });
+});
+
+test('最后一步存下了但没来得及结算，重开时补上入账', () => {
+  withPath((path) => {
+    const c = open(path, 5);
+    const now = at(0);
+    const run = runAt(now, (r) => {
+      r.layer = 5;
+      r.status = 'over';
+      r.flags.road = 'dog';
+      r.members[0].hp = 20;
+      r.members[0].loot = { xp: 24, pills: 0, weapons: [], scrolls: 1, titles: ['第二空窍'] };
+    });
+    c.saveRun(now, run);
+    const again = new Cultivation(path, () => undefined, seededRng(5), 24 * 3_600_000);
+    assert.equal(again.adventureRun(), null, '已经演完的一趟不再挂回来');
+    again.tick(now, false);
+    assert.equal(progressOf(path), 24);
+    assert.ok(again.view().offer, '结局的两卷玉简挂出二选一');
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as {
+      adventure: { cleared: Record<string, unknown>; titles: string[] };
+    };
+    assert.deepEqual(saved.adventure.titles, ['第二空窍']);
+    assert.deepEqual(saved.adventure.cleared.sanwang, {
+      runs: 1,
+      bestLayer: 5,
+      bossWins: 1,
+      endings: ['second-void'],
+      sealed: false,
+    });
+  });
+});
+
+test('读档留下的补结算在 tick 里才结，不会清掉补结算之前新开的那一趟', () => {
+  withPath((path) => {
+    const c = open(path, 5);
+    const now = at(0);
+    c.saveRun(
+      now,
+      runAt(now, (r) => {
+        r.version = 2;
+        r.members[0].loot.xp = 8;
+      }),
+    );
+    const before = progressOf(path);
+    const again = new Cultivation(path, () => undefined, seededRng(5), 24 * 3_600_000);
+    const fresh = runAt(now, (r) => {
+      r.layer = 2;
+    });
+    again.saveRun(now, fresh);
+    again.tick(now, false);
+    assert.equal(progressOf(path), before + 8, '旧的那一趟照样入账');
+    assert.equal(again.adventureRun()?.layer, 2, '新开的这一趟还在');
+    assert.equal((savedRun(path) as { layer: number } | null)?.layer, 2);
+  });
 });
