@@ -107,7 +107,9 @@ if (dungeonFlag >= 0 && process.argv[dungeonFlag + 1] === 'sanwang') {
   console.log(`春秋蝉用了几成 ${((rewinds / runs) * 100).toFixed(1)}%`);
   console.log(`结局 ${JSON.stringify(endings)}`);
   console.log(`平均修为 ${(xp / runs).toFixed(1)}，平均走 ${(steps / runs).toFixed(1)} 步`);
-  console.log(`估算一趟 ${(ms / runs / 60_000).toFixed(1)} 分钟（每步赶路 15 秒 + 速战 10 秒 + 守护 1 分钟）`);
+  console.log(
+    `估算一趟 ${(ms / runs / 60_000).toFixed(1)} 分钟（每步赶路 ${TRAVEL_MS / 1000} 秒 + 速战 10 秒 + 守护 1 分钟）`,
+  );
   process.exit(0);
 }
 

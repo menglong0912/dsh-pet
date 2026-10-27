@@ -303,7 +303,7 @@ test('走完一趟：修为和战利品进存档、宠物出阵、结局页、�
   assert.ok(harness.diaries.some((line) => /闯三王传承/.test(line)));
 });
 
-test('赶路没满 15 秒点不了下一步：小窗在赶路，等主人点的那一手没挂出来', async () => {
+test('赶路没满 5 秒点不了下一步：小窗在赶路，等主人点的那一手没挂出来', async () => {
   const harness = makeFlow({ fighter: BIG });
   for (let step = 0; step < 50 && harness.window.last?.kind !== 'entry'; step += 1) await flush();
   assert.equal(harness.window.last?.kind, 'entry');
@@ -689,7 +689,7 @@ async function toFirstChoice(harness: Harness): Promise<AdventureView> {
   throw new Error('没走到第一个要选的地方');
 }
 
-test('自动走：赶路没满 15 秒不选；满了再过 1.5 秒按 autoDecide 选', async () => {
+test('自动走：赶路没满 5 秒不选；满了再过 1.5 秒按 autoDecide 选', async () => {
   const harness = makeFlow({ fighter: BIG });
   await flush();
   harness.window.answer({ kind: 'toggle-auto', on: true });
@@ -706,7 +706,7 @@ test('自动走：赶路没满 15 秒不选；满了再过 1.5 秒按 autoDecide
   await flush();
   assert.ok(harness.window.last?.run?.map.travel, '差 1 秒还在赶路');
   assert.equal(harness.window.last?.run?.choices.length, 0, '赶路的时候没有选项');
-  assert.equal(harness.saves.length, savesAfterEnter, '没满 15 秒不自动选');
+  assert.equal(harness.saves.length, savesAfterEnter, '没满 5 秒不自动选');
 
   await harness.clock.tick(1);
   await flush();

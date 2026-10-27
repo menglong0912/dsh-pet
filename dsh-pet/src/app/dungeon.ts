@@ -32,8 +32,8 @@ import { drawDropWeapon } from './drops';
 
 /** 秘境规则版本：秘境规则变了就 +1，旧版本的一趟按撤退结算（任务书 §3 Y0） */
 export const DUNGEON_VERSION = 1;
-/** 每一步赶路 15 秒，不能跳过（设计 §7.2：快进只压缩战斗） */
-export const TRAVEL_MS = 15_000;
+/** 每一步赶路 5 秒（`秘境-赶路` 4 秒演完再留一拍），不能跳过（设计 §7.2：快进只压缩战斗） */
+export const TRAVEL_MS = 5_000;
 /** 进了 24 小时还没走完，按撤退结算 */
 export const RUN_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -546,7 +546,7 @@ export type FinishReason = 'clear' | 'lose' | 'retreat' | 'expired';
 export interface StepOutcome {
   /** 这一步的赶路走完的时刻（之前的决定不收） */
   readyAt: number;
-  /** 这一步有没有那 15 秒赶路（Y3 照它播 秘境-赶路 和头像移动） */
+  /** 这一步有没有那 5 秒赶路（Y3 照它播 秘境-赶路 和头像移动） */
   travel: boolean;
   result: OutcomeResult;
   /** 这一步顺带把这一趟走完了：结算原因、战利品和结局（先演完这一步，再到结局页） */
@@ -1401,7 +1401,7 @@ function stepResult(def: DungeonDef, run: Run, now: number, result: OutcomeResul
     run.step = 0;
     if (def.rules.snapshot?.(run, entering) ?? true) run.snapshot = coreOf(run);
   }
-  // 赶路的 15 秒只算在「走一步」上（travel = true）：节点里补点的那一下不再加一次
+  // 赶路的 5 秒只算在「走一步」上（travel = true）：节点里补点的那一下不再加一次
   return { run, outcome: { readyAt: travel ? now + TRAVEL_MS : now, travel, result } };
 }
 

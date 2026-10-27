@@ -33,7 +33,7 @@ import type { Action, Fighter } from './battle.ts';
 const NOW = 0;
 const DEF: DungeonDef = SANWANG;
 
-/** 新开一趟（now 固定 0，赶路要走 15 秒） */
+/** 新开一趟（now 固定 0，赶路要走 5 秒） */
 function fresh(
   seed = 0,
   options: { suppressed?: boolean; pet?: Fighter; stage?: number } = {},
