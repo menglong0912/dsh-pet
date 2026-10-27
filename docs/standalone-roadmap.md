@@ -89,8 +89,11 @@ node --check runtime/electron-helper/<改动的 js>   # eslint 忽略 runtime/ �
 **构建与安装**：这一步会替换用户每天在用的 `/Applications/dsh-pet.app`。
 
 ```sh
-npm run build
-DSH_PET_ELECTRON_DIST="$HOME/Library/Application Support/dsh-desktop/harness/electron" npm run dist
+# 一条命令：打包 → 退出正在运行的 app → 替换 → 打开
+npm run install:mac
+
+# 或者手工分步：
+npm run dist          # 先自动 bundle + build:desktop-core，Electron 用 node_modules/electron/dist
 osascript -e 'quit app "dsh-pet"'
 rm -rf /Applications/dsh-pet.app
 ditto dist-app/mac-arm64/dsh-pet.app /Applications/dsh-pet.app
