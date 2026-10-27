@@ -29,10 +29,6 @@ jobs:
   smoke:
     runs-on: windows-latest
     timeout-minutes: 45
-    defaults:
-      run:
-        # 包在 dsh-pet/ 子目录：所有 run 步骤默认在那里执行
-        working-directory: dsh-pet
 
     steps:
       - name: 检出代码
@@ -66,7 +62,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-smoke-screenshot
-          path: dsh-pet/dist-app/smoke.png
+          path: dist-app/smoke.png
           if-no-files-found: warn
           retention-days: 7
 
@@ -75,6 +71,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-smoke-log
-          path: dsh-pet/dist-app/smoke-app.log
+          path: dist-app/smoke-app.log
           if-no-files-found: ignore
           retention-days: 7

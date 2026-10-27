@@ -19,7 +19,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]  # scripts/assets/ → 仓库根
 SRC = ROOT / "video"
 OUT = ROOT / "step01"
 MASK = SRC / "watermark_mask_v5.mkv"

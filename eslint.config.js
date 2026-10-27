@@ -9,7 +9,19 @@ export default tseslint.config(
   // dist-app：electron-builder 产物（含随 .app 放在 asar 外的 pet-cli.mjs 副本）
   // .zcode：workflow 会话在本目录落的工作产物（git 已忽略，不是仓库代码）——
   //   不排除的话 `eslint .` 会把里面的 .mjs 当代码 lint，npm run lint 就红了（2026-10-25 实际发生过）
-  { ignores: ['lib/**', 'scripts/**', 'assets/**', 'runtime/**', 'node_modules/**', 'dist-app/**', '.zcode/**'] },
+  // tools：仓库根的开发小工具（DPI 探针 .cjs、透明 WebM 预览页），D11 摊平前就不在 lint 范围内
+  {
+    ignores: [
+      'lib/**',
+      'scripts/**',
+      'assets/**',
+      'runtime/**',
+      'node_modules/**',
+      'dist-app/**',
+      '.zcode/**',
+      'tools/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

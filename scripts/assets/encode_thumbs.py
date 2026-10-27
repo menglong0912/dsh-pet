@@ -9,7 +9,7 @@
   → step03（母版）→ 本脚本 → step04（360x360 播放变体）
 
 step04 是素材处理链的最终产物。发布/安装插件时把 step04 的内容
-同步到 dsh-pet/assets/thumb/（npm 包需要自包含的播放资源）。
+同步到 assets/thumb/（npm 包需要自包含的播放资源）。
 
 为什么需要转码：
 - 播放时宠物只显示约 260px，360 分辨率已足够清晰，1200 是 4.6 倍冗余
@@ -27,7 +27,7 @@ import subprocess
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]  # scripts/assets/ → 仓库根
 SRC = ROOT / "step03"
 OUT = ROOT / "step04"
 # 统一使用工作区自带的 ffmpeg（素材处理链零第三方依赖）

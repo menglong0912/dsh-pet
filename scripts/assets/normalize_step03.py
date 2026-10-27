@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]  # scripts/assets/ → 仓库根
 SRC = ROOT / "step02"
 OUT = ROOT / "step03"
 # 统一使用工作区自带的 ffmpeg（素材处理链零第三方依赖）

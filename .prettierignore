@@ -7,4 +7,10 @@ pnpm-lock.yaml
 pnpm-workspace.yaml
 # 打包产物与一次性冒烟原型：都是生成物，不参与格式检查
 dist-app
-.smoke-app
+.smoke-app# D11 摊平后从仓库根并进来的文档、提示词、工具和 CI 配置：摊平前不在格式检查范围内，保持原样
+.github
+docs
+prompts
+README.md
+tools
+.zcode

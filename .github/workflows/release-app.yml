@@ -44,10 +44,6 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 30
-    defaults:
-      run:
-        # 包在 dsh-pet/ 子目录：所有 run 步骤默认在那里执行
-        working-directory: dsh-pet
 
     steps:
       - name: 检出目标 tag 的代码
@@ -148,8 +144,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # zip 打在仓库根（GITHUB_WORKSPACE），而本 job 的 run 步骤默认 cwd 是 dsh-pet/：
-          # 必须用绝对路径，否则 gh 会报 no matches found（实测踩过）。
+          # zip 打在仓库根（GITHUB_WORKSPACE）：用绝对路径，不依赖 run 步骤的 cwd
+          # （以前包在子目录时用相对路径踩过 gh 报 no matches found）。
           $zip = Join-Path $env:GITHUB_WORKSPACE 'dsh-pet-win-x64.zip'
           if (-not (Test-Path $zip)) { Write-Error "找不到待上传的 zip：$zip"; exit 1 }
           "上传 {0}（{1:N1} MB）→ release {2}" -f $zip, ((Get-Item $zip).Length / 1MB), $env:TAG
