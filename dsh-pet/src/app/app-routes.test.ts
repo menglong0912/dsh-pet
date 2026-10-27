@@ -209,7 +209,7 @@ test('/app/arena 回擂台页面（X3）、/app/fx 回特效层页面（X7）：
       }
     },
     async (base) => {
-      for (const page of ['/app/guest', '/app/note', '/app/arena', '/app/fx']) {
+      for (const page of ['/app/guest', '/app/foe', '/app/note', '/app/arena', '/app/fx']) {
         const got = await fetch(base + page);
         assert.equal(got.status, 200, page);
         assert.match(got.headers.get('content-type') ?? '', /text\/html/, page);
@@ -220,6 +220,8 @@ test('/app/arena 回擂台页面（X3）、/app/fx 回特效层页面（X7）：
       }
       // /app/fx 回的就是特效窗口的页面（fx-window.ts 的 fxPage）
       assert.match(await (await fetch(`${base}/app/fx`)).text(), /window\.fx = \{/);
+      // /app/foe 回的就是对手窗口的页面（foe-window.ts 的 foePage）
+      assert.match(await (await fetch(`${base}/app/foe`)).text(), /window\.foe = \{/);
       // 网页来源照旧拒绝（这几个页面都不例外）
       const web = await fetch(`${base}/app/arena`, { headers: { origin: 'https://evil.example' } });
       assert.equal(web.status, 403);

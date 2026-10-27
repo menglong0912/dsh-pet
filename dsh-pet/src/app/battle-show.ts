@@ -32,7 +32,7 @@
  * 台词气泡**一律不联动说话动画**（`anim: false` 由调用方保证——X2 真机踩过：带 anim 的气泡会顶掉
  * 正在播的动画），时长给成一步那么长（`LINE_MS`），下一句自然顶替上一句。
  */
-import { WEAPONS, type Action, type BattleEvent, type SkillId } from './battle';
+import { MOVES, WEAPONS, type Action, type BattleEvent, type MoveId, type SkillId } from './battle';
 import { lineOf } from './battle-lines';
 import { ANIM_RATE_MAX, ANIM_RATE_MIN } from '../host/anim';
 
@@ -100,6 +100,8 @@ const ANIM_MS: Record<string, number> = {
   // 渡劫失败那一下（X4）：动画池里的现有素材，4.9 秒（名字形态播，见 TRIBULATION_LOSS_ANIM）
   '工作状态-垂头叹气冒汗': 5_000,
   '招式-假死遁': 5_000,
+  // 白凝冰的绝招是 5 秒（YA 素材清单里唯一一段 5 秒的对手动作）
+  '对手-白凝冰-绝招': 5_000,
 };
 /** 表里没列的都是 4 秒 */
 const DEFAULT_ANIM_MS = 4_000;
@@ -128,7 +130,17 @@ const REACTION_WINDUP_MS: Record<string, number> = {
   '战斗-闪避': 500,
   '招式-化鸽遁': 700,
   '招式-泡泡护体': 1_400,
+  // 对手动作（Y2）：受击前摇按 YA 素材「量出来的时刻」；熔岩鳄、他派蛊师复用狮獒 / 韩不留
+  '对手-野狗-受击': 125,
+  '对手-红蛋人-受击': 125,
+  '对手-狮獒-受击': 292,
+  '对手-韩不留-受击': 83,
+  '对手-铁若男-受击': 208,
+  '对手-白凝冰-受击': 208,
 };
+
+/** 没量过的对手动作的兜底前摇（新对手先用它；CSS 兜底的那一下也用同一个口径） */
+const FOE_WINDUP_MS = 150;
 
 /** 飞行轨迹（§X7）：直飞 / 抛物线 / 贴地 / 慢飘 / 高抛砸落 / 天雷（乌云 + 闪电，渡劫用）/ 回旋（银托盘，X8） */
 export type FxTrack = 'line' | 'thrust' | 'arc' | 'ground' | 'float' | 'slam' | 'bolt' | 'boomerang';
@@ -163,6 +175,14 @@ export type FxAssetName =
   | '墨汁'
   | '水母'
   | '灵光'
+  // 历练（Y2）：一转蛊和对手招式的飞行物
+  | '犬影'
+  | '纸鹤'
+  | '爆蛋'
+  | '金针'
+  | '金色飞刀'
+  | '冰刃'
+  | '碧光'
   // 命中
   | '命中-星'
   | '命中-水花'
@@ -292,18 +312,58 @@ export const ATTACK_SHOW: Record<string, AttackShow> = {
   'shadow-fists': { action: '战斗-连拳', fly: { kind: '拳影', track: 'line', hitFx: '命中-星', count: 5, gapMs: 100 } },
 };
 
+/**
+ * 招式表（Y0 的 `MOVES`）的演出：宠物用的一转蛊复用现有出手素材；对手招式换成它自己的皮
+ * （`foe` 决定播「出手」还是「绝招」，一场一次的那招是绝招），飞行物优先用 YA 的新贴图。
+ */
+export interface MoveShow {
+  /** 宠物自己用这招时播的出手素材（一转蛊） */
+  action?: string;
+  /** 对手用这招时播它自己的哪个动作；不给 = 出手 */
+  foe?: '出手' | '绝招';
+  /** 飞行物：不给 = 没有（作用在自己身上的招） */
+  fly?: Fly;
+}
+
+export const MOVE_SHOW: Record<MoveId, MoveShow> = {
+  // 一转蛊（宠物用；同一段出手素材也用在对手的皮上）
+  'gu-dogs': {
+    action: '出手-召唤灵兽',
+    // 按狗数齐发：每段一只，同一时刻放出（gapMs = 0），不是一串连发
+    fly: { kind: '犬影', track: 'line', hitFx: '命中-斩', gapMs: 0 },
+  },
+  'gu-crane': { action: '出手-扑克牌', fly: { kind: '纸鹤', track: 'line', hitFx: '命中-羽毛' } },
+  'gu-egg': { action: '出手-雪球', fly: { kind: '爆蛋', track: 'arc', hitFx: '命中-烟花', react: '受击-炸黑' } },
+  // 对手招式
+  'dog-bite': { foe: '出手', fly: { kind: '犬影', track: 'line', hitFx: '命中-斩', gapMs: 120 } },
+  'egg-burst': { foe: '出手', fly: { kind: '爆蛋', track: 'arc', hitFx: '命中-烟花', react: '受击-炸黑' } },
+  'mastiff-maul': { foe: '出手', fly: { kind: '拳风', track: 'line', hitFx: '命中-星' } },
+  'han-dogs': { foe: '出手', fly: { kind: '犬影', track: 'line', hitFx: '命中-斩', gapMs: 90 } },
+  'moon-blade': { foe: '出手', fly: { kind: '剑光', track: 'line', hitFx: '命中-剑痕' } },
+  'gold-needle': { foe: '出手', fly: { kind: '金针', track: 'line', hitFx: '命中-斩', gapMs: 120 } },
+  // 一场一次：金色飞刀、北冥冰魄爆发都按「绝招」播（对手素材清单里只有白凝冰有绝招，其余退回 CSS 动作）
+  'gold-blade': { foe: '绝招', fly: { kind: '金色飞刀', track: 'thrust', hitFx: '命中-斩' } },
+  'ice-blade': { foe: '出手', fly: { kind: '冰刃', track: 'line', hitFx: '命中-雪花', gapMs: 100 } },
+  frost: { foe: '出手', fly: { kind: '雪球', track: 'line', hitFx: '命中-雪花' } },
+  bingpo: { foe: '绝招', fly: { kind: '冰刃', track: 'slam', hitFx: '命中-雪花' } },
+};
+
 /** 渡劫的一道雷（X7 第二步）：乌云 + 闪电从渡劫者头顶劈下，劈中播触电 */
 export const TRIBULATION_FLY: Fly = { kind: '闪电', track: 'bolt', hitFx: '命中-电光', react: '修炼-触电' };
 
 /** 这套表要用到的全部贴图（特效窗口开窗时预加载）：从表里取，不另抄一份清单；乌云是天雷那一发顺带画的 */
 export const FX_ASSETS: FxAssetName[] = Array.from(
   new Set<FxAssetName>([
-    ...[...Object.values(ATTACK_SHOW).map((show) => show.fly), TRIBULATION_FLY].flatMap((fly) =>
-      fly ? [fly.kind, fly.hitFx] : [],
-    ),
+    ...[
+      ...Object.values(ATTACK_SHOW).map((show) => show.fly),
+      ...Object.values(MOVE_SHOW).map((show) => show.fly),
+      TRIBULATION_FLY,
+    ].flatMap((fly) => (fly ? [fly.kind, fly.hitFx] : [])),
     // 魂屑（X9）：万我的 `mirror` 事件和魂牵梦绕的命中都用它，不在出手表的飞行物里
     '命中-魂碎',
     '乌云',
+    // 定仙游的碧芒（Y2 素材清单）：不在出手表里，开窗时一并预取
+    '碧光',
   ]),
 );
 
@@ -322,6 +382,8 @@ export const SHOW_ANIMS: string[] = Array.from(
     DOVE_ANIM,
     PLAY_DEAD_ANIM,
     ...Object.values(ATTACK_SHOW).flatMap((show) => [show.action, ...(show.fly?.react ? [show.fly.react] : [])]),
+    // 一转蛊复用现有出手素材（Y2）：预取清单也要带上
+    ...Object.values(MOVE_SHOW).flatMap((show) => (show.action ? [show.action] : [])),
   ]),
 );
 
@@ -360,7 +422,25 @@ export const RELEASE: Record<string, { ms: number; hand: [number, number]; catch
   '出手-魂牵梦绕': { ms: 1_600, hand: [305, 200] },
   // 五指拳心剑：拳头举到头顶上方、停住的那一刻，剑光从拳心射出（实测 2.3 秒起拳心停在 272,92）（X9）
   '出手-拳心剑': { ms: 2_300, hand: [272, 92] },
+  // 对手动作（Y2）：离手时刻与手的位置按 YA 素材「量出来的时刻」填；熔岩鳄、他派蛊师复用狮獒 / 韩不留，
+  // 调用方把它们的动画前缀传成被复用的那只
+  '对手-野狗-出手': { ms: 1_833, hand: [0, 250] },
+  '对手-红蛋人-出手': { ms: 1_292, hand: [94, 168] },
+  '对手-狮獒-出手': { ms: 2_292, hand: [112, 167] },
+  '对手-韩不留-出手': { ms: 1_167, hand: [198, 196] },
+  '对手-铁若男-出手': { ms: 1_208, hand: [130, 204] },
+  '对手-白凝冰-出手': { ms: 1_417, hand: [200, 140] },
+  // 白凝冰的绝招（北冥冰魄爆发）以手的位置为准，冰枪已从素材里擦掉，交给特效层画
+  '对手-白凝冰-绝招': { ms: 2_583, hand: [196, 160] },
 };
+
+/** 对手动作的兜底出手时刻：新对手还没量过时先用它，量好了再往 RELEASE 里加 */
+const FOE_RELEASE: { ms: number; hand: [number, number] } = { ms: 1_500, hand: [180, 200] };
+
+/** 一段出手素材的出手时刻（对手的动作用统一兜底） */
+function releaseOf(action: string): { ms: number; hand: [number, number]; catchMs?: number } | undefined {
+  return RELEASE[action] ?? (action.startsWith('对手-') ? FOE_RELEASE : undefined);
+}
 
 /** 一段素材按这个倍速播完要多久 */
 export function animLength(anim: string, rate: number): number {
@@ -379,13 +459,13 @@ export function actionRate(action: string): number {
 
 /** 离手比动作起播晚多久：原速的出手时刻 ÷ 倍速（倍速把素材压进格子，离手的真实时刻也跟着压缩） */
 export function releaseOffset(action: string): number {
-  const entry = RELEASE[action];
+  const entry = releaseOf(action);
   return entry ? Math.round(entry.ms / actionRate(action)) : 0;
 }
 
 /** 银托盘放出后多久飞回手里：素材里接住的那一刻 − 离手那一刻（都按倍速换算） */
 function boomerangTotalMs(action: string): number {
-  const entry = RELEASE[action];
+  const entry = releaseOf(action);
   return entry?.catchMs ? Math.round((entry.catchMs - entry.ms) / actionRate(action)) : BOOMERANG_TOTAL_MS;
 }
 
@@ -406,7 +486,8 @@ function reactRate(anim: string): number {
 
 /** 反应起播比命中时刻提前多久（原速前摇 ÷ 倍速） */
 export function windupOf(anim: string): number {
-  return Math.round((REACTION_WINDUP_MS[anim] ?? 0) / reactRate(anim));
+  const windup = REACTION_WINDUP_MS[anim] ?? (anim.startsWith('对手-') ? FOE_WINDUP_MS : 0);
+  return Math.round(windup / reactRate(anim));
 }
 
 /** 一发飞行物（X7）：执行器到点交给特效窗口，坐标由窗口按两只的舞台矩形算（时间线只算时刻） */
@@ -489,18 +570,59 @@ function isDamageOnFoe(event: BattleEvent): boolean {
 }
 
 /**
- * 出手在 `ATTACK_SHOW` 里的键：`Action` 的编号（空手 = unarmed）。
- * 招式（Y0 的 `move`）暂时没有自己的演出表，按空手演（adventure-roadmap §3 Y0 第 7 条）。
+ * 这一手在演出表里的条目：法宝 / 招式查 `ATTACK_SHOW`；招式表（Y0 的 `move`）查 `MOVE_SHOW`。
+ * 对手用招式表里的招时换成它自己的皮（`<前缀>-出手` / `<前缀>-绝招`），没有对手窗口时退回空手。
  */
-function showKeyOf(action: Action): string {
-  if (action.kind === 'weapon') return action.weapon;
-  if (action.kind === 'skill') return action.skill;
-  return 'unarmed';
+function showOf(action: Action, who: 0 | 1, prefix?: string): AttackShow {
+  if (action.kind === 'move') {
+    const show = MOVE_SHOW[action.move];
+    if (who === 1 && prefix) {
+      const kind = show.foe ?? (MOVES[action.move].uses === 1 ? '绝招' : '出手');
+      return { action: `${prefix}-${kind}`, ...(show.fly ? { fly: show.fly } : {}) };
+    }
+    if (show.action) return { action: show.action, ...(show.fly ? { fly: show.fly } : {}) };
+    return ATTACK_SHOW.unarmed;
+  }
+  const key = action.kind === 'weapon' ? action.weapon : action.kind === 'skill' ? action.skill : 'unarmed';
+  return ATTACK_SHOW[key];
 }
 
-/** 一次出手放几段伤害（扑克牌两张、三球三个，各自独立判定命中）；非法宝是一发 */
-function hitsOf(action: Action): number {
-  return action.kind === 'weapon' ? WEAPONS[action.weapon].hits : 1;
+/**
+ * 一次出手放几段伤害：法宝看 `hits`；驭犬蛊的段数 = 那一群狗（`Fighter.pack`，引擎不把 pack 写进事件，
+ * 这里从这一格后面的命中 / 闪避 / 替挡数出来）；其余一招一发。
+ */
+function hitsOf(action: Action, events: BattleEvent[], decideIndex: number): number {
+  if (action.kind === 'weapon') return WEAPONS[action.weapon].hits;
+  if (action.kind !== 'move' || !MOVES[action.move].packHits) return 1;
+  let hits = 0;
+  for (let j = decideIndex + 1; j < events.length; j += 1) {
+    const kind = events[j].kind;
+    // 狗全部放完以后才是追击 / 灵兽 / 收场，那些不算段数
+    if (kind === 'decide' || kind === 'end' || kind === 'combo' || kind === 'beast' || kind === 'counter') break;
+    if (
+      kind === 'hit' ||
+      kind === 'dodge' ||
+      kind === 'miss' ||
+      kind === 'decoy' ||
+      kind === 'mirror' ||
+      kind === 'guard'
+    )
+      hits += 1;
+  }
+  return Math.max(1, hits);
+}
+
+/**
+ * 对手的皮：挨打的反应一律换成它的「受击」（闪避单独一段、假死换倒地）；没给前缀时原样。
+ * 起手 / 胜利 / 倒地这些不在这里换，由排它们的地方直接拼前缀。
+ */
+function foeSkinOf(anim: string, who: 0 | 1, prefix?: string): string {
+  if (who !== 1 || !prefix) return anim;
+  // 已经是这只的皮（出手 / 闪避 / 受击……）就不再套一层前缀
+  if (anim.startsWith(`${prefix}-`)) return anim;
+  if (anim === DODGE_ANIM || anim === DOVE_ANIM) return `${prefix}-闪避`;
+  if (anim === PLAY_DEAD_ANIM) return `${prefix}-倒地`;
+  return `${prefix}-受击`;
 }
 
 /** 闪避动画：真有化鸽遁才是「化成一只鸽子」，否则通用闪避 */
@@ -542,6 +664,11 @@ export const TRIBULATION_PILL_ANIM = '修炼-服丹';
  */
 export interface TimelineOptions {
   tribulation?: { pill: boolean; strikes?: number };
+  /**
+   * 对手的皮（Y2 历练）：给了以后对手那一边的动画一律换成 `<前缀>-<动作>`——起手、出手、绝招、
+   * 受击、闪避、倒地、胜利。素材缺了由对手窗口退回 CSS 动作，时间线不查文件。
+   */
+  foe?: { prefix: string };
 }
 
 /** 这一格的出手（`decide` 排出来的；`closeSlot` 作废）。只有带飞行物的出手才会排出来 */
@@ -589,6 +716,8 @@ export function timeline(
   const start = events.find((event) => event.kind === 'start');
   const base: [number, number] = start ? start.hp : [0, 0];
   const tribulation = options?.tribulation;
+  /** 对手的皮（Y2）：给了就把对手那一边的动画名换成它的前缀 */
+  const foePrefix = options?.foe?.prefix;
   /** 这场一共几道雷（渡劫台词报「第 i/N 道」用）：优先按 plan 给的雷数，没传就按事件里数得着的算（躲开的也算一道） */
   const strikeTotal = tribulation
     ? (tribulation.strikes ?? events.filter((event) => event.kind === 'strike' || event.kind === 'dodge').length)
@@ -625,7 +754,8 @@ export function timeline(
   } else {
     // 开场：两边各一段起手式（`start` 事件本身不再另排一步）
     for (const who of [0, 1] as const) {
-      pushAnim({ at: 0, who, anim: '战斗-起手', rate: rateFor('战斗-起手', OPEN_MS), hp: base });
+      const anim = who === 1 && foePrefix ? `${foePrefix}-起手` : '战斗-起手';
+      pushAnim({ at: 0, who, anim, rate: rateFor(anim, OPEN_MS), hp: base });
     }
   }
   let cursor = OPEN_MS;
@@ -696,7 +826,7 @@ export function timeline(
       count: extra.count ?? fly.count ?? 1,
       gapMs: extra.gapMs ?? fly.gapMs ?? 0,
       hitFx: fly.hitFx,
-      hand: [...((action && RELEASE[action]?.hand) || [0, 0])] as [number, number],
+      hand: [...((action && releaseOf(action)?.hand) || [0, 0])] as [number, number],
       ...(extra.hue === undefined ? {} : { hue: extra.hue }),
       ...(extra.miss ? { miss: true } : {}),
       ...(extra.blocked ? { blocked: true } : {}),
@@ -759,15 +889,16 @@ export function timeline(
     line?: string,
     force = false,
   ): void => {
-    const at = impact - windupOf(anim);
+    const skinned = foeSkinOf(anim, who, foePrefix);
+    const at = impact - windupOf(skinned);
     const current = reacting[who];
     if (!force && current && at < current.until) {
       if (line !== undefined) steps.push({ at, who, line, hp });
       return;
     }
-    const rate = reactRate(anim);
-    pushAnim({ at, who, anim, rate, ...(line === undefined ? {} : { line }), hp });
-    reacting[who] = { anim, until: at + animLength(anim, rate) };
+    const rate = reactRate(skinned);
+    pushAnim({ at, who, anim: skinned, rate, ...(line === undefined ? {} : { line }), hp });
+    reacting[who] = { anim: skinned, until: at + animLength(skinned, rate) };
   };
 
   for (let i = 0; i < events.length; i += 1) {
@@ -777,7 +908,8 @@ export function timeline(
 
     if (event.kind === 'decide') {
       closeSlot();
-      const show = ATTACK_SHOW[showKeyOf(event.action)];
+      const show = showOf(event.action, event.actor, foePrefix);
+      const hits = hitsOf(event.action, events, i);
       pushAnim({ at: cursor, who: event.actor, anim: show.action, rate: actionRate(show.action), hp: event.hp });
       // 魂牵梦绕（X9）：原著那四句咒先念出来，命中那一刻再接结算台词（一句顶一句，正好铺满这一格）
       if (event.action.kind === 'skill' && event.action.skill === 'dream-chant') {
@@ -788,11 +920,11 @@ export function timeline(
           who: event.actor,
           show,
           fly: show.fly,
-          hits: hitsOf(event.action),
+          hits,
           release: cursor + releaseOffset(show.action),
           segments: 0,
-          primary: primaryOf(events, i, hitsOf(event.action)),
-          gap: hitsOf(event.action) > 1 ? (show.fly.gapMs ?? 150) : 0,
+          primary: primaryOf(events, i, hits),
+          gap: hits > 1 ? (show.fly.gapMs ?? 150) : 0,
           beast: event.action.kind !== 'skill' && beastLeft[event.actor] > 0,
         };
       }
@@ -821,10 +953,11 @@ export function timeline(
       }
       const winner = event.winner;
       const loser = (winner ^ 1) as 0 | 1;
-      for (const [who, anim] of [
-        [winner, '战斗-胜利'],
-        [loser, '战斗-倒地'],
+      for (const [who, action] of [
+        [winner, '胜利'],
+        [loser, '倒地'],
       ] as const) {
+        const anim = who === 1 && foePrefix ? `${foePrefix}-${action}` : `战斗-${action}`;
         pushAnim({ at: cursor, who, anim, rate: rateFor(anim, CLOSE_MS), hp: event.hp, closing: true });
       }
       const line = lineOf(event, names, rng, skillSets);
@@ -887,7 +1020,7 @@ export function timeline(
 
     if (event.kind === 'dodge') {
       // 自己躲开：飞行物掠过去（`miss`，不画命中特效），闪避动画对准它掠过的时刻（提前躲开一半）
-      const anim = dodgeAnimOf(event.actor, skillSets);
+      const anim = foeSkinOf(dodgeAnimOf(event.actor, skillSets), event.actor, foePrefix);
       const current = slot;
       if (!current) {
         // 这一格没有出手（手喂的事件序列）：只是自己一闪，照旧排在 `at`
@@ -932,15 +1065,32 @@ export function timeline(
       if (lastImpact !== null && lastImpact >= cursor) {
         pushReaction(lastImpact, event.actor, PLAY_DEAD_ANIM, event.hp, line, true);
       } else {
+        const anim = foeSkinOf(PLAY_DEAD_ANIM, event.actor, foePrefix);
         pushAnim({
           at,
           who: event.actor,
-          anim: PLAY_DEAD_ANIM,
-          rate: reactRate(PLAY_DEAD_ANIM),
+          anim,
+          rate: reactRate(anim),
           ...(line === undefined ? {} : { line }),
           hp: event.hp,
         });
       }
+      continue;
+    }
+
+    if (event.kind === 'guard') {
+      // 替挡（Y0 定仙游结局）：飞行物在挨打方身前停住（`Shot.blocked`，特效层不用改），
+      // 命中画雪花，挨打方不播受击，只出一句「谁挡在前面」的台词。
+      const current = slot;
+      if (!current) {
+        if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
+        continue;
+      }
+      const segment = launchSegment(current, i, hpBefore, { blocked: true });
+      const fired = steps[steps.length - 1];
+      if (fired?.shot) fired.shot.hitFx = '命中-雪花';
+      steps.push({ at: segment.impact, who: event.actor, ...(line === undefined ? {} : { line }), hp: event.hp });
+      lastImpact = segment.impact;
       continue;
     }
 
@@ -966,7 +1116,11 @@ export function timeline(
 
     if (event.kind === 'skip' && (event.cause === 'sleep' || event.cause === 'freeze' || event.cause === 'dream')) {
       // 睡着 / 冻住 / 入梦跳过的那一拍：再演一遍犯困 / 冻僵 / 入梦（一眼看得出它为什么不动）
-      const anim = event.cause === 'sleep' ? SLEEP_ANIM : event.cause === 'freeze' ? FREEZE_ANIM : DREAM_ANIM;
+      const anim = foeSkinOf(
+        event.cause === 'sleep' ? SLEEP_ANIM : event.cause === 'freeze' ? FREEZE_ANIM : DREAM_ANIM,
+        event.actor,
+        foePrefix,
+      );
       pushAnim({
         at: Math.max(at, busy[event.actor]),
         who: event.actor,
@@ -1044,6 +1198,82 @@ export function timeline(
     // skip（被定住 / 晕了）、回血、替挡（Y0 的 guard）：只有台词、没有飞行物；气血条照 `event.hp` 刷新
     if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
   }
+  return steps.sort((a, b) => a.at - b.at);
+}
+
+/** 速战（Y2）开场：两边各起手一拍，压到这么短（4 秒素材按它算倍速，正好播完，不切给下一段） */
+export const QUICK_OPEN_MS = 1_400;
+/** 速战收场最早在这个时刻（中间只演一下，留点喘息，整场约 9 秒） */
+const QUICK_CLOSE_MS = 6_600;
+/** 速战收场最晚在这个时刻（加上最后一句 `LINE_MS` 正好 10 秒） */
+const QUICK_MAX_CLOSE_MS = 10_000 - LINE_MS;
+
+/**
+ * 速战（Y2）：小怪、精英的一场约 10 秒。只排开场两边起手、伤害最大的一下（出手 + 飞行物 + 受击）、
+ * 收场（赢的胜利、输的倒地），气血条照这几步走到引擎的最终值。
+ *
+ * 做法是把「最大那一下」前后的引擎事件裁成一小段，交给 `timeline` 排，再把非开场的时间整体前移
+ * （飞行物、受击、台词之间的相对时刻不变），最后把收场几步拉到 `QUICK_CLOSE_MS` 附近。
+ * 收场几步照旧标 `closing`，`BattleShow.skip()` 直接跳到它们。
+ */
+export function quickTimeline(
+  events: BattleEvent[],
+  names: [string, string],
+  rng: () => number,
+  skillSets?: [SkillId[], SkillId[]],
+  options?: TimelineOptions,
+): Step[] {
+  const startEvent = events.find((event) => event.kind === 'start');
+  let endEvent: Extract<BattleEvent, { kind: 'end' }> | undefined;
+  for (const event of events) if (event.kind === 'end') endEvent = event;
+  if (!startEvent || !endEvent) return timeline(events, names, rng, skillSets, options);
+
+  /** 选伤害最大、且前面有同一个出手方的 `decide` 的那一下；反击 / 灵兽是追加伤害，不选 */
+  let chosen = -1;
+  let chosenDecide = -1;
+  let chosenDamage = -1;
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i];
+    const damage =
+      event.kind === 'hit' || event.kind === 'combo'
+        ? event.damage
+        : event.kind === 'skill' && event.damage !== undefined
+          ? event.damage
+          : -1;
+    if (damage <= chosenDamage) continue;
+    let decideIndex = -1;
+    for (let j = i - 1; j >= 0; j -= 1) {
+      const prev = events[j];
+      if (prev.kind === 'decide' && prev.actor === event.actor) {
+        decideIndex = j;
+        break;
+      }
+      if (prev.kind === 'decide' || prev.kind === 'end') break;
+    }
+    if (decideIndex < 0) continue;
+    chosen = i;
+    chosenDecide = decideIndex;
+    chosenDamage = damage;
+  }
+  // 只把最大那一下裁出来：开场 + 它的 decide + 伤害 + 收场；一下都没打中（全躲开）就只演开场和收场
+  const raw = timeline(
+    chosen < 0 ? [startEvent, endEvent] : [startEvent, events[chosenDecide], events[chosen], endEvent],
+    names,
+    rng,
+    skillSets,
+    options,
+  );
+  const shift = QUICK_OPEN_MS - OPEN_MS;
+  const closing = raw.filter((step) => step.closing);
+  const latest = closing.reduce((max, step) => Math.max(max, step.at), 0);
+  const closeAt = Math.min(QUICK_MAX_CLOSE_MS, Math.max(QUICK_CLOSE_MS, latest));
+  const steps = raw.map((step): Step => {
+    if (step.at === 0 && step.anim) {
+      return { ...step, rate: rateFor(step.anim, QUICK_OPEN_MS) };
+    }
+    if (step.closing) return { ...step, at: step.at + (closeAt - latest) };
+    return { ...step, at: Math.max(QUICK_OPEN_MS, step.at + shift) };
+  });
   return steps.sort((a, b) => a.at - b.at);
 }
 

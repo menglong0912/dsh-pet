@@ -172,6 +172,14 @@ const FX_SIZE: Record<FxAssetName, { size: number; spin?: number; grow?: number 
   // 剑光是细长的一条：长边 0.36 个舞台高，飞起来才看得清是一道光（165ms 就到对面）
   剑光: { size: 0.36 },
   '命中-剑痕': { size: 0.58 },
+  // 历练（Y2）：一转蛊和对手招式的飞行物
+  犬影: { size: 0.28 },
+  纸鹤: { size: 0.18 },
+  爆蛋: { size: 0.16 },
+  金针: { size: 0.1 },
+  金色飞刀: { size: 0.22 },
+  冰刃: { size: 0.18 },
+  碧光: { size: 0.32 },
 };
 
 /** 自家宠物的画布矩形（口径同 `guestBounds`：舞台顶 = box.top + bottomPad、画布高 = 宽 × 9/16） */

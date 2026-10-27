@@ -15,6 +15,8 @@ import { fighterAt } from './battle-testkit.ts';
 import { MAX_STAGE, tribulationStrikes } from './cultivation.ts';
 import {
   fight,
+  MOVE_IDS,
+  MOVES,
   shadowOf,
   tribulate,
   WEAPONS,
@@ -30,7 +32,9 @@ import {
   BattleShow,
   FX_ASSETS,
   LINE_MS,
+  MOVE_SHOW,
   OPEN_MS,
+  QUICK_OPEN_MS,
   REACT_WINDOW_MS,
   RELEASE,
   SHOW_ANIMS,
@@ -41,6 +45,7 @@ import {
   TRIBULATION_WIN_ANIM,
   actionRate,
   animLength,
+  quickTimeline,
   rateFor,
   releaseOffset,
   swapSides,
@@ -251,6 +256,104 @@ test('每一招都有自己的出手、飞行物、命中特效和受击（§X7 
     [[0, '招式-凭空生花']],
   );
   assert.equal(shotsOf(bloom).length, 0);
+});
+
+test('招式表（Y0 的 MOVES）都有自己的演出：一转蛊用现有宠物素材，对手招式用它的皮', () => {
+  const webm = new Set(
+    readdirSync(join(packageRoot, 'assets', 'webm'))
+      .filter((file) => file.endsWith('.webm'))
+      .map((file) => file.slice(0, -'.webm'.length)),
+  );
+  for (const id of MOVE_IDS) {
+    const show = MOVE_SHOW[id];
+    assert.ok(show, `${id} 没有演出表`);
+    if (MOVES[id].packHits || ['gu-dogs', 'gu-crane', 'gu-egg'].includes(id)) {
+      assert.ok(show.action, `${id} 是一转蛊，应该有宠物素材`);
+      assert.ok(webm.has(show.action), `${id} 的宠物素材不存在：${show.action}`);
+      assert.ok(SHOW_ANIMS.includes(show.action), `${id} 的宠物素材要在预取清单里`);
+    } else {
+      assert.ok(show.foe, `${id} 是给对手用的，应该说明走「出手」还是「绝招」`);
+    }
+    if (show.fly) assert.ok(FX_ASSETS.includes(show.fly.kind), `${id} 的飞行物要在预取清单里`);
+  }
+  // 一场一次的招按「绝招」演（白凝冰有绝招素材；金色飞刀没有，视频失败后由窗口退回 CSS）
+  assert.equal(MOVE_SHOW['gold-blade'].foe, '绝招');
+  assert.equal(MOVE_SHOW.bingpo.foe, '绝招');
+});
+
+test('一挥多段：驭犬蛊按狗数齐发（同一时刻、每只一发），不是串成一串', () => {
+  const events: BattleEvent[] = [
+    start(0),
+    decide(0, { kind: 'move', move: 'gu-dogs' }),
+    { actor: 0, kind: 'hit', move: 'gu-dogs', damage: 3, crit: false, blocked: false, hp: [100, 81] },
+    { actor: 0, kind: 'hit', move: 'gu-dogs', damage: 3, crit: false, blocked: false, hp: [100, 78] },
+    { actor: 1, kind: 'dodge', hp: [100, 78] },
+  ];
+  const steps = timeline(events, NAMES, seq());
+  const shots = shotsOf(steps);
+  assert.equal(shots.length, 3, '三条狗各一发');
+  assert.ok(shots.every((step) => step.shot.kind === '犬影'));
+  assert.deepEqual(
+    shots.map((step) => step.at),
+    [
+      OPEN_MS + releaseOffset('出手-召唤灵兽'),
+      OPEN_MS + releaseOffset('出手-召唤灵兽'),
+      OPEN_MS + releaseOffset('出手-召唤灵兽'),
+    ],
+    '按狗数齐发',
+  );
+});
+
+test('对手的皮（Y2）：给了 foe 时对手一边的动画全部带前缀，不给时和现在一样', () => {
+  const events: BattleEvent[] = [
+    start(0),
+    decide(0, UNARMED),
+    hit(0),
+    decide(1, { kind: 'move', move: 'dog-bite' }),
+    hit(1, 8, [80, 100]),
+    { actor: 0, kind: 'end', winner: 0, reason: 'ko', hp: [80, 0] },
+  ];
+  const plain = timeline(events, NAMES, seq());
+  const skinned = timeline(events, NAMES, seq(), undefined, { foe: { prefix: '对手-野狗' } });
+  const foeAnims = (steps: Step[]) => steps.filter((step) => step.who === 1 && step.anim).map((step) => step.anim);
+  assert.ok(
+    foeAnims(skinned).every((anim) => anim?.startsWith('对手-野狗-')),
+    `对手的动画都换皮：${foeAnims(skinned).join(' / ')}`,
+  );
+  assert.ok(foeAnims(skinned).includes('对手-野狗-起手'));
+  assert.ok(foeAnims(skinned).includes('对手-野狗-出手'));
+  assert.ok(foeAnims(skinned).includes('对手-野狗-受击'));
+  assert.ok(foeAnims(skinned).includes('对手-野狗-倒地'));
+  // 不给 foe 时一个字不变
+  assert.deepEqual(
+    foeAnims(plain).filter((anim) => !anim?.startsWith('对手-')),
+    foeAnims(plain),
+  );
+  assert.ok(foeAnims(plain).includes('战斗-起手'));
+  // 换皮后的出手时刻按量好的对手动作算（野狗的手在最左边）
+  const foeShot = shotsOf(skinned).find((step) => step.who === 1);
+  assert.ok(foeShot);
+  assert.deepEqual(foeShot.shot.hand, RELEASE['对手-野狗-出手'].hand);
+});
+
+test('替挡（guard）：飞行物停在挨打方身前、画雪花，挨打方不播受击，只出替挡的台词', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, UNARMED),
+      { actor: 1, kind: 'guard', by: '白凝冰', hp },
+      { actor: 0, kind: 'end', winner: 0, reason: 'ko', hp: [100, 0] },
+    ],
+    NAMES,
+    seq(),
+  );
+  const shots = shotsOf(steps);
+  assert.equal(shots.length, 1);
+  assert.equal(shots[0].shot.blocked, true, '打在身上之前被挡下');
+  assert.equal(shots[0].shot.hitFx, '命中-雪花');
+  assert.equal(animsOf(steps, HIT).length, 0, '挨打方不播受击');
+  const line = steps.find((step) => step.line?.includes('白凝冰'));
+  assert.ok(line && line.at === impactOf(shots[0]), `替挡的台词在命中那一刻：${JSON.stringify(line)}`);
 });
 
 test('齐发：水枪三发对准三下扳机、狮子吼三道声波，都是一步里的 count / gapMs', () => {
@@ -509,6 +612,91 @@ test('收场等两只都回到站姿：最后一下的受击播完才庆祝 / �
   const react = animsOf(steps, HIT)[0];
   const fall = animsOf(steps, '战斗-倒地')[0];
   assert.ok(fall.at >= react.at + animLength(HIT, reactRate(HIT)), '倒地不切断受击');
+});
+
+test('速战（Y2）：约 10 秒，只演伤害最大的一下，收场标 closing，最后一步的气血就是引擎结果', () => {
+  const events: BattleEvent[] = [
+    start(0),
+    decide(0, UNARMED),
+    hit(0, 20, [80, 100]),
+    decide(1, { kind: 'weapon', weapon: 'poker' }),
+    hit(1, 50, [0, 100], false, 'poker'),
+    { actor: 1, kind: 'end', winner: 1, reason: 'ko', hp: [0, 100] },
+  ];
+  const steps = quickTimeline(events, NAMES, seq());
+  const opening = steps.filter((step) => step.at === 0 && step.anim);
+  assert.deepEqual(
+    opening.map((step) => step.who),
+    [0, 1],
+    '开场两边各起手一拍',
+  );
+  assert.ok(opening.every((step) => step.rate === rateFor('战斗-起手', QUICK_OPEN_MS)));
+  assert.equal(shotsOf(steps).length, 1, '中间只演伤害最大的那一下');
+  assert.equal(shotsOf(steps)[0].who, 1);
+  const closing = steps.filter((step) => step.closing);
+  assert.deepEqual(
+    closing.filter((step) => step.anim).map((step) => [step.who, step.anim]),
+    [
+      [1, '战斗-胜利'],
+      [0, '战斗-倒地'],
+    ],
+  );
+  const last = steps[steps.length - 1];
+  assert.deepEqual(last.hp, [0, 100], '最后一步的气血等于引擎结果');
+  assert.ok(last.at + LINE_MS <= 10_000, `总长不超过 10 秒：${last.at + LINE_MS}`);
+  // 快进照旧直接跳到收场
+  assert.ok(closing.length >= 2);
+  // 一下都没打中（只有开场和收场）也压在 10 秒内
+  const quiet = quickTimeline(
+    [start(0), { actor: 0, kind: 'end', winner: 0, reason: 'timeout', hp: [100, 90] }],
+    NAMES,
+    seq(),
+  );
+  const quietLast = quiet[quiet.length - 1];
+  assert.ok(quietLast.at + LINE_MS <= 10_000);
+  assert.equal(shotsOf(quiet).length, 0);
+});
+
+test('速战 + 对手的皮：收场和中间那一下都用对手自己的动画名', () => {
+  const events: BattleEvent[] = [
+    start(0),
+    decide(0, UNARMED),
+    hit(0, 5, [100, 85]),
+    decide(1, { kind: 'move', move: 'dog-bite' }),
+    hit(1, 60, [0, 85]),
+    { actor: 1, kind: 'end', winner: 1, reason: 'ko', hp: [0, 85] },
+  ];
+  const steps = quickTimeline(events, NAMES, seq(), undefined, { foe: { prefix: '对手-野狗' } });
+  const foeAnims = steps.filter((step) => step.who === 1 && step.anim).map((step) => step.anim);
+  assert.ok(foeAnims.includes('对手-野狗-起手'));
+  assert.ok(foeAnims.includes('对手-野狗-出手'));
+  assert.ok(foeAnims.includes('对手-野狗-胜利'));
+  assert.deepEqual(
+    steps.filter((step) => step.who === 0 && step.closing).map((step) => step.anim),
+    ['战斗-倒地'],
+  );
+});
+
+test('速战快进：收场那几步一放，run 立即结束（和完整演出同一套 skip）', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  const steps = quickTimeline(
+    [
+      start(0),
+      decide(0, UNARMED),
+      hit(0, 20, [100, 80]),
+      { actor: 0, kind: 'end', winner: 0, reason: 'ko', hp: [100, 0] },
+    ],
+    NAMES,
+    seq(),
+  );
+  const { self, foe, arena, show } = makeShow(steps);
+  const done = show.run();
+  t.mock.timers.tick(0);
+  show.skip();
+  await done;
+  assert.ok(self.played.some(([anim]) => anim === '战斗-胜利'));
+  assert.ok(foe?.played.some(([anim]) => anim === '战斗-倒地'));
+  assert.deepEqual(arena[arena.length - 1], 100, '快进把气血条推到最终值');
 });
 
 test('假死遁：救回来那一下自己播招式-假死遁（对准致命那一下）；被定住只有台词没动画', () => {
