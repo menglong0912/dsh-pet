@@ -6,5 +6,5 @@
     "outDir": "lib/types",
     "rootDir": "src"
   },
-  "include": ["src/host/index.ts", "src/client/index.ts"]
+  "include": ["src/host/index.ts"]
 }

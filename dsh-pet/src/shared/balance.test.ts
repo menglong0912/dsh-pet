@@ -1,5 +1,5 @@
 /**
- * 余额「不可用」路径的契约测试：**必须有可见反馈**，且两端（浏览器 overlay / 桌面外壳）只走一份判定。
+ * 余额「不可用」路径的契约测试：**必须有可见反馈**，且桌面外壳只走 shared 的一份判定。
  *
  * 背景：`/dsh-pet-7340/balance` 对未登记的服务商返回 `{ ok:false, reason:'unsupported' }`（HTTP 200），
  * 客户端原本在渲染处硬性要求 `balance.ok`，且气泡只由「拉取成功」的 tick 驱动——于是未登记的服务商
@@ -11,7 +11,7 @@
  *   ① 不可用状态的文案（含 provider/凭证名，且不留空行、不出现双重「缺少凭证」前缀）；
  *   ② 弹窗判定（显式 vs 自动、原因变化、ok 状态清零）；
  *   ③ commandcode 的三窗口（cap 参与「最紧迫窗口」判定、无窗口限制时不补 0）与 opencode 同一套口径；
- *   ④ 源码级守卫——客户端渲染不得再要求 balance.ok（有 React/DOM 依赖，只能读源码断言）。
+ *   ④ 源码级守卫——桌面外壳必须走同一份可见反馈，不得只写 console。
  *
  * 用 Node 内置 test runner（node:test），不引入任何 npm 依赖。
  */
@@ -203,16 +203,6 @@ describe('decideBalanceNotice —— 弹不弹文字说明（两端共用同一�
 });
 
 describe('源码守卫 —— 不可用状态不得再被静默丢掉', () => {
-  test('浏览器 overlay：渲染处不许再要求 balance.ok，且由 noticeTick 驱动气泡、判定来自 shared', () => {
-    const clientPet = readSource('../client/pet.ts');
-    assert.ok(
-      !/balance\.ok\s*&&\s*cfg\.balanceEnabled/.test(clientPet),
-      '余额气泡不得再要求 balance.ok：那是「未登记服务商完全没反应」的根因，文字说明走同一个气泡',
-    );
-    assert.ok(/balanceNoticeTick/.test(clientPet), '容器必须把「该提示不可用原因」传给各宠物');
-    assert.ok(/decideBalanceNotice/.test(clientPet), '弹窗判定必须来自 src/shared（两端同一份），不得各写一份');
-  });
-
   test('桌面外壳：同一条判定 + 不可用也走气泡渲染（不再只写 console）', () => {
     const events = readSource('../../runtime/electron-helper/events.js');
     const sprite = readSource('../../runtime/electron-helper/sprite.js');

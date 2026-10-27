@@ -3,7 +3,7 @@
  *
  * 背景：桌面宠物的配置只在 Helper 启动时拉一次（renderer.js 的 boot → GET /config），手改配置文件后
  * 桌面端不会自己跟上——此前唯一的生效途径是回设置页点「保存」，而保存只是顺带重启了 Helper。
- * 菜单项「重载配置」把这条路径显式暴露出来（浏览器端刷新页面即可，故为桌面专属）。
+ * 菜单项「重载配置」把这条路径显式暴露出来（重载是桌面专属）。
  *
  * 为什么必须走「宿主重启 Helper」而不是渲染端就地重拉配置：
  *   ① 每只桌面宠物一个窗口，是宿主启动时按 DSH_PET_PETS 建的——就地重拉改不了宠物数量 / display / size；
@@ -13,8 +13,7 @@
  *
  * 本文件钉住跨半侧契约（两半各自构建、无法互相 import，只能读源码断言）：
  *   ① 宿主有 POST /reload 路由，且它调用的正是 syncDesktop()，且**不写任何配置文件**；
- *   ② 桌面端菜单项与宿主路由名一致（从桌面源码抽出路由名再回查宿主：改名漏改一侧即失败）；
- *   ③ 浏览器端不得注入该项。
+ *   ② 桌面端菜单项与宿主路由名一致（从桌面源码抽出路由名再回查宿主：改名漏改一侧即失败）。
  *
  * 用 Node 内置 test runner（node:test），不引入任何 npm 依赖。
  */
@@ -28,7 +27,6 @@ const readSource = (rel: string): string => readFileSync(fileURLToPath(new URL(r
 
 const host = readSource('./index.ts');
 const sprite = readSource('../../runtime/electron-helper/sprite.js');
-const clientPet = readSource('../client/pet.ts');
 const menu = readSource('../shared/menu.ts');
 
 describe('桌面端「重载配置」—— 菜单 → 宿主重启 Helper', () => {
@@ -54,10 +52,6 @@ describe('桌面端「重载配置」—— 菜单 → 宿主重启 Helper', () 
       new RegExp(`rest === '${route}'`).test(host),
       `桌面端请求的路由 /${route} 在宿主不存在（改名只改了一侧）`,
     );
-  });
-
-  test('浏览器端不注入该项：网页刷新即可，重载是桌面专属', () => {
-    assert.ok(!/action: 'reload'/.test(clientPet), '浏览器端不得有 reload 菜单项（它会重启整个桌面 Helper）');
   });
 
   test('syncDesktop 是唯一的重启入口：两个 /config 写接口、/reload 与 /pet-display 都走它', () => {
