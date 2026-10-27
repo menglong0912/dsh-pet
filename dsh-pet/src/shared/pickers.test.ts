@@ -53,9 +53,9 @@ describe('pickSlot —— 事件档位取值', () => {
 });
 
 describe('成员判断 —— 数组槽位成员也要命中', () => {
-  // 与 config.jsonc 同构：balance / whisper / workStatus，其中部分档位是候选数组
+  // 与 config.jsonc 同构：whisper / workStatus，其中部分档位是候选数组
   const events = {
-    balance: ['余额-钱袋满溢', ['余额-金袋叮当', '余额-金袋叮当2']],
+    whisper: ['碎碎念-擦桌', ['碎碎念-发呆', '碎碎念-对屏']],
     workStatus: [['工作思考', '开始工作'], '认真工作'],
   };
 
@@ -70,12 +70,12 @@ describe('成员判断 —— 数组槽位成员也要命中', () => {
     assert.equal(poolIncludes(events.workStatus, '工作思考'), true);
     assert.equal(poolIncludes(events.workStatus, '开始工作'), true);
     assert.equal(poolIncludes(events.workStatus, '认真工作'), true);
-    assert.equal(poolIncludes(events.workStatus, '余额-钱袋满溢'), false);
+    assert.equal(poolIncludes(events.workStatus, '碎碎念-擦桌'), false);
   });
 
   test('isEventAnim：整个 events 段（含嵌套候选）命中；未定义返回 false', () => {
-    assert.equal(isEventAnim(events, '余额-钱袋满溢'), true);
-    assert.equal(isEventAnim(events, '余额-金袋叮当2'), true);
+    assert.equal(isEventAnim(events, '碎碎念-擦桌'), true);
+    assert.equal(isEventAnim(events, '碎碎念-发呆'), true);
     assert.equal(isEventAnim(events, '开始工作'), true);
     assert.equal(isEventAnim(events, '不存在'), false);
     assert.equal(isEventAnim(undefined, '开始工作'), false);
@@ -111,7 +111,7 @@ describe('nextWorkStatusAnim —— workStatus 播完续播决策（档内轮换
   });
 
   test('动画不属于 workStatus 池 → null（按原语义处理，如回 idle）', () => {
-    assert.equal(nextWorkStatusAnim(wsPool, '余额-钱袋满溢'), null);
+    assert.equal(nextWorkStatusAnim(wsPool, '碎碎念-擦桌'), null);
     assert.equal(nextWorkStatusAnim([], '认真工作'), null);
   });
 });

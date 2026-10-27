@@ -58,7 +58,7 @@ interface HelperOptions {
   cwd?: string;
   env?: Record<string, string | undefined>;
   restartDelayMs?: number;
-  /** bridge 协议处理器：renderer 的每条请求（配置/余额/碎碎念/素材等）都经它应答 */
+  /** bridge 协议处理器：renderer 的每条请求（配置/碎碎念/素材等）都经它应答 */
   bridgeHandler?: BridgeHandler;
 }
 

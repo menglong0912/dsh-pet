@@ -25,7 +25,6 @@ test(
         ...config.pets[0],
         size: 150,
         fixedEnabled: true,
-        balanceEnabled: false,
         whisperEnabled: false,
         workStatusEnabled: false,
         display: 'desktop',

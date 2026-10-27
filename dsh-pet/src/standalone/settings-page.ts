@@ -34,8 +34,6 @@ export const settingsPage = `<!doctype html>
 <p id="persona-note" class="hint">碎碎念、对话、看屏幕吐槽、串门都按它说话。留空就用默认人设（框里的灰字）。</p>
 <label class="check"><input id="petWorkStatus" type="checkbox" aria-describedby="workstatus-note">头顶状态</label>
 <p id="workstatus-note" class="hint">头顶显示「Claude 等你确认」「在 X 家做客」这类状态，并换成对应的动作。</p>
-<label class="check"><input id="petBalance" type="checkbox" aria-describedby="balance-note">余额动画</label>
-<p id="balance-note" class="hint">定时查余额、按档位换动作（独立模式的余额是随机数）；右键「查看余额」不受这个开关影响。</p>
 <label class="check"><input id="petFixed" type="checkbox" aria-describedby="fixed-note">待在原地</label>
 <p id="fixed-note" class="hint">不再自己转身、走开，只在原地待机和做小动作。</p>
 <label class="check"><input id="whisperImageEnabled" type="checkbox">碎碎念、看屏幕吐槽时配表情包</label>
@@ -325,7 +323,6 @@ export const settingsScript = `
     get('petPersona').value = pet.whisperPrompt || '';
     get('petPersona').placeholder = petConfig.main.whisperPrompt || '';
     get('petWorkStatus').checked = pet.workStatusEnabled === true;
-    get('petBalance').checked = pet.balanceEnabled === true;
     get('petFixed').checked = pet.fixedEnabled === true;
     get('whisperImageEnabled').checked = petConfig.main.whisperImageEnabled === true;
     get('chatImageEnabled').checked = petConfig.main.chatImageEnabled === true;
@@ -341,7 +338,7 @@ export const settingsScript = `
       pets: petConfig.main.pets.map(pet => pet !== target ? pet : {
         ...pet,
         name: get('petName').value.trim(), size: num('petSize'), whisperPrompt: get('petPersona').value,
-        workStatusEnabled: get('petWorkStatus').checked, balanceEnabled: get('petBalance').checked,
+        workStatusEnabled: get('petWorkStatus').checked,
         fixedEnabled: get('petFixed').checked,
         // 关掉时不动它：设置里的开关已经拦住了自动碎碎念
         whisperEnabled: get('automaticWhispers').checked || pet.whisperEnabled === true

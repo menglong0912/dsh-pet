@@ -33,12 +33,11 @@
  *       主宠物   = $DSH_HOME/dsh-pet/main-animation/<webm|mov>（用户目录，优先）→ 包内 assets/<webm|mov>
  *       <素材根> 是**标识符**（pet/ 下文件名前缀），含分隔符/保留字符即 400（见 ID_FORBIDDEN）
  *   /dsh-pet-7340/state               → **轮询统一状态 S**（GET，前端 1s 轮询的唯一数据源）：
- *                                       { sections: { balance, workStatus, notify }, pets: { <id>: { say } } }，
+ *                                       { sections: { workStatus, notify }, pets: { <id>: { say } } }，
  *                                       每个叶子 = { counter, data }；counter 变了前端才渲染。
  *                                       只读、纯内存、零副作用（绝不在这里触发外部调用/模型生成）。
  *   /dsh-pet-7340/work-status          → 外部写入工作状态（POST = 设置固定外部槽的档位/文案；
  *                                       DELETE = 清空回空闲。不做多写者仲裁/租约/会话管理）
- *   /dsh-pet-7340/balance              → 余额刷新（POST 动作端点，写 S；数据从 /state 读）
  *   /dsh-pet-7340/whisper              → 让某只宠物立即说一句（POST 动作端点，写 S 的 pets.<id>.say；
  *                                       响应带生成的 text，配图时带 image）
  *   /dsh-pet-7340/broadcast            → 第三方投喂：把外部给定的文本写进气泡（POST 动作端点，写 S 的
@@ -93,15 +92,13 @@
  * TODO(类型)：peer 依赖类型包本地暂不可解析，ctx/req/res 暂用 any；
  *             依赖可解析后替换为 DSH 官方类型。
  */
-import { createReadStream, existsSync, fstatSync, readFileSync } from 'node:fs';
+import { createReadStream, existsSync, fstatSync } from 'node:fs';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths';
-import { credentialRef } from '@deepseek-ai/dsh-credentials';
-import { listBalanceProviders, queryBalance, registerBalanceProvider } from './balance/index';
 import { generateWhisper } from './whisper';
 import { automaticWhisperSchedule } from './whisper-policy';
 import { generateChat, type ChatMemoryMessage } from './chat';
@@ -173,8 +170,8 @@ import {
 
 /** 插件行 id（与 cordis.patch.yml 一致） */
 export const name = 'pet';
-/** 需要注入的服务：webServer（路由）+ agentDefaultModel（当前服务商）+ credentials（凭证）+ llm（对话模型调用）+ commands（/balance 斜杠命令）+ connection（桌面 Helper「打开网站」用的已鉴权站点 URL） */
-export const inject = ['webServer', 'agentDefaultModel', 'credentials', 'llm', 'commands', 'connection'];
+/** 需要注入的服务：webServer（路由）+ agentDefaultModel（当前对话模型）+ llm（对话模型调用）+ commands（斜杠命令）+ connection（桌面 Helper「打开网站」用的已鉴权站点 URL） */
+export const inject = ['webServer', 'agentDefaultModel', 'llm', 'commands', 'connection'];
 
 /** 本包目录：宿主构建产物位于 lib/，其上一级即包根。 */
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -308,7 +305,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 // 这里不再有 host 侧拷贝——文件宠物与主宠物一样，统一从 readAllConfig 的成品读取。
 // ---------------------------------------------------------------------------
 
-/** 宿主插件主体：注册 `/dsh-pet-7340` 前缀路由 + 斜杠命令（/balance /pet /chat）。 */
+/** 宿主插件主体：注册 `/dsh-pet-7340` 前缀路由 + 斜杠命令（/pet /chat）。 */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- DSH 注入的 ctx（webServer/locale 等 service 无静态类型）
 export function apply(ctx: any): void {
   // 用户数据根：配置与用户素材统一收敛于此（扩展包按 <插件id> 各自建目录）
@@ -350,22 +347,13 @@ export function apply(ctx: any): void {
     if (own !== undefined && existsSync(own)) return [own];
     return [memesUserRoot, PACKAGE_MEMES_DIR];
   };
-  // 轮询统一状态（S）：前端 1s 轮询的**唯一**数据源（余额 / 工作状态 / 通知 / 宠物说话）。
+  // 轮询统一状态（S）：前端 1s 轮询的**唯一**数据源（工作状态 / 通知 / 宠物说话）。
   // 所有写入走 state.writeSection / writePet（由它统一更新 counter），见 ./state 的说明。
   const state = new PollStateStore();
   // 第三方右键菜单注册表（issue：第三方菜单项）：**进程内存态**，不落盘，重启即空。
   // 与 S 的关系：注册表本身写进 S 的 sections.menu（两端据此拼「更多」）；点击事件**不进 S**——
   // 它是触发不是状态，走 /menu/events 的读取即消费，只给注册它的那个 owner 看。见 ./menu 的说明。
   const menuRegistry = new MenuRegistry();
-  // 对外 Cordis 服务（宿主半侧）：与页面侧的 petApi7340 同名，但分属两个容器，互不可见也互不覆盖。
-  // 只暴露 register（返回注销函数，配合 ctx.effect 在卸载时自动清理）与 list（排障用）；
-  // 不暴露 unregister：注销走返回值，避免任何插件都能注销别人的 provider。
-  ctx.provide('petApi7340', {
-    balance: {
-      register: registerBalanceProvider,
-      list: listBalanceProviders,
-    },
-  });
   // 播放记录表（issue #122 第 3 项「播放与完成回执」）：**由渲染端上报驱动**的状态机 + 等待者。
   // 与 S 无关：播放记录是 per-caller 资源（只有发起那次点播的调用方关心、有生命周期、数量随
   // 第三方调用方增长），塞进 1s 全局广播会让每个窗口为每个功能付流量。见 ./playback 的说明。
@@ -466,7 +454,7 @@ export function apply(ctx: any): void {
     downloadSlotTimer.unref?.(); // 别把这个定时器钉进宿主的事件循环（退出时不该等它）
   };
   // 占用锁（issue #122 第 4 项「独立动作/气泡占用」）：**内存态**一把锁 + TTL，第三方联动期间
-  // 独占这只宠物——除持锁者外谁都动不了它（随机链、碎碎念、余额、工作状态一概让路）。
+  // 独占这只宠物——除持锁者外谁都动不了它（随机链、碎碎念、工作状态一概让路）。
   //
   // 它自己**不带定时器**：过期是懒判的，叶子里的 `expiresAt` 是唯一真相，渲染端据此**自己**
   // 解除静止；这里只负责把状态变化同步进 S 的 `pets.<id>.lock`。见 ./lock 的四条边界
@@ -910,13 +898,6 @@ export function apply(ctx: any): void {
    */
   const effectivePetList = (): Record<string, unknown>[] => flattenPetList(readAllConfig(configPaths));
 
-  /** 余额刷新周期（秒）：成品 main 条目的 eventsRefreshSec.balance（合并器已填默认；非法兜底 1800） */
-  const balancePeriodSec = (cfg: Record<string, Record<string, unknown>>): number => {
-    const ers = cfg.main?.eventsRefreshSec as Record<string, unknown> | undefined;
-    const n = Number(ers?.balance);
-    return Number.isFinite(n) && n > 0 ? n : 1800;
-  };
-
   /** 碎碎念周期（秒）：该宠物**所属条目**的 eventsRefreshSec.whisper（合并器已填默认；非法兜底 300）。
    *  收**已解析的条目配置**：唯一调用方是周期调度，而它的 `petId` 就是从**同一份 cfg** 拍平出来的，
    *  所以这里再查一次只会多出一处"查不到就兜底 main"的不可达分支。 */
@@ -924,71 +905,6 @@ export function apply(ctx: any): void {
     const ers = conf.eventsRefreshSec as Record<string, unknown> | undefined;
     const n = Number(ers?.whisper);
     return Number.isFinite(n) && n > 0 ? n : 300;
-  };
-
-  /**
-   * 刷新余额并写入 S —— host 侧**唯一**的余额查询点。
-   *
-   * 改造前是每个客户端各自按自己的定时器去查（浏览器一个 + 桌面每窗口一个）：同一份外部 API
-   * 被重复请求、两端还可能看到新旧不一致的数据。现在只有这里查，两端都从 /state 读同一份结果。
-   *
-   * 失败也写进 S（reason 区分 unsupported / credential-missing / fetch-error）——余额不可用要弹
-   * 文字说明气泡，不能静默；意外异常同样落成 fetch-error，不吞。
-   *
-   * @param manual 这次刷新是不是"用户要的"（/balance 命令、桌面「查看余额」菜单）。
-   *   标记随数据一起写进叶子：只有 host 知道是谁要的，前端据此决定余额不可用时要不要**必弹**
-   *   文字说明（decideBalanceNotice 的 explicit；周期刷新则只在原因变化时弹一次，免得反复刷屏）。
-   */
-  /**
-   * 账号服务要求的调用方身份（`AccountClientMetadata`）：Platform 用它派生五个客户端头，
-   * 只影响**请求来源标识**与**服务端本地化文案**，不参与余额数值与币种。
-   *
-   * - version：本插件版本（读自身 package.json；读不到回落 '0.0.0'——该字段只是标识）
-   * - locale：本插件是中文产品，固定 `zh-CN`（Platform 侧归一到 zh_CN）
-   * - timezoneOffsetSeconds：本机 UTC 偏移（东八区为 +28800）
-   */
-  const accountClientMetadata = (): { version: string; locale: string; timezoneOffsetSeconds: number } => {
-    let version = '0.0.0';
-    try {
-      const raw = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')) as { version?: unknown };
-      if (typeof raw.version === 'string' && raw.version.length > 0) version = raw.version;
-    } catch {
-      // 读不到不影响查询：version 只是平台侧的来源标识
-    }
-    return { version, locale: 'zh-CN', timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60 };
-  };
-
-  const refreshBalance = async (manual = false): Promise<void> => {
-    const mark = <T>(v: T): T | (T & { manual: true }) => (manual ? { ...v, manual: true } : v);
-    try {
-      const sel = ctx.agentDefaultModel.currentSelection();
-      const result = await queryBalance(
-        sel.provider,
-        async (ref) => {
-          const rc = await ctx.credentials.resolve(credentialRef(ref));
-          return rc?.value;
-        },
-        // `deepseek-account`（免费额度 / 平台登录）没有 API Key：它的凭证是 DSH 账号服务
-        // 持有的授权记录，只能经 getBalance 查询。账号服务是**可选**服务（软取，不放进
-        // inject）——没装账号插件时它不在场，此时该路由报 credential-missing 而不是崩。
-        async () => {
-          const account = ctx.get('deepseekAccount', false);
-          if (!account) return undefined;
-          return account.getBalance(accountClientMetadata());
-        },
-      );
-      state.writeSection('balance', mark(result));
-    } catch (e) {
-      state.writeSection(
-        'balance',
-        mark({
-          ok: false,
-          provider: 'unknown',
-          reason: 'fetch-error',
-          message: e instanceof Error ? e.message : String(e),
-        }),
-      );
-    }
   };
 
   /** 当前交互桌宠 id：/pet 已选且仍存在 → 该宠物；未选/已失效 → 有效宠物列表第一只（进程内，重启回默认） */
@@ -1333,7 +1249,7 @@ export function apply(ctx: any): void {
               status: 400,
               obj: {
                 error:
-                  'invalid pet config: expected { pets:[{name?,id,size,balanceEnabled,display,position:{corner,marginX,marginY}}] }（display 为 web/desktop/both/none 之一；可选顶层 notificationsEnabled / whisperImageEnabled / chatImageEnabled / trayEnabled 布尔；可选宠物布尔 whisperEnabled / workStatusEnabled / fixedEnabled）',
+                  'invalid pet config: expected { pets:[{name?,id,size,display,position:{corner,marginX,marginY}}] }（display 为 web/desktop/both/none 之一；可选顶层 notificationsEnabled / whisperImageEnabled / chatImageEnabled / trayEnabled 布尔；可选宠物布尔 whisperEnabled / workStatusEnabled / fixedEnabled）',
               },
             };
           }
@@ -1608,7 +1524,7 @@ export function apply(ctx: any): void {
     }
 
     // 轮询统一状态（S）：/dsh-pet-7340/state（GET，no-cache）——前端轮询的**唯一**数据源
-    // （余额 / 工作状态 / 通知 / 配置变更信号 / 宠物说话，形状见 ./state）。
+    // （工作状态 / 通知 / 配置变更信号 / 宠物说话，形状见 ./state）。
     // 只读、纯内存、**零副作用**：绝不在这里触发外部调用或模型生成——那会把所有人的轮询拖死；
     // 也**不在这里碰磁盘**（早先这里现算配置文件的 mtime 指纹，等于每拍读一次盘，
     // 桌面端一窗一宠各自轮询 → N 倍；配置变更信号已改走 sections.config 叶子）。
@@ -1715,17 +1631,6 @@ export function apply(ctx: any): void {
           task: workStatus.taskOf(EXTERNAL_WORK_SESSION),
         },
       };
-    }
-
-    // 余额：/dsh-pet-7340/balance（POST = 立即刷新一次并写入 S，返回 {ok}）
-    // 动作端点，**不返回余额数据**——数据只有一个出口（/state），这里只负责"让它刷新"。
-    // 改造前这里是 GET（直接查余额）+ /balance/trigger（1s 计数轮询）两个端点，都已删除：
-    // 前端不再各自定时查余额（host 定时器统一查，两端共享一份），也不再需要计数轮询中转。
-    if (rest === 'balance') {
-      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
-      await refreshBalance(true); // manual：用户主动要的，余额不可用时前端必弹文字说明
-      // ok 只表示"这次刷新动作完成了"；余额本身是否可用在 S 的 data 里（ok:false 会弹文字说明气泡）
-      return { kind: 'json', status: 200, obj: { ok: true } };
     }
 
     // 占用锁：/dsh-pet-7340/lock?pet=<id>          （POST = 取锁 / 续期，二合一）
@@ -1900,7 +1805,7 @@ export function apply(ctx: any): void {
     // 与 /broadcast 的关系：投喂写气泡，这个收气泡；两者共用同一个叶子（pets.<id>.say）。
     // 清空靠叶子里的 `{ clear: true }` 标记——**空文本表达不了这个动作**：消费端的 readSay
     // 会把空文本判成非法、整拍跳过，所以必须有一个独立的形态（见 src/shared/state.ts 的 SayCue）。
-    // 只收说话气泡：余额气泡、工作状态气泡、以及 anim/position/throw 三个叶子**都不动**
+    // 只收说话气泡：工作状态气泡、以及 anim/position/throw 三个叶子**都不动**
     // （气泡与动作是两把锁，分别释放——issue #122 第 5 条）。
     // 幂等：当前没有气泡也回 { ok: true }（"让气泡消失"这个意图在空状态下已经成立）。
     // 无请求体；动作端点，只回 {ok}。
@@ -2606,53 +2511,6 @@ export function apply(ctx: any): void {
     };
   }, 'dsh-pet: notify frames');
 
-  // /balance 斜杠命令：触发一次余额刷新（写 S → 前端 1s 轮询看到后弹气泡）。
-  // fire-and-forget：回执不等外部 API（查询可能要几秒），立刻回；结果一律从 S 看
-  // （成功播档位动画 + 余额气泡；服务商不支持 / 缺凭证 / 抓取失败则弹文字说明气泡，绝不静默）。
-  ctx.effect(
-    () =>
-      ctx.commands.register({
-        name: 'balance',
-        description: '手动触发桌宠余额显示（立即弹出余额气泡）',
-        handler: () => {
-          void refreshBalance(true); // manual：命令是用户主动敲的
-          return { kind: 'success', text: '已触发桌宠余额显示' };
-        },
-      }),
-    'dsh-pet: /balance command',
-  );
-
-  // 余额周期刷新：host 侧唯一定时器（前端不再有任何余额定时器）。
-  // 周期**每次重新读配置** eventsRefreshSec.balance → 改了配置下一拍自然跟上。
-  // 没有任何启用余额的宠物时跳过查询：尊重配置，不白花外部 API 调用。
-  ctx.effect(() => {
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    function arm(sec: number): void {
-      if (disposed) return;
-      timer = setTimeout(() => void tick(), Math.max(1000, sec * 1000));
-    }
-    async function tick(): Promise<void> {
-      let sec: number;
-      try {
-        const cfg = readAllConfig(configPaths);
-        sec = balancePeriodSec(cfg);
-        // 没有任何启用余额的宠物 → 不查（省外部调用）；配置改了下一拍自然跟上
-        if (flattenPetList(cfg).some((p) => p.balanceEnabled === true)) await refreshBalance();
-      } catch {
-        // 读配置抛错 = 安装损坏（readAllConfig 只在**内置默认**缺失/损坏时抛，用户层写坏只会告警回退）：
-        // 不再重排——每 30 分钟重试一次没有意义，而且会白占一个常驻定时器。修好安装后重启 DSH 即可。
-        return;
-      }
-      arm(sec);
-    }
-    void tick(); // 启动即拉一次（与改造前客户端"先拉一次再定时"一致）
-    return () => {
-      disposed = true;
-      if (timer !== null) clearTimeout(timer);
-    };
-  }, 'dsh-pet: balance poll');
-
   // 碎碎念周期：host 侧调度（前端不再有任何碎碎念定时器）。
   // 一拍 = 读一次配置 + 给"到点"的宠物各生成一句；下一拍按**最短周期**排（多数部署只有一个
   // 周期值，那它就是那个值）。用"读一次配置 + 逐宠物比对 lastWhisperAt"而不是每宠一个定时器：
@@ -2688,9 +2546,9 @@ export function apply(ctx: any): void {
           if (now - (lastWhisperAt.get(petId) ?? 0) < sec * 1000) continue;
           // 占用锁：这只宠物被占用时**跳过这一拍**——不生成也不补（碎碎念是瞬时事件，过期即弃）。
           // 而且**不推进 lastWhisperAt**：锁一放开，下一拍就该照常说。
-          // 宿主侧只挡这一处 **per-pet** 来源；两个**全局段**（balance / workStatus）不在这里挡——
-          // 它们所有宠物共用一份，宿主"跳过写入"会连带静音别的宠物；那两处由渲染端按宠物忽略
-          // （见 src/client/pet.ts 的冻结判定），代价是叶子照常推进、渲染端自己不看。
+          // 宿主侧只挡这一处 **per-pet** 来源；**全局段**（workStatus）不在这里挡——
+          // 它所有宠物共用一份，宿主"跳过写入"会连带静音别的宠物；那一处由渲染端按宠物忽略
+          // （见 runtime/electron-helper/events.js 的冻结判定），代价是叶子照常推进、渲染端自己不看。
           if (lock.locked(petId)) continue;
           lastWhisperAt.set(petId, now);
           // 独立应用可以拿走这一拍（到点该看屏幕就用看屏幕代替这句、刚说过话就让一让），
@@ -2703,7 +2561,7 @@ export function apply(ctx: any): void {
         }
         if (Number.isFinite(min)) next = min;
       } catch {
-        // 读配置抛错 = 安装损坏（同余额定时器）：不再重排，别白占常驻句柄
+        // 读配置抛错 = 安装损坏：不再重排，别白占常驻句柄
         return;
       }
       arm(next);
@@ -2772,7 +2630,7 @@ export function apply(ctx: any): void {
   // /chat 斜杠命令：与当前桌宠对话。无参数 = 碎碎念一句（手动语义：不受 whisperEnabled 门控，
   // 那个字段只关自动周期）；有参数 = 正常对话（走 chatWithPet 同一条路径：记忆 + 人设 + 写盘）。
   // 两个分支都是 **fire-and-forget**：回执不等模型（生成要几秒），文本一律写进 S 的
-  // pets.<id>.say，前端 1s 轮询 /state 后弹气泡——与 /balance 命令同一套语义（回执不带数据）。
+  // pets.<id>.say，前端 1s 轮询 /state 后弹气泡——与碎碎念命令同一套语义（回执不带数据）。
   ctx.effect(
     () =>
       ctx.commands.register({

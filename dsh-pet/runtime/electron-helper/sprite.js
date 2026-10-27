@@ -2,7 +2,7 @@
  * dsh-pet desktop helper —— 宠物本体（PetSprite 类）。
  *
  * 播放 / 拖拽抛掷 / 跨窗碰撞 / 点击穿透 / 右键菜单 / 聊天弹窗 / 气泡渲染。
- * 事件联动（余额 / 碎碎念 / 广播 / 工作状态）不在此文件——见 events.js。
+ * 事件联动（碎碎念 / 广播 / 工作状态）不在此文件——见 events.js。
  * 依赖 constants.js 的全局（CONFIG / VIEW / BASE / S / config / sprites 等），须后加载。
  */
 'use strict';
@@ -126,18 +126,11 @@ class PetSprite {
     // 右键菜单（统一自绘组件，两端共用同一份：树+渲染均来自 shared-core）
     this.menuOpen = false; // 菜单开启期间强制整窗可交互（悬停菜单不触发穿透翻转）
     this.menuClose = null; // 当前菜单的 close()（打开时挂载，关闭后置空）
-    // 余额气泡
-    this.bubbleOn = false;
+    // 气泡（碎碎念 / 工作状态共用单槽）
     this.bubbleTimer = null;
     // 悬浮提示（替代原生 title 属性）：显隐 + 最近一次光标位置（**视口坐标**，见 renderTip）
     this.tipOn = false;
     this.tipCursor = null;
-    this.balanceView = null;
-    this.balanceWrap = false; // true = 当前余额气泡是不可用的「文字说明」（多行，需换行变体）
-    this.balanceState = null; // 最近一次余额读数（展开态要用它算三窗口行；balanceView 只是收起态的行）
-    this.balanceExpanded = false; // 展开态：点一下气泡看三窗口完整读数（每次重新弹出都归位）
-    this.balanceFadeTimer = null; // 展开/收起的淡出等待（250ms 后才换内容，避免硬切）
-    this.prevTick = 0;
     // 说话（碎碎念 / 命令气泡 / 对话回复三合一）：文本/配图由容器统一轮询 /state 后经
     // showWhisper 送进来，本精灵不再自己轮询（改造前的 whisperLoopTimer / broadcastLoopTimer 已删）
     this.whisperOn = false;
@@ -150,7 +143,7 @@ class PetSprite {
     // 两种形态由字段名区分，不靠嗅探——地址形态直接用、名称形态才按素材根拼路径。
     this.whisperUrl = '';
     // 工作状态联动（DSH 会话状态）：容器 1s 轮询 /state 递增 workTick → 本宠物按档位播动画+气泡。
-    // 气泡单槽优先级 终态任务 > whisper > balance > 非终态任务（见 renderBubble）；
+    // 气泡单槽优先级 终态任务 > whisper > 非终态任务（见 renderBubble）；
     // workStatusEnabled 未启用时完全免疫（与浏览器一致）
     this.workOn = false;
     this.workTimer = null;
@@ -204,14 +197,6 @@ class PetSprite {
     this.hit.setAttribute('aria-label', this.pet.name);
     this.bubble = document.createElement('div');
     this.bubble.className = 'pet-bubble';
-    // 余额气泡可点时：点一下切换展开/收起。内容与显隐都归 renderBubble，这里只做两件事——
-    // 就地吞掉事件（别让这次点击落到下面的本体命中层），以及交给 events.js 的 toggleBalanceDetail。
-    this.bubble.addEventListener('click', (e) => {
-      if (!this.balanceClickable()) return;
-      e.stopPropagation();
-      e.preventDefault();
-      this.toggleBalanceDetail();
-    });
     // 悬浮提示：与气泡同处 this.el 内的绝对定位浮层，位置/翻转由 renderTip 决定，
     // 样式走 shared 的 TOOLTIP_CSS（renderer.js 注入，与浏览器端同一份）
     this.tip = document.createElement('div');
@@ -235,7 +220,7 @@ class PetSprite {
     this.inputRegionElements = new Set();
     this.inputRegionMutation = new MutationObserver(() => this.syncInputRegions());
     this.inputRegionMutation.observe(document.body, { childList: true, subtree: true });
-    // 气泡尺寸变了（配图加载完、余额展开/收起）：头顶可能从放得下变成放不下，重新摆
+    // 气泡尺寸变了（配图加载完）：头顶可能从放得下变成放不下，重新摆
     this.bubbleResize = new ResizeObserver(() => this.placeBubble());
     this.bubbleResize.observe(this.bubble);
     this.hit.addEventListener('pointerdown', (e) => this.onPointerDown(e), { signal: ac.signal });
@@ -532,7 +517,7 @@ class PetSprite {
   /**
    * 播放回执上报（issue #122 第 3 项）：把这一段点播的**真实**状态告诉 host。
    *
-   * 只对第三方点播（带 playbackId）上报；自播动画（随机链 / 点击 / 拖拽 / 碎碎念 / 余额…）不报。
+   * 只对第三方点播（带 playbackId）上报；自播动画（随机链 / 点击 / 拖拽 / 碎碎念…）不报。
    * 为什么必须有这一层：host 只知道"受理了"，不知道播没播完——动画在这里播，只有这里知道真相。
    * S.postAction 自带 body 序列化且从不抛异常；再加一层 then 只为留一条排障日志。
    */
@@ -621,7 +606,7 @@ class PetSprite {
         old.pause();
         // 被换下去的那一段若属第三方点播且没播完 → 如实回 cancelled。
         // （"被新点播顶掉"由 host 在受理时直接标记，这里补的是**非点播**打断：
-        //   点击 / 拖拽 / 碎碎念 / 余额 / 工作状态 / 空闲回收。）
+        //   点击 / 拖拽 / 碎碎念 / 工作状态 / 空闲回收。）
         if (this.playback && this.playback !== playbackId) {
           this.reportPlayback(this.playback, 'cancelled', 'superseded');
         }
@@ -675,8 +660,8 @@ class PetSprite {
    * 占用锁（issue #122 第 4 项）：冻结 / 解冻。**与浏览器 PetCard.applyFreeze 同构**。
    *
    * 冻结期间只有三件事被挡住，且都在渲染端：① 随机链（playIdle 一句判断）；
-   * ② 当前正在播的自播动画（暂停，定在当前帧）；③ **自动**来源的余额与工作状态表现
-   * （见 events.js 里 onBalanceTick / onWorkTick / showBalanceNotice 的判断）。
+   * ② 当前正在播的自播动画（暂停，定在当前帧）；③ **自动**来源的工作状态表现
+   * （见 events.js 里 onWorkTick 的判断）。
    * 显式指令（say / anim / position / throw 四个叶子）**一概不挡**——那些是持锁者（或用户手动）
    * 明确要的，正是占用要保护的东西。
    */
@@ -786,7 +771,7 @@ class PetSprite {
     // 占用锁（issue #122 第 4 项）：冻结期间**动画链一律不推进**——事件动画播完就停在最后一帧。
     // 与浏览器 src/client/pet.ts 的 handleEnded 同一处判断、同一原因：下面四条路都会换源播放，
     // 而它们读的是**当前工作状态**（this.workState），跟 workTick 无关，所以 onWorkTick 那道门禁
-    // 拦不住它们——③ 事件动画（余额/碎碎念/**说话**）播完恢复档位最容易被撞上：持锁者每投一次
+    // 拦不住它们——③ 事件动画（碎碎念/**说话**）播完恢复档位最容易被撞上：持锁者每投一次
     // 带 anim 的气泡（默认就是 true），说话动画播完就把工作状态动画点回来，冻结形同虚设。
     // 播放回执已经在上面上报，不受这一行影响。
     if (this.frozen) return;
@@ -814,7 +799,7 @@ class PetSprite {
         this.playOnce(nextWork); // 继续播一遍（once=true）→ ended 再轮换
         return;
       }
-      // 非 workStatus 事件动画（余额/碎碎念）播完：workStatus 仍非终态 → 立即恢复档位循环动画，
+      // 非 workStatus 事件动画（碎碎念）播完：workStatus 仍非终态 → 立即恢复档位循环动画，
       // 不进随机链（长事件期间状态不变，随机链会一直播到状态切换才被拉回）
       if (this.resumeWorkStatusAnim()) return;
       if (animations.idle.length) this.playOnce(S.pick(animations.idle, this.anim));
@@ -1474,7 +1459,7 @@ class PetSprite {
   /**
    * 本窗口是否**必须保持可交互**（= "我正在用这个窗口的鼠标输入"）。
    *
-   * 三个来源：拖拽中 / 右键菜单开着 / 对话弹窗开着（外加可点的余额气泡，见下）——它们都是
+   * 三个来源：拖拽中 / 右键菜单开着 / 对话弹窗开着——它们都是
    * "窗口内的 DOM 或事件链正在被使用"，而它们的输入全部来自**窗口级鼠标事件**
    * （pointermove/pointerup/click）：窗口一旦变回穿透，输入链就断了（拖拽会定格在最后一次采样上，
    * 松手也没人报 pointerup → 宠物按旧速度飞出去）。
@@ -1483,18 +1468,7 @@ class PetSprite {
    * 位移分不清"拖拽跟手"和"漫游/抛掷"）。同时上报控件矩形：菜单/聊天框外的透明区域继续穿透。
    */
   inputBusy() {
-    // 可点的余额气泡是第四个来源：它同样长在窗口里、同样靠窗口级 click 触发，而它悬在宠物头顶的
-    // 余量区——那一块平时是穿透的，正需要借 busy + 控件矩形把它"圈"出来（见 syncInputRegions）。
-    return this.dragState.active || this.menuOpen || this.chatOpen || this.balanceClickable();
-  }
-
-  /**
-   * 余额气泡此刻是否可点可展开：只有 windows 形态（三窗口读数）才有可展开的内容；
-   * money（账户余额）与不可用状态的文字说明点开也没有别的东西，保持不可点、继续穿透。
-   */
-  balanceClickable() {
-    const s = this.balanceState;
-    return !!(this.bubbleOn && s && s.ok && s.shape === 'windows' && !this.balanceWrap);
+    return this.dragState.active || this.menuOpen || this.chatOpen;
   }
 
   /**
@@ -1515,8 +1489,7 @@ class PetSprite {
     if (!window.petBridge || !window.petBridge.setInputRegions) return;
     const rects = [];
     // 控件矩形 = 主进程允许接收点击的区域（矩形外的余量区继续穿透）。
-    // .pet-bubble.is-clickable 是余额气泡的展开态：它悬在宠物头顶的余量区，不登记就点不到。
-    const controls = [...document.querySelectorAll('.dsh-pet-menu-column, .dsh-pet-chat, .pet-bubble.is-clickable')];
+    const controls = [...document.querySelectorAll('.dsh-pet-menu-column, .dsh-pet-chat')];
     for (const el of this.inputRegionElements) {
       if (!controls.includes(el)) {
         this.inputRegionResize.unobserve(el);
@@ -1698,7 +1671,7 @@ class PetSprite {
     e.preventDefault();
     this.stopThrow(); // 菜单弹出前停住飞行中的宠物
     this.stopMove(); // 菜单悬停期间宠物不漫游
-    // 桌面专属工具根项（打开网站 / 查看余额 / 碎碎念 / 对话 / 回到初始位置 / 重载配置）+ 共享菜单树（动作→分类→具体动画）
+    // 桌面专属工具根项（打开网站 / 碎碎念 / 对话 / 回到初始位置 / 重载配置）+ 共享菜单树（动作→分类→具体动画）
     // 碎碎念/对话项无条件显示：手动触发不受 whisperEnabled 限制（该字段只影响自动周期轮询）
     // 首项文案随宿主形态变（OPEN_TARGET）：宿主是 DSH 桌面应用时点是"唤起桌面应用窗口"，仍叫「打开网站」会误导
     const tools = [
@@ -1708,9 +1681,6 @@ class PetSprite {
         hint: OPEN_SHORTCUT_HINT,
       },
     ];
-    // 「查看余额」无条件显示（与浏览器端一致）：关了 balanceEnabled 的宠物也能点——手动请求不受开关限制
-    //（该开关只关自动轮询与档位动画），点了一定给答复。
-    tools.push({ label: '查看余额', action: 'show-balance' });
     tools.push(
       { label: '碎碎念', action: 'whisper' },
       { label: '对话', action: 'chat' },
@@ -1780,10 +1750,6 @@ class PetSprite {
       if (window.petBridge) window.petBridge.openDshSite(ORIGIN); // 系统默认浏览器打开（等效 Ctrl+点击链接）
       return;
     }
-    if (leaf.action === 'show-balance') {
-      this.showBalanceFromMenu(); // 立即拉余额并展示（无需等 1s 触发轮询，展示路径与周期触发一致）
-      return;
-    }
     if (leaf.action === 'whisper') {
       this.showWhisperFromMenu(); // 立即让 host 强制新生成一句并展示（绕过节流；展示路径与周期触发一致）
       return;
@@ -1836,22 +1802,6 @@ class PetSprite {
     window.__dshPetDebug.menuOpen = false;
     this.syncInputBusy(); // 菜单关：若没有别的占用（拖拽/弹窗）则交还常规判定
     if (!this.inputBusy()) this.setInteractive(false);
-  }
-
-  // 「查看余额」菜单：POST 动作让 host 刷新余额（写进 S）。
-  // 结果**这里什么都不用做**：写叶子会让版本号变，挂着的长轮询那一拍立刻返回并展示
-  // （展示走 showBalanceNow/showBalanceNotice 同一路径）。
-  // 注意这里不再直接拉余额：数据只有一个出口（S），菜单只负责"让它刷新"。
-  // **不做 balanceEnabled 门控**（菜单项也无条件显示）：手动请求不受开关限制——开关只关自动轮询与档位动画，
-  // 关掉余额的宠物被点一次菜单也该看到数据（与浏览器端一致）。
-  showBalanceFromMenu() {
-    S.postAction(BALANCE_URL)
-      .then((ok) => {
-        if (!ok) console.warn('[dsh-pet] 菜单查看余额：刷新动作未成功');
-      })
-      .catch((e) => {
-        console.error('[dsh-pet] 菜单查看余额异常', e);
-      });
   }
 
   // 「碎碎念」菜单：POST 动作让 host 立即新生成一句（写进 S）。
@@ -1918,7 +1868,7 @@ class PetSprite {
   // 「重载配置」菜单：请宿主重启桌面 Helper —— 与设置页「保存」**同一条**重启路径
   // （宿主 POST /reload → syncDesktop：串行队列 + 等旧进程真正退出再起新的）。
   // 为什么不在渲染端就地重拉配置：① 每只宠物一个窗口是宿主按 DSH_PET_PETS 建的，
-  // 就地重拉改不了宠物数量/display/size；② 本页的余额/工作状态等全局轮询是一次性启动的
+  // 就地重拉改不了宠物数量/display/size；② 本页的工作状态等全局轮询是一次性启动的
   // （events.js 的 loopsStarted 门控），就地重建 sprite 会漏启新循环或留下旧定时器。
   // 本请求由**即将被重启的这个进程**发出：响应可能永远不回（宿主杀进程时回调地址已失效），
   // 故不 await、不重试，失败只记日志——重载本身就是把本进程换掉。
@@ -1947,7 +1897,7 @@ class PetSprite {
   }
 
   renderBubble() {
-    // 气泡单槽：同一时刻只显示一个（优先级：终态任务 > 碎碎念/对话 > 余额 > 非终态任务）。
+    // 气泡单槽：同一时刻只显示一个（优先级：终态任务 > 碎碎念/对话 > 非终态任务）。
     // 为什么终态任务不让位：完成/失败气泡只活 10s，被事件顶掉就彻底看不到了；非终态任务气泡
     // 常驻（不设自动收起），让位 10s 零损失。与浏览器 src/client/pet.ts 的单槽优先级同一套。
     // 工作气泡与碎碎念同款弹窗样式：宽度自适应 + 自动换行（is-whisper：正常 white-space、宽随内容）
@@ -1956,10 +1906,8 @@ class PetSprite {
     // 素材根同理（配图的归属与动画一致：pet/<素材根>-memes/ 独占 → 用户目录 → 包内）
     const workOn = !!(this.workOn && this.workText);
     const whisperOn = !!(this.whisperOn && this.whisperView);
-    const balanceOn = !!(this.bubbleOn && this.balanceView);
     const workTerminal = this.workState === 'success' || this.workState === 'error';
-    const slot =
-      workTerminal && workOn ? 'work' : whisperOn ? 'whisper' : balanceOn ? 'balance' : workOn ? 'work' : 'none';
+    const slot = workTerminal && workOn ? 'work' : whisperOn ? 'whisper' : workOn ? 'work' : 'none';
     // 配图两种形态二选一（host 判定层保证）：url 直接用那个完整地址，image 按素材根拼表情包路径。
     // 样式/class 两份共用（都在 shared 的 MEME_BUBBLE_CSS），只是 src 的来源不同。
     const whisperImg =
@@ -1968,21 +1916,13 @@ class PetSprite {
           ? S.createMemeImageFromUrl(this.whisperUrl)
           : S.createMemeImage(this.whisperImage, BASE, this.assetRoot)
         : null;
-    this.bubble.classList.toggle(
-      'is-whisper',
-      // 余额「文字说明」（不可用状态）同样套用紧凑变体：字号更小、宽度下限更窄，多行说明更紧凑
-      slot === 'whisper' || slot === 'work' || (slot === 'balance' && this.balanceWrap),
-    );
+    this.bubble.classList.toggle('is-whisper', slot === 'whisper' || slot === 'work');
     this.bubble.classList.toggle(S.MEME_BUBBLE_CLASS, !!whisperImg);
-    // 可点/展开两个状态类：可点 → 气泡参与命中区（见 syncInputRegions）；展开 → 三窗口排版与更宽的盒
-    const clickable = slot === 'balance' && this.balanceClickable();
-    this.bubble.classList.toggle('is-clickable', clickable);
-    this.bubble.classList.toggle('is-expanded', clickable && this.balanceExpanded);
     if (slot === 'none') {
-      // 三者都没有可显示的内容：隐藏（不占位，也就不会挡住任何一层）
+      // 两者都没有可显示的内容：隐藏（不占位，也就不会挡住任何一层）
       this.bubble.classList.remove('is-on');
       window.__dshPetDebug.lastBubbleTitle = '';
-      this.syncInputBusy(); // 气泡没了 → 撤销它的控件矩形与 busy 标记（否则整窗还留着可点区域）
+      this.syncInputBusy(); // 气泡没了 → 同步 busy 标记
       return;
     }
     this.bubble.innerHTML = '';
@@ -1991,70 +1931,18 @@ class PetSprite {
       line.className = 'pet-bub-row';
       line.textContent = this.workText;
       this.bubble.appendChild(line);
-    } else if (slot === 'whisper') {
+    } else {
       // 配图（shared 生成的 <img> + 共用样式）：先看图再读话，符合"配图"的阅读顺序
       if (whisperImg) this.bubble.appendChild(whisperImg);
       const line = document.createElement('div');
       line.className = 'pet-bub-row';
       line.textContent = this.whisperView[0]?.text ?? '';
       this.bubble.appendChild(line);
-    } else {
-      // 展开态的行在这里现算：renderBubble 是只读渲染路径，不缓存（余额每轮都在变，缓存反而要同步失效）
-      const rows =
-        clickable && this.balanceExpanded && this.balanceState
-          ? S.balanceDetailView(this.balanceState)
-          : this.balanceView;
-      const hasTier = rows.some((r) => r.role === 'tier');
-      if (hasTier) {
-        // deepseek 余额单行：余额（峰/谷）¥x — 档位字着色
-        const line = document.createElement('div');
-        line.className = 'pet-bub-row';
-        for (const r of rows) {
-          const span = document.createElement('span');
-          if (r.role === 'tier') span.className = 'pet-bub-tier pet-bub-tier-' + r.tier;
-          span.textContent = r.text;
-          line.appendChild(span);
-        }
-        this.bubble.appendChild(line);
-      } else {
-        for (const r of rows) {
-          // 展开态一行 = 一个窗口：窗口名 + 进度条 + 已用百分比 + 重置倒计时（四段 flex 同行，
-          // 条吃剩余宽度，故条长 = 已用比例）。与浏览器 bubble.ts 的 DOM 结构一一对应。
-          if (r.role === 'quota') {
-            const row = document.createElement('div');
-            row.className = 'pet-bub-quota';
-            const label = document.createElement('span');
-            label.className = 'pet-bub-quota-label';
-            label.textContent = r.label;
-            const bar = document.createElement('span');
-            bar.className = 'pet-bub-quota-bar';
-            const fill = document.createElement('i');
-            fill.className = 'pet-bub-quota-fill pet-bub-quota-' + r.tone;
-            fill.style.width = Math.max(0, Math.min(100, r.percent)) + '%';
-            bar.appendChild(fill);
-            const used = document.createElement('span');
-            used.className = 'pet-bub-quota-used';
-            used.textContent = r.usedText;
-            const reset = document.createElement('span');
-            reset.className = 'pet-bub-quota-reset';
-            reset.textContent = r.resetText;
-            row.append(label, bar, used, reset);
-            this.bubble.appendChild(row);
-            continue;
-          }
-          const div = document.createElement('div');
-          if (r.role === 'error') div.className = 'pet-bub-err';
-          else if (r.role === 'sub') div.className = 'pet-bub-row pet-bub-sub';
-          else div.className = 'pet-bub-row';
-          div.textContent = r.text;
-          this.bubble.appendChild(div);
-        }
-      }
     }
     this.bubble.classList.add('is-on');
     this.placeBubble();
     window.__dshPetDebug.lastBubbleTitle = this.bubble.textContent.slice(0, 60);
-    // 气泡内容/尺寸变了 → 重报控件矩形（可点的余额气泡要靠它拿点击），并同步 busy 标记。
+    // 气泡内容/尺寸变了 → 同步 busy 标记。
     // 这里是所有显隐/换内容的汇聚点，放在这里就不会漏掉任何一条路径。
     this.syncInputBusy();
   }
@@ -2064,7 +1952,7 @@ class PetSprite {
    * （visibleClampRect）：宠物贴近屏幕上沿时，头顶那块要么被 fitWindowTop 让掉（macOS 菜单栏），
    * 要么伸出了屏幕，气泡留在头顶就会被截掉。
    * 只在气泡显示时摆（淡出途中不跳位置）；调用点：renderBubble（显示 / 换内容）、sendBounds（宠物移动）、
-   * bubbleResize（配图加载完、展开收起等尺寸变化）。
+   * bubbleResize（配图加载完等尺寸变化）。
    */
   placeBubble() {
     if (!this.bubble.classList.contains('is-on')) return;
@@ -2080,6 +1968,5 @@ class PetSprite {
     if (below === this.bubble.classList.contains('is-below')) return;
     this.bubble.classList.toggle('is-below', below);
     window.__dshPetDebug.bubbleBelow = below;
-    this.syncInputRegions(); // 可点的余额气泡换了位置，控件矩形跟着换
   }
 }

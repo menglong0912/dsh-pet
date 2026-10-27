@@ -10,7 +10,7 @@ export type WhisperState =
   | { ok: true; text: string; image?: string; ts: number }
   | { ok: false; reason: 'provider-missing' | 'generate-error'; message?: string };
 
-/** 碎碎念气泡行数据：一句话（role:'label' 单行，复用余额气泡的通用行渲染） */
+/** 碎碎念气泡行数据：一句话（role:'label' 单行，复用气泡的通用行渲染） */
 export type WhisperBubbleRow = { role: 'label'; text: string };
 
 /** 碎碎念文本 → 气泡行（两端共用同一份行数据；纯函数，不碰 DOM/React） */

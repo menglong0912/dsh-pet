@@ -5,8 +5,6 @@
  *   GET  /dsh-pet-7340/config              成品配置聚合（{ main: <真实 config.jsonc 解析> }，
  *                                        mock 环境无用户层/文件宠物，只有 main 条目）
  *   GET  /dsh-pet-7340/thumb/<petId>/<name>.webm  从 assets/webm 读素材（petId 段剥掉，统一素材根）
- *   GET  /dsh-pet-7340/balance               模拟 DeepSeek 余额（固定 11.06 元）
- *   GET  /dsh-pet-7340/balance/trigger       触发计数（恒 0，验证轮询基线）
  *
  * 系统通知是浏览器半侧（notify.ts）的独立能力，走 DSH 网页自身事件流，与桌面模式/mock 无关。
  *
@@ -44,22 +42,6 @@ const sendJson = (res, status, body) => {
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const pathname = decodeURIComponent(url.pathname);
-
-  if (pathname === '/dsh-pet-7340/balance') {
-    // 模拟 DeepSeek 余额：fixed 11.06 元 -> 档位 p≈44.7 -> 池索引 2（钱袋如常）
-    sendJson(res, 200, {
-      ok: true,
-      provider: 'deepseek',
-      kind: 'deepseek',
-      data: { currency: 'CNY', total: '11.06', granted: '5.00', toppedUp: '10.00' },
-    });
-    return;
-  }
-
-  if (pathname === '/dsh-pet-7340/balance/trigger') {
-    sendJson(res, 200, { count: 0 });
-    return;
-  }
 
   // 成品配置：mock 环境无用户层/文件宠物 → 只有 main 条目（= 内置默认，字段原样保留）；
   // 消费端按成品结构读取（不校验）。

@@ -12,14 +12,13 @@
  *
  * 服务替身的降级口径（都是显式失败，不假装成功）：
  *   - `agentDefaultModel.currentSelection()` → `{ provider: 'standalone', model: '' }`
- *     → 余额由 CLI / 应用入口在 apply 前给它登记的随机余额 provider 回答（见 ./balance）
- *   - `credentials.resolve()` → 恒 `undefined` → 凭证类失败走 `credential-missing`
+ *   - `credentials.resolve()` → 恒 `undefined`（没有凭证后端）
  *   - `llm.*` → 模型清单为空；生成调用直接抛错 → 碎碎念/对话明确失败，不会静默
  *   - `on(...)` → 不订阅任何事件：独立模式没有 DSH 会话，工作状态因此保持空闲
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-/** 独立模式下余额路由报出的服务商 id（./balance 给它登记随机余额） */
+/** 独立模式没有 DSH 服务商，agentDefaultModel 报出的服务商 id 用这个 */
 export const STANDALONE_PROVIDER = 'standalone';
 
 /** 独立模式的日志接口（与插件对 `ctx.logger` 的使用面一致） */

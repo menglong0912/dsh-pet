@@ -7,7 +7,7 @@
  *
  * 设计：
  *  - provider/model：条目配置的 chatModel 优先（留空 = 不指定），失败回落到
- *    agentDefaultModel.currentSelection()（当前对话的模型，与余额/碎碎念同源）重试一次——
+ *    agentDefaultModel.currentSelection()（当前对话的模型，与碎碎念同源）重试一次——
  *    候选链见 model-selection.ts；
  *  - system = 用户配置的 whisperPrompt（人设：碎碎念与对话共用同一人设）；
  *  - reasoningEffort: 'off' —— 仅当模型声明支持 reasoning effort（含 "off"）时传，

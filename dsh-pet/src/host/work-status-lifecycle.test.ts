@@ -32,7 +32,7 @@ type Harness = {
 let dir = '';
 let savedHome: string | undefined;
 let savedElectron: string | undefined;
-/** 本文件建过的全部实例（after 里统一释放：apply() 现在会起常驻的余额周期定时器） */
+/** 本文件建过的全部实例（after 里统一释放：apply() 现在会起常驻的碎碎念周期定时器） */
 const harnesses: Harness[] = [];
 
 /** 最小响应桩：writeHead 记状态码，Writable 收集 body */
@@ -104,7 +104,7 @@ function setup(): Harness {
         void handler?.({ method: 'GET', url: '/dsh-pet-7340/state', on: noop }, res);
       }),
     dispose: () => {
-      // 插件收尾：清掉待执行的定时器（终态清理 60s；余额周期刷新是常驻的）——
+      // 插件收尾：清掉待执行的定时器（终态清理 60s；碎碎念周期是常驻的）——
       // 不释放的话测试进程跑完不退出。splice 先取走再执行：重复 dispose 是安全的空操作。
       for (const d of disposers.splice(0).reverse()) {
         try {
@@ -129,7 +129,7 @@ before(() => {
 });
 
 after(() => {
-  // 每个用例都 apply() 过一个全新实例：统一在这里释放（否则余额周期定时器等常驻句柄
+  // 每个用例都 apply() 过一个全新实例：统一在这里释放（否则碎碎念周期定时器等常驻句柄
   // 会把测试进程拖住不退出）。用例里也可以自行 dispose()，重复调用是安全的。
   for (const h of harnesses.splice(0)) h.dispose();
   if (savedHome === undefined) delete process.env.DSH_HOME;

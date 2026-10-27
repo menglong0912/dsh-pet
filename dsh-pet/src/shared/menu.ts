@@ -7,7 +7,7 @@
 // 菜单数据单一事实来源 = 合并后的 animations 配置（用户覆盖层自动生效）。
 //
 // 菜单层级（与产品定义一致）：
-//   一级 = 工具项 + 动作：打开网站（宿主是 DSH 桌面应用时，同一项的文案与去向变成「打开软件」——见 runtime/electron-helper/main.js 的 OPEN_TARGET）/ 查看余额 / 重载配置（桌面端专属）与 回到初始位置（两端共用），由各壳注入；
+//   一级 = 工具项 + 动作：打开网站（宿主是 DSH 桌面应用时，同一项的文案与去向变成「打开软件」——见 runtime/electron-helper/main.js 的 OPEN_TARGET）/ 重载配置（桌面端专属）与 回到初始位置（两端共用），由各壳注入；
 //   二级（动作的子级）= 分类：待机 / 转向 / 拖拽 / 点击回应 / 移动 / config 随机动作分类 / 事件档位
 //   三级 = 具体动画名
 //
@@ -29,7 +29,7 @@ export interface MenuLeaf {
   label: string;
   /** 播放的动画名（点播动作）；action 优先于 anim */
   anim?: string;
-  /** 自定义动作：open-site=打开网站 / show-balance=查看余额；whisper=立即碎碎念一句；
+  /** 自定义动作：open-site=打开网站；whisper=立即碎碎念一句；
    * chat=打开对话弹窗；home=回到初始位置；reload=重载配置（桌面端专属：重启桌面 Helper，
    * 全部桌面宠物窗口按最新配置重建——浏览器端刷新页面即可，不注入此项）；
    * set-display=改这只宠物的显示位置（目标值见 display 字段；**两端都注入**——桌面端拿它把
@@ -37,7 +37,7 @@ export interface MenuLeaf {
    * third-party=第三方注册的菜单项（见 buildMoreBranch）——点击只把 (owner, label) 上报给宿主，
    * 具体做什么由注册方自己决定。
    * 手动触发均不受 whisperEnabled 影响（该字段只关自动周期轮询） */
-  action?: 'open-site' | 'show-balance' | 'whisper' | 'chat' | 'home' | 'reload' | 'set-display' | 'third-party';
+  action?: 'open-site' | 'whisper' | 'chat' | 'home' | 'reload' | 'set-display' | 'third-party';
   /** set-display 的目标显示位置（与设置页「显示位置」下拉框同一套取值） */
   display?: PetDisplay;
   /** third-party：注册它的 owner（身份键，**只用于回传，不显示**）。同一个 owner 的项收在同一个
@@ -178,7 +178,6 @@ export function buildAppMenuNodes(items: readonly MenuMoreItem[]): MenuNode[] {
 
 /** 事件名 → 分类标签（无映射时用事件名本身） */
 const EVENT_LABELS: Record<string, string> = {
-  balance: '余额档位',
   whisper: '碎碎念',
   workStatus: '工作状态',
 };

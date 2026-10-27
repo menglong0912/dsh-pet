@@ -346,7 +346,7 @@ test('settings browser script edits the first desktop pet and shows one automati
     return elements.get(id)!;
   };
   const position = { corner: 'top-left', marginX: 24, marginY: 100 };
-  const webPet = { id: 'web1', name: '网页', size: 300, display: 'web', balanceEnabled: false, position };
+  const webPet = { id: 'web1', name: '网页', size: 300, display: 'web', position };
   const config = {
     main: {
       whisperPrompt: '默认人设',
@@ -360,7 +360,6 @@ test('settings browser script edits the first desktop pet and shows one automati
           name: '吃白饭的',
           size: 500,
           display: 'desktop',
-          balanceEnabled: false,
           whisperEnabled: false,
           workStatusEnabled: true,
           fixedEnabled: false,

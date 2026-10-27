@@ -78,7 +78,7 @@ export function timeSlotOf(hour: number): TimeSlot {
 }
 
 /**
- * 星期几 → 工作日 / 周末（周六周日算周末；与余额低谷判定同一口径，见 balance/deepseek-common.ts）。
+ * 星期几 → 工作日 / 周末（周六周日算周末）。
  * @param day Date.getDay()（0 = 周日）
  * @returns 「周末」（周六/周日）或「工作日」
  */

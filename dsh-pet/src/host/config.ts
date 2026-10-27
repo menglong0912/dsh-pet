@@ -19,7 +19,7 @@
  *     设置页写的用户层本就只含 pets + notificationsEnabled；文件宠物也可以写得很短）；
  *   - **对象字段也是整段替换**（`physics` / `eventsRefreshSec` / `whisperModel` … 都适用）：
  *     写了就整段用自己的，缺的子键**不会**从内置默认补回来——消费端各自兜底
- *     （如余额周期读不到就按 1800、碎碎念按 300）；
+ *     （如碎碎念周期读不到就按 300）；
  *   - **显式写了但非法**（类型/结构/白名单外）→ 告警 + 填内置默认值
  *     （同一 文件+字段 进程内只告警一次，避免每请求刷屏；保证返回绝不出现残缺/非法值）；
  *   - **例外：全局默认**（GLOBAL_DEFAULT_KEYS 那 10 个「用户级成本/偏好/环境/节奏」字段）——
@@ -77,9 +77,8 @@ export const ID_FORBIDDEN = /[\\/:\x00-\x1f]/;
  *   - `whisperModel` / `chatModel`：碎碎念 / 对话用哪个模型 = 成本与能力偏好
  *   - `whisperImageEnabled` / `chatImageEnabled`：要不要把表情包清单附进请求 = token 成本
  *   - `chatImageLimit`：对话那张清单**最多几张**——同属 token 成本（清单每条消息都附）
- *   - `eventsRefreshSec`：多久调一次模型 / 拉一次余额 = 成本与节奏。注意它内部两个键的**消费端**
- *     不同：`.whisper` 按宠物所属条目读（种类可覆盖）；`.balance` 只读 main 条目
- *     （余额数据一份 + host 只有一个定时器，架构上给不了每种类一个周期）
+ *   - `eventsRefreshSec`：多久调一次模型 / 触发一次碎碎念 = 成本与节奏。注意它的**消费端**：
+ *     `.whisper` 按宠物所属条目读（种类可覆盖）
  *   - `physics`：拖拽抛掷手感；`petCollision` 更是**跨宠物**行为（相撞按动量守恒弹开），
  *     按种类分在语义上站不住：两只不同种类的宠物相撞时用谁的系数？
  *   - `confineToScreen`：多屏是用户环境 / 使用习惯，不是宠物属性
@@ -308,8 +307,7 @@ function animationsValid(a: unknown): boolean {
       }
     }
   }
-  const balance = evEntries.balance;
-  return Array.isArray(balance) && balance.length > 0;
+  return true;
 }
 
 /** animationWeights 段校验（idle/turn/move 三个非负数字） */
@@ -467,6 +465,32 @@ function packBase(
   return out ?? base;
 }
 
+/**
+ * 已删除的余额配置键（D2）：旧配置里还会带着它们，**先照常通过校验**，但不进入成品——
+ * 读出来的结果与「没写这些键」完全一致，动作菜单里也不会再冒出一个 balance 事件分类。
+ * 只在读取侧丢弃，绝不改写磁盘上的用户文件。
+ */
+function dropRemovedBalanceKeys(key: string, value: unknown): unknown {
+  if (key === 'eventsRefreshSec') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    if (!('balance' in (value as Record<string, unknown>))) return value;
+    const out = { ...(value as Record<string, unknown>) };
+    delete out.balance;
+    return out;
+  }
+  if (key === 'animations') {
+    if (!value || typeof value !== 'object') return value;
+    const anims = value as Record<string, unknown>;
+    const events = anims.events;
+    if (!events || typeof events !== 'object' || Array.isArray(events)) return value;
+    if (!('balance' in (events as Record<string, unknown>))) return value;
+    const nextEvents = { ...(events as Record<string, unknown>) };
+    delete nextEvents.balance;
+    return { ...anims, events: nextEvents };
+  }
+  return value;
+}
+
 /** 一个覆盖文件 → 完整条目：顶层逐字段合并（没写/非法 → 内置默认 + 告警），pets 逐实例 */
 function mergeEntry(
   base: Record<string, unknown>,
@@ -485,15 +509,15 @@ function mergeEntry(
     // 结构性常态：覆盖层（尤其是设置页写的用户层）本来就不写顶层字段 → 缺失静默取默认，不告警；
     // 只有「显式写了但非法」才告警（真异常，默认值兜底）
     if (own === undefined) {
-      out[key] = base[key];
+      out[key] = dropRemovedBalanceKeys(key, base[key]);
       continue;
     }
     if (!topFieldValid(key, own)) {
       warnOnce(`${label}:${key}`, `「${label}」的 ${key} 非法，已取默认值`);
-      out[key] = base[key];
+      out[key] = dropRemovedBalanceKeys(key, base[key]);
       continue;
     }
-    out[key] = own;
+    out[key] = dropRemovedBalanceKeys(key, own);
   }
   return out;
 }
@@ -585,7 +609,6 @@ function mergePet(
     id,
     name,
     size: petNumber(p.size, base.size, 1, label, 'size', id),
-    balanceEnabled: petBool(p.balanceEnabled, base.balanceEnabled, label, 'balanceEnabled', id),
     whisperEnabled: petBool(p.whisperEnabled, base.whisperEnabled, label, 'whisperEnabled', id),
     workStatusEnabled: petBool(p.workStatusEnabled, base.workStatusEnabled, label, 'workStatusEnabled', id),
     fixedEnabled: petBool(p.fixedEnabled, base.fixedEnabled, label, 'fixedEnabled', id),
@@ -712,8 +735,6 @@ export function saveUserConfig(
       console.warn(`dsh-pet: pet「${id}」缺少 name，已按默认 ${id}（宠物 id）处理`);
       name = id;
     }
-    const balanceEnabled = pp.balanceEnabled;
-    if (typeof balanceEnabled !== 'boolean') return null;
     const whisperEnabled = pp.whisperEnabled;
     if (whisperEnabled !== undefined && typeof whisperEnabled !== 'boolean') return null;
     const workStatusEnabled = pp.workStatusEnabled;
@@ -741,7 +762,6 @@ export function saveUserConfig(
       id,
       name,
       size,
-      balanceEnabled,
       whisperEnabled,
       workStatusEnabled,
       fixedEnabled,

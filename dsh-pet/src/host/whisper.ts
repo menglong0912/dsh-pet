@@ -1,11 +1,11 @@
 /**
  * 碎碎念生成（host 半侧）：用 DSH 的 LLM 统一抽象层（ctx.llm）按条目配置的 whisperModel
- * （留空 = 当前对话用的 provider/model）生成一句话。与余额不同：不自己拼各服务商端点、不碰凭证——
+ * （留空 = 当前对话用的 provider/model）生成一句话。不自己拼各服务商端点、不碰凭证——
  * ctx.llm 已接管适配器路由/模型解析/凭据，天然与对话页完全一致。
  *
  * 设计：
  * - provider/model：条目配置的 whisperModel 优先（留空 = 不指定），失败回落到
- *   agentDefaultModel.currentSelection()（当前对话的模型，与余额同源）重试一次——
+ *   agentDefaultModel.currentSelection()（当前对话的模型，与对话同源）重试一次——
  *   候选链见 model-selection.ts；
  * - system = 用户配置的 whisperPrompt（人设），user = 一个极简的"说句话"请求；
  * - 配图（可选）：开启 whisperImageEnabled 时，由调用方从表情包池随机抽一张传入，

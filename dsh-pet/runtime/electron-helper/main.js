@@ -67,7 +67,7 @@ const { shouldLinearize, resolveForcedScale, resolvePetScale } = require('./dpi-
 const { trayPlatform } = require('./tray-platform.js');
 const { buildDeskGeometry } = require('./desktop-geometry.js');
 
-// 允许无用户手势直接播放（余额动画等）
+// 允许无用户手势直接播放（动画素材）
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 // 显式定名：Helper 是被 `electron.exe <main.js>` 直接拉起的，Electron 取不到 app 名会回落成
@@ -810,7 +810,7 @@ app.whenReady().then(() => {
   );
 
   if (BRIDGE) {
-    // 自定义 scheme 接住渲染端全部请求（配置/余额/碎碎念/广播/素材）
+    // 自定义 scheme 接住渲染端全部请求（配置/碎碎念/广播/素材）
     protocol.handle('dsh-pet-bridge', (request) =>
       handleBridgeRequest(request).catch((e) => {
         console.error('[dsh-pet-desktop-helper] bridge handler error:', String(e && e.message ? e.message : e));
@@ -1039,7 +1039,7 @@ app.whenReady().then(() => {
     const afterMs = Number(process.env.DSH_PET_SMOKE_AFTER_MS || 9000);
     const target = windows.values().next().value;
     if (target) {
-      // 转发渲染端 console（定位动画/余额/错误问题）
+      // 转发渲染端 console（定位动画/错误问题）
       target.webContents.on('console-message', (event) => {
         console.log(`[renderer:${event.level}] ${event.message}`);
       });

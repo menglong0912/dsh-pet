@@ -410,7 +410,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /**
    * 演出期间占着自家宠物的占用锁（`/lock` 的 lockId）：持锁时渲染端的随机链（堆雪人这类随机活动、
-   * 自己走开、转身）和自动来源的工作状态 / 余额表现都停下，两段演出动画之间宠物停在站姿上。
+   * 自己走开、转身）和自动来源的工作状态表现都停下，两段演出动画之间宠物停在站姿上。
    * 应用自己的请求统一带着它（petRequest），所以提醒、串门这些照常能说话、播动画。
    */
   let showLock: string | null = null;
