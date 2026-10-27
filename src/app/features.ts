@@ -45,6 +45,7 @@ import { ActivityTracker, describeActivity, durationText } from './activity';
 import type { ActivitySnapshot } from './activity';
 import type { AppConfig } from './app-config';
 import { SKILLS, WEAPONS, fight, shadowOf, tribulate } from './battle';
+import type { BattleEvent, Fighter } from './battle';
 import { BattleShow, FX_ASSETS, LINE_MS, SHOW_ANIMS, swapSides, timeline } from './battle-show';
 import type { Shot, Step } from './battle-show';
 import { arenaScoreboard, openArenaWindow } from './arena-window';
@@ -80,6 +81,8 @@ import {
   NOTE_MAX,
   PING_MS,
   randomSparNonce,
+  sendDuel,
+  sendDuelReveal,
   sendNote,
   sendReveal,
   sendSpar,
@@ -92,6 +95,10 @@ import {
   VisitHost,
 } from './visit';
 import type {
+  DuelAnswer,
+  DuelFailure,
+  DuelReply,
+  DuelRevealReply,
   HostEvent,
   HostHandlers,
   KnockAnswer,
@@ -157,6 +164,8 @@ const MEDITATE_JITTER_MIN = 20;
  * （回访占名额）= 恰好 20。家里有客时换成送客 + 切磋 + 一起玩 + 请吃零食 + 熟人 + 捎话，至多 17 项，
  * 加上修炼的项会超 20：wantedLabels 按优先级兜底截断，先少的是尾巴上的零食和捎话。 */
 const MENU_NEIGHBORS_MAX = 13;
+/** 「修炼/切磋/…」最多列几个邻居（X15；熟人在前，照邻居列表的排序） */
+const DUEL_NEIGHBORS_MAX = 3;
 /** 宿主每个 owner 的菜单项上限（src/host/menu.ts 的 ITEMS_MAX，`>` 才拒） */
 const MENU_ITEMS_MAX = 20;
 /** 做客时转播回自家的气泡显示多久（窗口同时调亮这么久） */
@@ -1092,7 +1101,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /** 接待这一侧：VisitHost 收到敲门、说话、告辞时来问这里 */
   const hostHandlers: HostHandlers = {
-    canHost: () => trip === null && knockingOn === null,
+    canHost: () => trip === null && knockingOn === null && !duelWait && !duelAccepted && !duel,
     knocked(visitor) {
       log(`串门：${visitor.owner}（${visitor.address}）家的 ${visitor.pet} 来敲门`);
       // 正在演一场（心魔 / 历练）：照常接待，先把这场快进结束——客人窗口要站在宠物旁边，不能让两只叠着
@@ -1153,6 +1162,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     },
     reveal(visitor, nonce, line) {
       return hostReveal(visitor, nonce, line);
+    },
+    // 隔空切磋（X15）：协议层已验过签名、模式、版本与名帖；关不关、忙不忙、主人答不答应在这边
+    duel(visitor, card, commit) {
+      return hostDuel(visitor, card, commit);
+    },
+    duelReveal(visitor, nonce, line) {
+      hostDuelReveal(visitor, nonce, line);
+    },
+    duelConceded(visitor, reason) {
+      hostDuelConceded(visitor, reason);
     },
     left(visitor, reason, text) {
       seeGuestOff(
@@ -1306,6 +1325,15 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
    */
   function visitActions(): Map<string, () => unknown> {
     const actions = new Map<string, () => unknown>();
+    // 隔空切磋（X15）：有人挑战、等主人答复时，两项应答和敲门的「让进 / 不让进」同一优先级
+    const waiting = duelWait;
+    if (waiting) {
+      actions.set(`${MENU_CULTIVATION_GROUP}/应战：${waiting.visitor.owner} 家的 ${waiting.visitor.pet}`, () =>
+        answerDuel(true),
+      );
+      actions.set(`${MENU_CULTIVATION_GROUP}/不应战`, () => answerDuel(false));
+      return actions;
+    }
     const knocking = visitHost?.knocking();
     const guest = visitHost?.guest();
     const { enabled, visiting } = deps.appConfig().visit;
@@ -1431,7 +1459,17 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       await say('它好像已经不在附近了～');
       return;
     }
-    if (trip || knockingOn || visitHost?.guest() || visitHost?.knocking() || !deps.appConfig().visit.visiting) return;
+    if (
+      trip ||
+      knockingOn ||
+      duel ||
+      duelWait ||
+      duelAccepted ||
+      visitHost?.guest() ||
+      visitHost?.knocking() ||
+      !deps.appConfig().visit.visiting
+    )
+      return;
     // 出门前先收起历练小窗；正在打或者正在赶路时不能出门（进度在存档里，等这一趟走完再去）
     if (adventure && !adventure.beforeTrip()) {
       await say('这边正打着呢，等这一趟走完再去吧～');
@@ -1931,7 +1969,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   /** 开小窗：存档里有没走完的一趟就接着走 */
   async function runAdventure(): Promise<void> {
     const flow = ensureAdventure();
-    if (!flow || trip !== null || hosting !== null) return;
+    if (!flow || trip !== null || hosting !== null || duelWait !== null || duelAccepted !== null) return;
     await flow.open();
     void refreshMenu();
   }
@@ -1959,7 +1997,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
    */
   async function runTrial(): Promise<void> {
     const practice = cultivationOn();
-    if (!practice || battle || trip || hosting) return;
+    if (!practice || battle || trip || hosting || duelWait || duelAccepted) return;
     // 上一场演完还没收完的那组立刻关：新一场不能和它叠着，也不能让它稍后收摊时关错窗口（§X14）
     for (const old of [...trialWindowGroups]) closeTrialWindows(old, 0);
     let windows: TrialWindows | null = null;
@@ -2080,7 +2118,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
    */
   async function runTribulation(wantPill: boolean): Promise<void> {
     const practice = cultivationOn();
-    if (!practice || battle || trip || hosting) return;
+    if (!practice || battle || trip || hosting || duelWait || duelAccepted) return;
     const plan = practice.tribulationPlan(Date.now());
     if (!plan) {
       void say('还没修到圆满，先不急～');
@@ -2153,7 +2191,15 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
    */
   function tribulationActions(practice: Cultivation, actions: Map<string, () => unknown>): void {
     // 历练小窗开着时不能开心魔试炼和渡劫：先关了小窗再说；收起来的小窗只在宠物还在秘境里时算数（Y4）
-    if (battle || trip !== null || hosting !== null || adventure?.blocking === true) return;
+    if (
+      battle ||
+      trip !== null ||
+      hosting !== null ||
+      duelWait !== null ||
+      duelAccepted !== null ||
+      adventure?.blocking === true
+    )
+      return;
     const plan = practice.tribulationPlan(Date.now());
     if (!plan) return;
     actions.set(`${MENU_CULTIVATION_GROUP}/渡劫`, () => void runTribulation(false));
@@ -2209,6 +2255,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
     // 演完到 `CLOSE_HOLD_MS` 收摊之间回家 / 被请回也要立刻关（那会儿 spar 已经是 null，靠窗口组收尾）
     for (const windows of [...sparWindows]) closeSparWindows(windows, 0);
+    // 隔空切磋也收掉：等主人答复的回 timeout，已应战的那场不再记账（窗口在上面那轮里关）
+    cancelDuels();
   }
 
   /**
@@ -2227,10 +2275,106 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     else setTimeout(close, afterMs);
   }
 
+  /**
+   * 一场对战的演出（X12 客人这一侧、X15 隔空切磋两边共用）：开对手窗口 → 擂台 → 特效层 →
+   * BattleShow → 收摊，窗口记进 sparWindows，cancelSpar 能立刻全关。
+   * 差别用参数传：本地是引擎 0 号还是 1 号（1 号要 swapSides）、自家宠物的台词走哪条、
+   * 做客时的亮度、对手随 reveal 带来的赛后感言。
+   */
+  async function runSparShow(show: {
+    /** 引擎视角：0 号 = 被挑战方（主人家 / 应战方），1 号 = 挑战方（客人 / 隔空挑战方） */
+    zero: Fighter;
+    one: Fighter;
+    zeroStage: string;
+    oneStage: string;
+    events: BattleEvent[];
+    lineRng: () => number;
+    /** 本地是 0 号还是 1 号（1 号换边成本地视角） */
+    local: 0 | 1;
+    /** 对手窗口的名牌（「X 家的 Y」） */
+    foeLabel: string;
+    /** 自家宠物的台词出口（做客时是 showRelay，在家是 say(anim:false)） */
+    selfSay: (line: string, durationMs: number) => void;
+    /** 对手随 reveal 带来的赛后感言（演完上对手窗口；没有就不说） */
+    foeLine?: string;
+    /** 开演前 / 收摊后（做客时用来亮回原色、退回半透明） */
+    beforeShow?: () => void;
+    afterShow?: () => void;
+    /** 这一场已经取消（回家了 / 被请回 / 换了一场）：收完摊就别再说话、别再动菜单 */
+    cancelled?: () => boolean;
+  }): Promise<void> {
+    const localFighter = show.local === 0 ? show.zero : show.one;
+    const foeFighter = show.local === 0 ? show.one : show.zero;
+    const localStage = show.local === 0 ? show.zeroStage : show.oneStage;
+    const foeStage = show.local === 0 ? show.oneStage : show.zeroStage;
+    // 两边先照引擎顺序排（0 号 = 被挑战方），本地是 1 号时再换边成本地视角
+    const ordered = timeline(show.events, [show.zero.name, show.one.name], show.lineRng, [
+      show.zero.skills,
+      show.one.skills,
+    ]);
+    const steps = show.local === 1 ? swapSides(ordered) : ordered;
+    // 对手窗口：本机 /app/guest，默认粉色——两边都是自家原色、对方粉色，和对面屏幕对称
+    const foe = openGuestWindow(
+      electron,
+      `${new URL(deps.petBase).origin}/app/guest`,
+      show.foeLabel,
+      homePet.box,
+      () => undefined,
+      { scale: 1, tight: true },
+    );
+    // 对手要播的动画先取到窗口里（X7：换源不等网络，出手才和飞行物对得上）
+    foe.preload(SHOW_ANIMS);
+    const arena = openArenaWindow(electron, `${new URL(deps.petBase).origin}/app/arena`, homePet.box, () =>
+      foe.bounds(),
+    );
+    // 特效层：对手就是这一场的对手窗口（默认粉色，不用心魔配色）
+    const fx = openShowFx(
+      () => foe.bounds(),
+      () => foe.side === 'left',
+    );
+    const windows: SparWindows = { foe, arena, fx };
+    sparWindows.add(windows);
+    const scoreboard = arenaScoreboard({
+      self: { label: `${localFighter.name} · ${localStage}`, maxHp: localFighter.hp },
+      foe: { label: `${foeFighter.name} · ${foeStage}`, maxHp: foeFighter.hp },
+    });
+    battle = new BattleShow(steps, {
+      self: {
+        // 自家宠物面朝对手（素材统一画成朝左，对手站右边时整段镜像）
+        play: (anim, rate) => void playExtra(anim, { facing: foe.side === 'left' ? 'left' : 'right', rate }),
+        say: show.selfSay,
+      },
+      foe: {
+        play: (anim, rate) => foe.play(anim, rate),
+        say: (line, durationMs) => foe.say(line, durationMs),
+      },
+      arena: (hp) => {
+        arena.place(homePet.box(), foe.bounds());
+        // 左右跟着两只的实际位置：对手站在自家宠物左边时它那条在左
+        arena.update(scoreboard(hp, foe.side === 'left'));
+        fx.place();
+      },
+      shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
+    });
+    show.beforeShow?.();
+    void refreshMenu();
+    const current = battle;
+    await holdPet(steps);
+    await current.run();
+    // 不清零的话「快进」常驻菜单、下一场被 guard 挡住（真机踩过）；已经换了下一场就别误清
+    if (battle === current) battle = null;
+    releasePet(disposed ? 0 : CLOSE_HOLD_MS);
+    if (disposed || show.cancelled?.()) return;
+    if (show.foeLine) foe.say(show.foeLine, LINE_MS);
+    void refreshMenu();
+    closeSparWindows(windows, CLOSE_HOLD_MS);
+    show.afterShow?.();
+  }
+
   /** 主人家发起切磋（菜单「串门/和客人切磋」）：把 spar-invite 捎给客人，等它应战（§X5 第 1 步） */
   function inviteSpar(): void {
     const current = hosting;
-    if (!current?.visitor.id || !cultivationOn() || spar || battle) return;
+    if (!current?.visitor.id || !cultivationOn() || spar || battle || duelWait || duelAccepted) return;
     if (!visitHost?.tell({ type: 'spar-invite' })) return;
     const state: SparState = { role: 'host', stage: 'invited', since: Date.now(), timer: null };
     state.timer = setTimeout(() => {
@@ -2250,7 +2394,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const practice = cultivationOn();
     if (!practice) return { ok: false, reason: 'off' };
     // 在打才算忙；等客人应战（invited）的那份不算——客人现在就是来应战的
-    if (battle || (spar && !(spar.role === 'host' && spar.stage === 'invited'))) return { ok: false, reason: 'busy' };
+    if (battle || duel || duelWait || duelAccepted || (spar && !(spar.role === 'host' && spar.stage === 'invited')))
+      return { ok: false, reason: 'busy' };
     // 没验证过身份的客人没有稳定的 id：修为奖励没法按邻居去重、邻居簿也没得记，不接
     if (!visitor.id) return { ok: false, reason: 'no-id' };
     const hostNonce = randomSparNonce();
@@ -2402,7 +2547,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   async function startGuestSpar(): Promise<void> {
     const current = trip;
     const practice = cultivationOn();
-    if (!current || !practice || spar || battle) return;
+    if (!current || !practice || spar || battle || duel || duelWait || duelAccepted) return;
     const state: SparState = { role: 'guest', stage: 'asking', since: Date.now(), timer: null };
     spar = state;
     relay('（切磋）跟它过两招～');
@@ -2458,82 +2603,431 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       `和 ${current.host.owner} 家的 ${current.host.pet} 切磋，${won ? '赢了' : '输了'}`,
     );
     // 演出：跟主人家同一张时间线（同一对随机数、同一个 timeline、同一颗台词种子）。引擎里主人家是 0 号，
-    // 这边先按引擎序号排好名字与招式表，再换边成本地视角（自家宠物 0 号、对手 1 号）
-    const ordered = timeline(events, [hostFighter.name, you.name], sparLineRng(ownNonce, reply.nonce), [
-      hostFighter.skills,
-      you.skills,
-    ]);
-    const steps = swapSides(ordered);
+    // 这里用共用的演出函数换边成本地视角（自家宠物 0 号、对手 1 号）
     state.stage = 'showing';
-    // 对手窗口：本机 /app/guest，名牌是主人家的；默认粉色——两边都是自家原色、对方粉色，和主人家屏幕对称
-    const foe = openGuestWindow(
-      electron,
-      `${new URL(deps.petBase).origin}/app/guest`,
-      `${current.host.owner} 家的 ${current.host.pet}`,
-      homePet.box,
-      () => undefined,
-      { scale: 1, tight: true },
-    );
-    // 对手要播的动画先取到窗口里（X7：换源不等网络，出手才和飞行物对得上）
-    foe.preload(SHOW_ANIMS);
-    const arena = openArenaWindow(electron, `${new URL(deps.petBase).origin}/app/arena`, homePet.box, () =>
-      foe.bounds(),
-    );
-    // 特效层：对手是主人家的宠物窗口（默认粉色，不用心魔配色）
-    const fx = openShowFx(
-      () => foe.bounds(),
-      () => foe.side === 'left',
-    );
-    const windows: SparWindows = { foe, arena, fx };
-    sparWindows.add(windows);
-    const scoreboard = arenaScoreboard({
-      self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
-      foe: { label: `${hostFighter.name} · ${stageLabel(reply.card.stage)}`, maxHp: hostFighter.hp },
+    await runSparShow({
+      zero: hostFighter,
+      one: you,
+      zeroStage: stageLabel(reply.card.stage),
+      oneStage: practice.view().label,
+      events,
+      lineRng: sparLineRng(ownNonce, reply.nonce),
+      local: 1,
+      foeLabel: `${current.host.owner} 家的 ${current.host.pet}`,
+      selfSay: (line, durationMs) => showRelay(line, durationMs),
+      beforeShow: () => {
+        // 做客时自家宠物是半透明的（AWAY_OPACITY）：开演亮回原色；演出期间转播不改亮度，
+        // 等窗口一起收摊（CLOSE_HOLD_MS）后才退回半透明
+        if (relayTimer !== null) {
+          clearTimeout(relayTimer);
+          relayTimer = null;
+        }
+        fadeHome(electron, 1);
+      },
+      afterShow: () => {
+        // 窗口收摊时退回做客的半透明；转播的气泡还挂着就交给它到点再退（又开了一场就不动）
+        setTimeout(() => {
+          if (trip === current && battle === null && relayTimer === null) fadeHome(electron, AWAY_OPACITY);
+        }, CLOSE_HOLD_MS);
+      },
+      cancelled: () => trip !== current || spar !== state,
     });
-    battle = new BattleShow(steps, {
-      self: {
-        // 自家宠物面朝对手（素材统一画成朝左，对手站右边时整段镜像）
-        play: (anim, rate) => void playExtra(anim, { facing: foe.side === 'left' ? 'left' : 'right', rate }),
-        // say 会先把宠物叫回家：演出台词只发 anim: false 的转播气泡（演出期间 showRelay 不改亮度）
-        say: (line, durationMs) => showRelay(line, durationMs),
-      },
-      foe: {
-        play: (anim, rate) => foe.play(anim, rate),
-        say: (line, durationMs) => foe.say(line, durationMs),
-      },
-      arena: (hp) => {
-        arena.place(homePet.box(), foe.bounds());
-        // 左右跟着两只的实际位置：主人家的宠物站在自家宠物左边时它那条在左
-        arena.update(scoreboard(hp, foe.side === 'left'));
-        fx.place();
-      },
-      shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
-    });
-    // 做客时自家宠物是半透明的（AWAY_OPACITY）：开演亮回原色；演出期间转播不改亮度，
-    // 等窗口一起收摊（CLOSE_HOLD_MS）后才退回半透明
-    if (relayTimer !== null) {
-      clearTimeout(relayTimer);
-      relayTimer = null;
-    }
-    fadeHome(electron, 1);
-    void refreshMenu();
-    const show = battle;
-    await holdPet(steps);
-    await show.run();
-    battle = null; // 不清零的话「快进」常驻菜单、下一场被 guard 挡住（真机踩过）
-    releasePet(disposed ? 0 : CLOSE_HOLD_MS);
-    const cancelled = trip !== current || spar !== state || disposed;
+    if (trip !== current || spar !== state || disposed) return;
     if (spar === state) spar = null;
-    if (cancelled) return;
     // 结果与感言照旧转播（演完了，按平时的转播调亮、到点退回半透明）
     relay(won ? '（切磋）这场我赢啦！' : '（切磋）这场输了，下次再战～');
     relay(remark);
     void refreshMenu();
-    closeSparWindows(windows, CLOSE_HOLD_MS);
-    // 窗口收摊时退回做客的半透明；转播的气泡还挂着就交给它到点再退（又开了一场就不动）
-    setTimeout(() => {
-      if (trip === current && battle === null && relayTimer === null) fadeHome(electron, AWAY_OPACITY);
-    }, CLOSE_HOLD_MS);
+  }
+
+  // ---------- 隔空切磋（X15） ----------
+
+  /** 挑战方这一侧的一场隔空切磋（发出邀约到演出结束） */
+  interface DuelChallenge {
+    neighbor: Neighbor;
+    stage: 'asking' | 'showing';
+    since: number;
+    /** 自己出的随机数（承诺先发出去） */
+    nonce: string;
+  }
+
+  /** 应战方这一侧：等主人答复的挑战 */
+  interface DuelWait {
+    visitor: Visitor;
+    card: SparCard;
+    commit: string;
+    hostNonce: string;
+    resolve: (answer: DuelAnswer) => void;
+    timer: ReturnType<typeof setTimeout> | null;
+  }
+
+  /** 应战方这一侧：已经应战、等挑战方亮随机数的那一场 */
+  interface DuelAccepted {
+    visitor: Visitor;
+    card: SparCard;
+    hostNonce: string;
+  }
+
+  let duel: DuelChallenge | null = null;
+  /** 有人来挑战、等主人答复（菜单里是「应战 / 不应战」） */
+  let duelWait: DuelWait | null = null;
+  /** 已应战、等挑战方亮随机数（协议层超时会调 duelConceded 收掉） */
+  let duelAccepted: DuelAccepted | null = null;
+
+  /** 收掉还挂着的隔空挑战（退出 / 收摊）：等主人答复的那次回 timeout，已应战的那场不再记账 */
+  function cancelDuels(): void {
+    const waiting = duelWait;
+    if (waiting) {
+      duelWait = null;
+      if (waiting.timer !== null) clearTimeout(waiting.timer);
+      waiting.resolve({ ok: false, reason: 'timeout' });
+    }
+    duelAccepted = null;
+    duel = null;
+  }
+
+  /** 主人答复 / 超时 / 自动应战都走这里：清掉等待状态，答应时把这边自己的名帖与随机数交回去 */
+  function settleDuel(state: DuelWait, answer: DuelAnswer): void {
+    if (duelWait !== state) return;
+    duelWait = null;
+    if (state.timer !== null) clearTimeout(state.timer);
+    if (answer.ok) duelAccepted = { visitor: state.visitor, card: state.card, hostNonce: state.hostNonce };
+    state.resolve(answer);
+    void refreshMenu();
+  }
+
+  /**
+   * 应战方这一侧收到 /v1/duel（X15）：off / busy 在这里答；能接就冒一句、挂出「应战 / 不应战」，
+   * 熟人在「直接请进」打开且主人在电脑前时直接应战，不挂菜单。
+   */
+  function hostDuel(visitor: Visitor, card: SparCard, commit: string): Promise<DuelAnswer> {
+    const practice = cultivationOn();
+    if (!practice) return Promise.resolve({ ok: false, reason: 'off' });
+    if (
+      battle ||
+      spar ||
+      hosting !== null ||
+      trip !== null ||
+      duel ||
+      duelWait ||
+      duelAccepted ||
+      adventure?.blocking === true
+    )
+      return Promise.resolve({ ok: false, reason: 'busy' });
+    return new Promise<DuelAnswer>((resolve) => {
+      const state: DuelWait = { visitor, card, commit, hostNonce: randomSparNonce(), resolve, timer: null };
+      state.timer = setTimeout(() => settleDuel(state, { ok: false, reason: 'timeout' }), sparWaitMs);
+      duelWait = state;
+      if (shouldAutoAdmit(neighbors, visitor, deps.appConfig().visit.autoAdmitFriends, tracker.snapshot()?.present)) {
+        void say(`熟人 ${visitor.owner} 家的 ${visitor.pet} 来隔空切磋，直接应战～`);
+        settleDuel(state, {
+          ok: true,
+          card: sparCardOf(practice.fighter(petName()), practice.view().stage),
+          nonce: state.hostNonce,
+        });
+        return;
+      }
+      void say(`${visitor.owner} 家的 ${visitor.pet} 想跟我切磋～`);
+      void refreshMenu();
+    });
+  }
+
+  /** 主人点了「应战 / 不应战」 */
+  function answerDuel(accept: boolean): void {
+    const state = duelWait;
+    if (!state) return;
+    if (!accept) {
+      settleDuel(state, { ok: false, reason: 'declined' });
+      void say(`好，那就不跟 ${state.visitor.pet} 切磋啦～`);
+      return;
+    }
+    const practice = cultivationOn();
+    if (!practice) {
+      settleDuel(state, { ok: false, reason: 'off' });
+      return;
+    }
+    settleDuel(state, {
+      ok: true,
+      card: sparCardOf(practice.fighter(petName()), practice.view().stage),
+      nonce: state.hostNonce,
+    });
+    void say(`来，跟 ${state.visitor.pet} 过两招～`);
+  }
+
+  /** 应战方这一侧收到 /v1/duel/reveal：承诺已核过，记账、开演（挑战方同时也在记它的） */
+  function hostDuelReveal(visitor: Visitor, nonce: string, line: string): void {
+    const state = duelAccepted;
+    if (!state || state.visitor.id !== visitor.id || state.visitor.address !== visitor.address) return;
+    duelAccepted = null;
+    void runDuelHost(state, nonce, line);
+  }
+
+  /** 挑战方没亮随机数（对不上 / 超时）：按它认输记一场，不开打 */
+  function hostDuelConceded(visitor: Visitor, why: 'mismatch' | 'late'): void {
+    const state = duelAccepted;
+    if (!state || state.visitor.id !== visitor.id) return;
+    duelAccepted = null;
+    const practice = cultivationOn();
+    const id = visitor.id;
+    if (!practice || !id) return;
+    onCultivation(Date.now(), practice.sparDone(Date.now(), id, true), { anim: false });
+    neighbors.dueled(id, { owner: visitor.owner, pet: visitor.pet }, true, Date.now());
+    diary.note(
+      Date.now(),
+      'cultivate',
+      `和 ${visitor.owner} 家的 ${visitor.pet} 隔空切磋，赢了（它${
+        why === 'late' ? '没按时亮随机数' : '随机数没对上'
+      }，算它认输）`,
+    );
+    void say(`${visitor.pet} ${why === 'late' ? '没按时亮随机数' : '随机数没对上'}，这场算它认输啦～`, {
+      anim: false,
+    });
+    void refreshMenu();
+  }
+
+  /** 应战方这一侧的隔空切磋演出：两边各自用同一对随机数算同一场，这边演全套 */
+  async function runDuelHost(state: DuelAccepted, guestNonce: string, guestLine: string): Promise<void> {
+    const practice = cultivationOn();
+    const visitorId = state.visitor.id;
+    if (!practice || !visitorId) return;
+    const you = practice.fighter(petName());
+    const foe = cardFighter(state.visitor.pet, state.card);
+    const events = sparFight(you, foe, guestNonce, state.hostNonce);
+    const end = events[events.length - 1];
+    const won = end.kind === 'end' && end.winner === 0;
+    // 记账（同 X5，在开打这一步记；演出只是回放）
+    onCultivation(Date.now(), practice.sparDone(Date.now(), visitorId, won), { anim: false });
+    neighbors.dueled(visitorId, { owner: state.visitor.owner, pet: state.visitor.pet }, won, Date.now());
+    diary.note(
+      Date.now(),
+      'cultivate',
+      `和 ${state.visitor.owner} 家的 ${state.visitor.pet} 隔空切磋，${won ? '赢了' : '输了'}`,
+    );
+    // 自家宠物在家：不碰 AWAY_OPACITY / fadeHome，台词直接走 say(..., { anim: false })
+    await runSparShow({
+      zero: you,
+      one: foe,
+      zeroStage: practice.view().label,
+      oneStage: stageLabel(state.card.stage),
+      events,
+      lineRng: sparLineRng(guestNonce, state.hostNonce),
+      local: 0,
+      foeLabel: `${state.visitor.owner} 家的 ${state.visitor.pet}`,
+      selfSay: (line, durationMs) => void say(line, { anim: false, durationMs }),
+      foeLine: guestLine,
+      cancelled: () => disposed,
+    });
+    if (disposed) return;
+    void refreshMenu();
+    const instruction =
+      `你刚和隔空来切磋的${state.visitor.pet}（${state.visitor.owner} 家的）打了一场，${won ? '你赢了' : '你输了'}。` +
+      '跟主人说一句赛后感言。' +
+      (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人，下次再战。');
+    const text = cleanText(
+      await compose(instruction, won ? '隔空切磋赢啦，承让承让～' : '隔空切磋输了，下次再战！'),
+      LINE_MAX,
+    );
+    if (battle === null) void say(text, { anim: false });
+  }
+
+  /**
+   * 挑战方发起隔空切磋（菜单「修炼/切磋/X 家的 Y」）：发名帖与承诺 → 对方应战后这一场就定了 →
+   * 编好赛后感言跟着 reveal 带过去 → 记账 → 在自家屏幕上把这一场演全套。
+   */
+  async function startDuel(id: string): Promise<void> {
+    const practice = cultivationOn();
+    const neighbor = neighborhood?.get(id);
+    if (!practice || !neighbor) {
+      await say('它好像已经不在附近了～');
+      return;
+    }
+    if (duel || spar || battle || trip || hosting || duelWait || duelAccepted || adventure?.blocking === true) return;
+    const state: DuelChallenge = { neighbor, stage: 'asking', since: Date.now(), nonce: randomSparNonce() };
+    duel = state;
+    void refreshMenu();
+    await say(`去找 ${neighbor.pet} 切磋，等它应战～`);
+    let reply: DuelReply;
+    try {
+      reply = await sendDuel(
+        { address: neighbor.address, port: neighbor.port },
+        neighbor.id,
+        { owner: nickname(), pet: petName() },
+        visitIdentity,
+        {
+          mode: SPAR_MODE,
+          card: sparCardOf(practice.fighter(petName()), practice.view().stage),
+          commit: sparCommit(state.nonce),
+        },
+      );
+    } catch (error) {
+      const cause = (error as { cause?: unknown }).cause;
+      log(
+        `串门：隔空切磋的请求没送到 ${neighbor.owner} 家：${errorText(error)}${cause ? `（${errorText(cause)}）` : ''}`,
+      );
+      if (duel === state) duel = null;
+      await say(duelFailText(neighbor.owner, 'unreachable'));
+      void refreshMenu();
+      return;
+    }
+    if (duel !== state || disposed) return;
+    if (!reply.ok) {
+      duel = null;
+      await say(duelFailText(neighbor.owner, reply.reason));
+      void refreshMenu();
+      return;
+    }
+    const you = practice.fighter(petName());
+    const foe = cardFighter(neighbor.pet, reply.card);
+    // 引擎里应战方是 0 号、挑战方是 1 号：两边各自算同一场
+    const events = sparFight(foe, you, state.nonce, reply.nonce);
+    const end = events[events.length - 1];
+    const won = end.kind === 'end' && end.winner === 1;
+    // 感言先编好（跟着 reveal 带过去，在应战方的对手窗口里说）；编太久退回模板，别拖过对方的时限
+    const remark = await duelRemark(neighbor, won);
+    if (duel !== state || disposed) return;
+    let revealed: DuelRevealReply;
+    try {
+      revealed = await sendDuelReveal(
+        { address: neighbor.address, port: neighbor.port },
+        { token: reply.token, nonce: state.nonce, line: remark },
+      );
+    } catch (error) {
+      log(`串门：隔空切磋的随机数没亮出去：${errorText(error)}`);
+      if (duel !== state) return;
+      duel = null;
+      // 对面超时后会按它赢记账：这边同样按输记，两边才对得上
+      onCultivation(Date.now(), practice.sparDone(Date.now(), neighbor.id, false), { anim: false });
+      neighbors.dueled(neighbor.id, { owner: neighbor.owner, pet: neighbor.pet }, false, Date.now());
+      diary.note(Date.now(), 'cultivate', `和 ${neighbor.owner} 家的 ${neighbor.pet} 隔空切磋，输了（没按时亮随机数）`);
+      await say('亮随机数迟了，算我认输', { anim: false });
+      void refreshMenu();
+      return;
+    }
+    if (duel !== state || disposed) return;
+    if (!revealed.ok) {
+      duel = null;
+      if (revealed.reason === 'mismatch' || revealed.reason === 'late') {
+        onCultivation(Date.now(), practice.sparDone(Date.now(), neighbor.id, false), { anim: false });
+        neighbors.dueled(neighbor.id, { owner: neighbor.owner, pet: neighbor.pet }, false, Date.now());
+        diary.note(
+          Date.now(),
+          'cultivate',
+          `和 ${neighbor.owner} 家的 ${neighbor.pet} 隔空切磋，输了（${
+            revealed.reason === 'late' ? '没按时亮随机数' : '随机数没对上'
+          }）`,
+        );
+      }
+      await say(duelFailText(neighbor.owner, revealed.reason), { anim: false });
+      void refreshMenu();
+      return;
+    }
+    // 记账（对面同时也在记它的）：修为进账、战绩、日记
+    onCultivation(Date.now(), practice.sparDone(Date.now(), neighbor.id, won), { anim: false });
+    neighbors.dueled(neighbor.id, { owner: neighbor.owner, pet: neighbor.pet }, won, Date.now());
+    diary.note(Date.now(), 'cultivate', `和 ${neighbor.owner} 家的 ${neighbor.pet} 隔空切磋，${won ? '赢了' : '输了'}`);
+    state.stage = 'showing';
+    // 自家宠物在家：不碰 AWAY_OPACITY / fadeHome，台词直接走 say(..., { anim: false })
+    await runSparShow({
+      zero: foe,
+      one: you,
+      zeroStage: stageLabel(reply.card.stage),
+      oneStage: practice.view().label,
+      events,
+      lineRng: sparLineRng(state.nonce, reply.nonce),
+      local: 1,
+      foeLabel: `${neighbor.owner} 家的 ${neighbor.pet}`,
+      selfSay: (line, durationMs) => void say(line, { anim: false, durationMs }),
+      cancelled: () => duel !== state,
+    });
+    if (duel !== state || disposed) return;
+    duel = null;
+    void say(won ? '这场隔空切磋我赢啦！' : '这场隔空切磋输了，下次再战～', { anim: false });
+    void say(remark, { anim: false });
+    void refreshMenu();
+  }
+
+  /** 挑战方的赛后感言：按人设编一句（只带人设，§2.2 的口径），编太久退回模板（模型卡住别拖垮 reveal） */
+  async function duelRemark(neighbor: Neighbor, won: boolean): Promise<string> {
+    const instruction =
+      `你正在跟${neighbor.owner}家的宠物${neighbor.pet}隔空切磋，${won ? '你赢了' : '你输了'}。说一句赛后感言。` +
+      (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人。');
+    const fallback = won ? '隔空切磋赢啦，承让承让～' : '隔空切磋输了，下次再战！';
+    const composed = compose(instruction, fallback);
+    const capped = new Promise<string>((done) => setTimeout(() => done(fallback), SPAR_REMARK_CAP_MS));
+    return Promise.race([composed, capped]);
+  }
+
+  /**
+   * 挑战方的隔空切磋项（X15）：只列在线、带 id 的邻居，熟人在前（照邻居列表现有的排序），最多 3 个。
+   * 放在 wantedLabels 的最后：菜单项挤不下时先截掉它们，串门的邻居项照旧。
+   */
+  function duelChallengeActions(): Map<string, () => unknown> {
+    const actions = new Map<string, () => unknown>();
+    const practice = cultivationOn();
+    if (
+      !practice ||
+      battle ||
+      spar ||
+      duel ||
+      duelWait ||
+      duelAccepted ||
+      trip ||
+      hosting ||
+      knockingOn ||
+      visitHost?.knocking() ||
+      adventure?.blocking === true
+    )
+      return actions;
+    if (!deps.appConfig().visit.enabled || !deps.appConfig().visit.visiting) return actions;
+    const ordered = orderNeighbors(neighborhood?.list() ?? [], neighbors, lastGuest, Date.now());
+    const nearby = (ordered.revisit ? [ordered.revisit, ...ordered.list] : ordered.list)
+      .filter((neighbor) => neighbor.id)
+      .slice(0, DUEL_NEIGHBORS_MAX);
+    for (const neighbor of nearby) {
+      let label = `${MENU_CULTIVATION_GROUP}/切磋/${neighbor.owner} 家的 ${neighbor.pet}`;
+      for (let n = 2; actions.has(label); n += 1)
+        label = `${MENU_CULTIVATION_GROUP}/切磋/${neighbor.owner} 家的 ${neighbor.pet}（${n}）`;
+      actions.set(label, () => void startDuel(neighbor.id));
+    }
+    return actions;
+  }
+
+  /** 隔空切磋没打成的原因，说给自家主人听（old-host / declined / timeout 是 X15 点名的几种） */
+  function duelFailText(
+    owner: string,
+    reason: DuelFailure | 'mismatch' | 'late' | 'not-visiting' | 'unreachable',
+  ): string {
+    switch (reason) {
+      case 'old-host':
+        return '对方的桌宠还不会隔空切磋';
+      case 'off':
+        return '对方没开修炼，切不了';
+      case 'busy':
+        return `${owner} 家正忙着，等会儿再切～`;
+      case 'version':
+        return '两边版本不一样，切磋不了';
+      case 'unsupported-mode':
+        return '对方不支持这种打法';
+      case 'bad-card':
+        return '对方没看懂我的名帖';
+      case 'bad-sig':
+        return `${owner} 家没应战，下次再约～`;
+      case 'bad-request':
+        return '没打成';
+      case 'declined':
+      case 'timeout':
+        return `${owner} 家没应战，下次再约～`;
+      case 'too-soon':
+        return `刚找过 ${owner} 家，等会儿再切～`;
+      case 'mismatch':
+        return '随机数没对上，算我认输';
+      case 'late':
+        return '亮随机数迟了，算我认输';
+      case 'not-visiting':
+        return '对方不认这场了';
+      case 'unreachable':
+        return `连不上 ${owner} 家，看看系统设置里有没有允许 dsh-pet 访问本地网络～`;
+    }
   }
 
   /** 客人的赛后感言：按人设编一句（只带人设，§2.2 的口径），编太久退回模板（模型卡住别拖垮 reveal） */
@@ -2652,9 +3146,15 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         });
       }
     }
-    // 心魔试炼：没在打、没出门、家里没客人时才有；打的时候换成「快进」
+    // 心魔试炼：没在打、没出门、家里没客人、也没有挂着的隔空挑战时才有；打的时候换成「快进」
     if (battle) actions.set(`${MENU_CULTIVATION_GROUP}/快进`, skipTrial);
-    else if (trip === null && hosting === null && adventure?.blocking !== true)
+    else if (
+      trip === null &&
+      hosting === null &&
+      duelWait === null &&
+      duelAccepted === null &&
+      adventure?.blocking !== true
+    )
       actions.set(`${MENU_CULTIVATION_GROUP}/心魔试炼`, () => void runTrial());
     return actions;
   }
@@ -2667,7 +3167,14 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
    * 在前，串门项在后——挤不下时先少列几个邻居 / 少几样一起玩和零食，「送客」「切磋」「心魔试炼」「渡劫」这些都要留。
    */
   function wantedLabels(): string[] {
-    const labels = [MENU_LOOK, MENU_DIARY, ...cultivationActions().keys(), ...visitActions().keys()];
+    const labels = [
+      MENU_LOOK,
+      MENU_DIARY,
+      ...cultivationActions().keys(),
+      ...visitActions().keys(),
+      // 隔空切磋的挑战项排在串门项之后：菜单挤不下时先截掉它们（X15）
+      ...duelChallengeActions().keys(),
+    ];
     return labels.length > MENU_ITEMS_MAX ? labels.slice(0, MENU_ITEMS_MAX) : labels;
   }
 
@@ -2701,10 +3208,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     } else if (label === MENU_DIARY) {
       await openDiary(now);
     } else {
-      const action = cultivationActions().get(label) ?? visitActions().get(label);
+      const action = cultivationActions().get(label) ?? visitActions().get(label) ?? duelChallengeActions().get(label);
       if (action) await action();
       // 菜单弹出后邻居走了
       else if (label.startsWith(`${MENU_VISIT_GROUP}/去 `)) await say('它好像已经不在附近了～');
+      else if (label.startsWith(`${MENU_CULTIVATION_GROUP}/切磋/`)) await say('它好像已经不在附近了～');
     }
     await refreshStatus(now);
     await refreshMenu();

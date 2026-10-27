@@ -4,22 +4,27 @@
  * host  扮演主人家：开一个接待监听，每 2 秒往 127.0.0.1:47340 发一条信标，真 app 开着串门时右键「串门」里
  *       就会出现「去 测试邻居 家」；app 来敲门时按 --accept 处理（auto 1 秒后让进，ask 等标准输入 y / n），
  *       客人说话回一句固定的话，敲门、说话、告辞这些事都打印出来。新版 app 会往发信标的源端口回一条，
- *       这个 socket 收到就打印「听到 X 家的信标（回发）」。
+ *       这个 socket 收到就打印「听到 X 家的信标（回发）」。隔空切磋（X15）按 --duel 处理（auto 自动应战，
+ *       ask 等标准输入 y / n，no 一律不应战）。
  * listen 扮演只出门、不接待的新版本：每 2 秒往 127.0.0.1:47340 发一条探测（不带昵称、宠物名），
  *       打印收到的信标；发探测用的 socket 就是收信标的 socket，对方回发到源端口。
  * visit 扮演客人：往真 app 敲门进门（不给 --port 时，从 app.log 最后一条「串门：接待开了，端口 N」里读端口），
  *       进门后每 5 秒报一次平安，收到的事（它家宠物说话、摸一下、一起玩、请吃零食）都打印出来。
+ * duel  扮演隔空切磋的挑战方（X15）：发探测等真 app 的信标（或给 --port 与 --host-id），签名发 /v1/duel，
+ *       对方应战后亮随机数、打印这一场谁赢。
  *
  * 用法（strip-types 与 test-register 的说明见 scripts/test-ts-resolver.mjs）：
- *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--identity <路径>|none]
+ *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--duel auto|ask|no] [--identity <路径>|none]
  *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs listen
  *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]
+ *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs duel  [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]
  *
  * --identity 给了路径才落盘（脚本与真 app 互相验明正身、日志里看 verified 用）；缺省在内存里生成，不写文件；
  *   --identity none 模拟旧版本，不签名。visit 模式签名需要主人家的 id（来自信标）：脚本连脚本自测时
  *   从 host 模式打印的「身份」里抄过来，用 --host-id 带上；不带 --host-id 就不签名（当旧版本客人）。
  *
- * host 的标准输入命令：line <话> / poke / play <项> / gift <项> / note <话>（捎给客人的主人）/ friend <y|n>（收不收客人的捎话，默认收）/ spar（邀客人切磋）/ home（请客人回家）；ask 模式下 y / n 答复敲门。
+ * host 的标准输入命令：line <话> / poke / play <项> / gift <项> / note <话>（捎给客人的主人）/ friend <y|n>（收不收客人的捎话，默认收）/ spar（邀客人切磋）/ home（请客人回家）；ask 模式下 y / n 答复敲门，--duel ask 时 y / n 答复隔空切磋。
+ * duel 不给 --port / --host-id 时往 127.0.0.1:47340 发一条探测，从回信标里读对方的身份 id 与接待端口（真 app 要开着接待）。
  * visit 的标准输入命令：say <话> / note <话>（捎给对方主人）/ spar（找主人家的宠物切磋；收到邀约不自动应战，也输 spar）/ leave（告辞，后面可以带告别的话）。
  * 两种模式 10 分钟后自动退出。切磋按 X5 的协议走：名帖都是脚本里这份假的（境界 2、水枪、化鸽遁），
  * host 模式按它应战、两边各自算出同一场后打印输赢；visit 模式发名帖与承诺、亮随机数，主人家的屏幕上开演。
@@ -41,6 +46,8 @@ import {
   knockOn,
   parseBeacon,
   randomSparNonce,
+  sendDuel,
+  sendDuelReveal,
   sendNote,
   sendReveal,
   sendSpar,
@@ -76,14 +83,24 @@ const fakeFighter = {
 const fakeCard = sparCardOf(fakeFighter, 2);
 
 const USAGE = `用法：
-  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--identity <路径>|none]
+  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--duel auto|ask|no] [--identity <路径>|none]
   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs listen
-  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]`;
+  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]
+  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs duel  [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]`;
 
 function parseArgs(argv) {
   const [mode, ...rest] = argv;
-  if (mode !== 'host' && mode !== 'listen' && mode !== 'visit') return null;
-  const options = { mode, owner: OWNER_DEFAULT, pet: PET_DEFAULT, accept: 'auto', port: 0, hostId: '', identity: '' };
+  if (mode !== 'host' && mode !== 'listen' && mode !== 'visit' && mode !== 'duel') return null;
+  const options = {
+    mode,
+    owner: OWNER_DEFAULT,
+    pet: PET_DEFAULT,
+    accept: 'auto',
+    duel: 'auto',
+    port: 0,
+    hostId: '',
+    identity: '',
+  };
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i];
     const value = rest[i + 1];
@@ -95,6 +112,9 @@ function parseArgs(argv) {
       i += 1;
     } else if (flag === '--accept' && (value === 'auto' || value === 'ask')) {
       options.accept = value;
+      i += 1;
+    } else if (flag === '--duel' && (value === 'auto' || value === 'ask' || value === 'no')) {
+      options.duel = value;
       i += 1;
     } else if (flag === '--port' && /^\d+$/.test(value ?? '') && Number(value) >= 1 && Number(value) <= 65535) {
       options.port = Number(value);
@@ -133,6 +153,9 @@ async function runHost(options) {
   let friend = true;
   // 应战中的客人：承诺、名帖与这边亮出去的随机数（reveal 时核对）
   let pendingSpar = null;
+  // 隔空切磋（X15）：应战中的挑战方（承诺、名帖、随机数）；ask 模式下等标准输入答复的函数
+  let pendingDuel = null;
+  let answerDuel = null;
   const host = new VisitHost(
     {
       canHost: () => true,
@@ -187,6 +210,58 @@ async function runHost(options) {
         pendingSpar = null;
         return { ok: true };
       },
+      // 隔空切磋（X15）：按 --duel 自动应战 / 等标准输入 / 一律不应战
+      async duel(visitor, card, commit) {
+        print(`${visitor.owner} 家的 ${visitor.pet} 来隔空切磋（它报的境界 ${card.stage}，气血 ${card.hp}），承诺收下`);
+        if (options.duel === 'no') {
+          print('不应战（--duel no）');
+          return { ok: false, reason: 'declined' };
+        }
+        const hostNonce = randomSparNonce();
+        pendingDuel = { card, commit, hostNonce };
+        if (options.duel === 'auto') {
+          print('自动应战');
+          return { ok: true, card: fakeCard, nonce: hostNonce };
+        }
+        print('等标准输入：y 应战 / n 不应战');
+        return new Promise((resolve) => {
+          answerDuel = (accept) => {
+            answerDuel = null;
+            if (!accept) {
+              pendingDuel = null;
+              print(`不应战 ${visitor.pet}`);
+              resolve({ ok: false, reason: 'declined' });
+              return;
+            }
+            print(`应战 ${visitor.pet}`);
+            resolve({ ok: true, card: fakeCard, nonce: hostNonce });
+          };
+        });
+      },
+      duelReveal(visitor, nonce, line) {
+        if (!pendingDuel) {
+          print(`${visitor.pet} 亮了随机数，可这边没有应战中的挑战（当没看见）`);
+          return;
+        }
+        const { card, commit, hostNonce } = pendingDuel;
+        pendingDuel = null;
+        if (sparCommit(nonce) !== commit) {
+          print(`${visitor.pet} 亮的随机数对不上承诺，按它认输记`);
+          return;
+        }
+        const events = sparFight(fakeFighter, cardFighter(visitor.pet, card), nonce, hostNonce);
+        const end = events[events.length - 1];
+        const won = end.kind === 'end' && end.winner === 0;
+        print(
+          `隔空开打（${events.length} 个事件）：${won ? options.pet : visitor.pet} 赢${end.reason === 'ko' ? '，打到分晓' : '，满 30 手按比例判'}`,
+        );
+        if (line) print(`它家宠物的赛后感言：${line}`);
+      },
+      duelConceded(visitor, reason) {
+        pendingDuel = null;
+        answerDuel = null;
+        print(`${visitor.pet} ${reason === 'late' ? '没按时亮随机数' : '随机数没对上'}，按它认输记`);
+      },
       left(visitor, reason, text) {
         print(`${visitor.pet} ${reason === 'leave' ? `告辞：${text || '（没说话）'}` : '太久没动静，当它走了'}`);
       },
@@ -220,6 +295,10 @@ async function runHost(options) {
     const command = input.split(/\s+/)[0];
     const text = input.slice(command.length).trim();
     if (command === 'y' || command === 'n') {
+      if (answerDuel) {
+        answerDuel(command === 'y');
+        return;
+      }
       const visitor = host.answer(command === 'y');
       print(visitor ? (command === 'y' ? `让 ${visitor.pet} 进来了` : `没让 ${visitor.pet} 进来`) : '没有人在敲门');
       return;
@@ -274,7 +353,7 @@ async function runHost(options) {
       default:
         if (input) {
           print(
-            `不认识的命令：${command}（line / poke / play / gift / note / friend / spar / home${options.accept === 'ask' ? ' / y / n' : ''}）`,
+            `不认识的命令：${command}（line / poke / play / gift / note / friend / spar / home${options.accept === 'ask' || options.duel === 'ask' ? ' / y / n' : ''}）`,
           );
         }
     }
@@ -468,6 +547,88 @@ async function runVisit(options) {
   });
 }
 
+// ---------- duel 模式（X15，扮挑战方） ----------
+
+/** 往 127.0.0.1:47340 发一条探测，等对方回信标：拿到身份 id 与接待端口；3 秒没等到返回 null */
+async function discoverHost() {
+  return new Promise((resolve) => {
+    const socket = createSocket('udp4');
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        socket.close();
+      } catch {
+        // 已经关了
+      }
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), 3_000);
+    socket.on('error', () => finish(null));
+    socket.bind(0, '127.0.0.1', () => {
+      socket.on('message', (raw) => {
+        const heard = parseBeacon(raw);
+        if (heard)
+          finish({ address: '127.0.0.1', port: heard.port, hostId: heard.id, owner: heard.owner, pet: heard.pet });
+      });
+      socket.send(encodeProbe(), BEACON_PORT, '127.0.0.1', () => {});
+    });
+  });
+}
+
+async function runDuel(options) {
+  const identity = identityOf(options);
+  if (!identity) {
+    print('duel 模式要签名，不能用 --identity none');
+    process.exit(1);
+  }
+  let target;
+  if (options.port && options.hostId) {
+    target = { address: '127.0.0.1', port: options.port, hostId: options.hostId, owner: '', pet: '' };
+  } else {
+    print('发探测找附近的桌宠（真 app 要开着「允许别人来我家做客」）……');
+    target = await discoverHost();
+  }
+  if (!target) {
+    print('没等到信标：开真 app 的接待，或者用 --port 与 --host-id 指定（host 模式会打印身份 id）');
+    process.exit(1);
+  }
+  print(
+    `挑战 ${target.owner ? `${target.owner} 家的 ` : ''}${target.pet || '对方'}（${target.address}:${target.port}，id ${target.hostId}）……`,
+  );
+  const ownNonce = randomSparNonce();
+  let reply;
+  try {
+    reply = await sendDuel(
+      { address: target.address, port: target.port },
+      target.hostId,
+      { owner: options.owner, pet: options.pet },
+      identity,
+      { mode: SPAR_MODE, card: fakeCard, commit: sparCommit(ownNonce) },
+    );
+  } catch (error) {
+    print(`挑战没送到：${errorText(error)}`);
+    process.exit(1);
+  }
+  if (!reply.ok) {
+    print(`没打成：${reply.reason}${reply.reason === 'old-host' ? '（对方的桌宠还不会隔空切磋）' : ''}`);
+    process.exit(1);
+  }
+  print(`对方应战（它报的境界 ${reply.card.stage}，气血 ${reply.card.hp}）`);
+  const events = sparFight(cardFighter(target.pet || '对方', reply.card), fakeFighter, ownNonce, reply.nonce);
+  const end = events[events.length - 1];
+  const won = end.kind === 'end' && end.winner === 1;
+  print(`两边各自算的这场（${events.length} 个事件）：${won ? options.pet : target.pet || '对方'} 赢`);
+  const revealed = await sendDuelReveal(
+    { address: target.address, port: target.port },
+    { token: reply.token, nonce: ownNonce, line: '承让承让～' },
+  ).catch((error) => ({ ok: false, reason: errorText(error) }));
+  print(revealed.ok ? '亮了随机数，对方的屏幕上该开演了' : `没亮成：${revealed.reason}`);
+  process.exit(revealed.ok ? 0 : 1);
+}
+
 // ---------- 入口 ----------
 
 const options = parseArgs(process.argv.slice(2));
@@ -483,6 +644,7 @@ setTimeout(() => {
 try {
   if (options.mode === 'host') await runHost(options);
   else if (options.mode === 'listen') await runListen();
+  else if (options.mode === 'duel') await runDuel(options);
   else await runVisit(options);
 } catch (error) {
   print(`跑不起来：${errorText(error)}`);

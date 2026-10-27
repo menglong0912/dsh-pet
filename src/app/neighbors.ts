@@ -96,37 +96,56 @@ export class NeighborBook {
     const owner = cleanName(names.owner);
     const pet = cleanName(names.pet);
     if (!owner || !pet) return;
-    const record = this.records.get(id);
-    if (record) {
-      record.owner = owner;
-      record.pet = pet;
-      record[kind] += 1;
-      record.lastMet = now;
-    } else {
-      // 满了先丢最久没见的非熟人；全是熟人（50 个）就不再记新的
-      if (this.records.size >= NEIGHBORS_MAX) {
-        const oldest = this.list()
-          .filter((item) => !item.friend)
-          .pop();
-        if (!oldest) return;
-        this.records.delete(oldest.id);
-      }
-      this.records.set(id, {
-        id,
-        owner,
-        pet,
-        friend: false,
-        hosted: kind === 'hosted' ? 1 : 0,
-        visited: kind === 'visited' ? 1 : 0,
-        firstMet: now,
-        lastMet: now,
-        summary: '',
-        sparWins: 0,
-        sparLosses: 0,
-        lastSparWon: null,
-      });
-    }
+    const record = this.records.get(id) ?? this.add(id, owner, pet, now);
+    if (!record) return;
+    record.owner = owner;
+    record.pet = pet;
+    record[kind] += 1;
+    record.lastMet = now;
     this.save();
+  }
+
+  /**
+   * 隔空切磋（X15）打完一场：没串过门的邻居也记进簿子（来往次数都是 0），
+   * 这样才看得到战绩、才能标成熟人（熟人自动应战要它）；记过的更新名字和 lastMet。
+   */
+  dueled(id: string, names: { owner: string; pet: string }, won: boolean, now: number): void {
+    const owner = cleanName(names.owner);
+    const pet = cleanName(names.pet);
+    if (!owner || !pet) return;
+    const record = this.records.get(id) ?? this.add(id, owner, pet, now);
+    if (!record) return;
+    record.owner = owner;
+    record.pet = pet;
+    record.lastMet = now;
+    this.recordSpar(id, won);
+  }
+
+  /** 新记一位（来往次数都是 0）。满了先丢最久没见的非熟人；全是熟人（50 个）就不再记新的，返回 null */
+  private add(id: string, owner: string, pet: string, now: number): NeighborRecord | null {
+    if (this.records.size >= NEIGHBORS_MAX) {
+      const oldest = this.list()
+        .filter((item) => !item.friend)
+        .pop();
+      if (!oldest) return null;
+      this.records.delete(oldest.id);
+    }
+    const record: NeighborRecord = {
+      id,
+      owner,
+      pet,
+      friend: false,
+      hosted: 0,
+      visited: 0,
+      firstMet: now,
+      lastMet: now,
+      summary: '',
+      sparWins: 0,
+      sparLosses: 0,
+      lastSparWon: null,
+    };
+    this.records.set(id, record);
+    return record;
   }
 
   /**

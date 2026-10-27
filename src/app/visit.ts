@@ -18,6 +18,9 @@
  *                                    名帖不对各有原因，切磋关着回 off、正在打回 busy
  *   POST /v1/spar/reveal { token, nonce, line? }    客人亮随机数（line 是它家宠物的赛后感言）；
  *                                    对得上就开打（两边各自算同一场），对不上或超时按客人认输
+ *   POST /v1/duel   { owner, pet, id, pub, ts, sig, mode, card, commit }   隔空切磋（X15）：不用先串门，
+ *                                    签名里带着承诺；挂着等主人在右键菜单里点「应战 / 不应战」，最多 DUEL_WAIT_MS
+ *   POST /v1/duel/reveal { token, nonce, line? }    挑战方亮随机数；对得上就开打，对不上或超时按挑战方认输
  *   POST /v1/ping  { token }         客人每 PING_MS 报一次还在，回 { events }：这边攒下要告诉客人的事
  *                                    （这边宠物主动说的话、主人摸了它一下、一起玩什么、请它吃什么、
  *                                    邀它切磋）；被请回家后回 reason: sent-home
@@ -44,7 +47,7 @@ import { z } from 'zod';
 import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS, fight, rngFrom, statCap } from './battle';
 import type { BattleEvent, Fighter, SkillId, WeaponId } from './battle';
 import { MAX_STAGE } from './cultivation';
-import { idOfPub, knockMessage, verifyWithPub, welcomeMessage } from './visit-identity';
+import { idOfPub, duelAcceptMessage, duelMessage, knockMessage, verifyWithPub, welcomeMessage } from './visit-identity';
 import type { VisitIdentity } from './visit-identity';
 
 /** 信标端口（7340 是插件路由前缀里的那个数） */
@@ -58,6 +61,8 @@ export const PEER_MAX = 20;
 /** 敲门最多等主人这么久 */
 export const KNOCK_WAIT_MS = 60_000;
 const KNOCK_COOLDOWN_MS = 30_000;
+/** 隔空切磋：应战方最多等主人答复 / 挑战方亮随机数这么久（X15） */
+export const DUEL_WAIT_MS = 30_000;
 /** 客人报平安的间隔 */
 export const PING_MS = 5_000;
 /** 客人这么久没动静就当它走了 */
@@ -534,6 +539,30 @@ export type SparReply =
 export type SparRevealReply =
   { ok: true } | { ok: false; reason: 'mismatch' | 'late' | 'sent-home' | 'not-visiting' | 'old-host' };
 
+/** 应战方对隔空切磋的答复（X15）：答应时带上这边自己的名帖与随机数；off / busy 在 features.ts 答 */
+export type DuelAnswer =
+  { ok: true; card: SparCard; nonce: string } | { ok: false; reason: 'off' | 'busy' | 'declined' | 'timeout' };
+
+/** 挑战方发 /v1/duel 可能听到的全部原因（bad-sig 也算，挑战方的应答签名验不过时当对方没应） */
+export type DuelFailure =
+  | 'bad-sig'
+  | 'off'
+  | 'busy'
+  | 'unsupported-mode'
+  | 'version'
+  | 'bad-card'
+  | 'bad-request'
+  | 'declined'
+  | 'timeout'
+  | 'too-soon'
+  | 'old-host';
+
+/** /v1/duel 的应答：答应时带这边的名帖、随机数、令牌与签名（挑战方验过签名才算数） */
+export type DuelReply = { ok: true; card: SparCard; nonce: string; token: string } | { ok: false; reason: DuelFailure };
+
+/** /v1/duel/reveal 的应答：对不上（mismatch）或超时（late）都按挑战方认输，应答里如实带回去 */
+export type DuelRevealReply = { ok: true } | { ok: false; reason: 'mismatch' | 'late' | 'not-visiting' | 'old-host' };
+
 export interface HostHandlers {
   /** 现在能不能接待（自己的宠物出门在外、正在敲别人家的门时不行） */
   canHost(): boolean;
@@ -552,6 +581,15 @@ export interface HostHandlers {
   spar(visitor: Visitor, card: SparCard, commit: string): Promise<SparReply>;
   /** 客人亮随机数（X5 第 4 步，line 是它带来的赛后感言）：核对承诺后开打，对不上或超时按客人认输 */
   reveal(visitor: Visitor, nonce: string, line: string): Promise<SparRevealReply>;
+  /**
+   * 隔空切磋（X15）的挑战：等主人答复；off / busy / declined / timeout 在这里答，
+   * 答应时回这边自己的名帖与随机数（令牌与应答签名在协议层出）
+   */
+  duel(visitor: Visitor, card: SparCard, commit: string): Promise<DuelAnswer>;
+  /** 挑战方亮对了随机数：名帖与随机数都齐了，开演（features.ts 记账 + 演出） */
+  duelReveal(visitor: Visitor, nonce: string, line: string): void;
+  /** 挑战方没亮随机数（对不上 / 超时，协议层已判）：按它认输记一场 */
+  duelConceded(visitor: Visitor, reason: 'mismatch' | 'late'): void;
   /** 客人走了：leave = 告辞（text 是告别的话，可空）；lost = 太久没动静 */
   left(visitor: Visitor, reason: 'leave' | 'lost', text: string): void;
 }
@@ -572,12 +610,32 @@ interface PendingKnock {
   finish: (answer: boolean | 'no-answer' | 'gone') => void;
 }
 
+/** 等主人答复的一次挑战（/v1/duel 的 HTTP 应答挂着） */
+interface PendingDuelAsk {
+  visitor: Visitor;
+  timer: ReturnType<typeof setTimeout> | null;
+  finish: (answer: DuelAnswer | 'gone') => void;
+}
+
+/** 应战以后等挑战方亮随机数的那一场（X15） */
+interface PendingDuel {
+  visitor: Visitor;
+  token: string;
+  commit: string;
+  card: SparCard;
+  nonce: string;
+  acceptedAt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 export interface HostOptions {
   log: (message: string) => void;
   /** 本机身份：有它才验客人的敲门签名、才给进门应答签名（旧对端 / 没身份时都当陌生人） */
   identity?: VisitIdentity | null;
   now?: () => number;
   knockWaitMs?: number;
+  /** 隔空切磋等主人答复 / 等亮随机数的时限（测试调短用，默认 DUEL_WAIT_MS） */
+  duelWaitMs?: number;
   lostAfterMs?: number;
 }
 
@@ -585,10 +643,18 @@ export class VisitHost {
   private server: Server | null = null;
   private session: Session | null = null;
   private pending: PendingKnock | null = null;
+  /** 等主人答复的那次隔空切磋（同一时间只挂一个挑战） */
+  private duelAsk: PendingDuelAsk | null = null;
+  /** 应战以后等挑战方亮随机数的那一场 */
+  private duelSession: PendingDuel | null = null;
+  /** 刚超时的那一场：挑战方迟到亮随机数时回 late（主人家已经在超时那一步记过账了） */
+  private lastDuel: { token: string; visitor: Visitor; at: number } | null = null;
   /** 被主人请回家的那位的令牌：它下一次来报平安时告诉它 sent-home */
   private sentHomeToken: string | null = null;
   private lostTimer: ReturnType<typeof setInterval> | null = null;
   private readonly knockedAt = new Map<string, number>();
+  /** 隔空切磋的冷却按地址各算各的（和敲门分开，X15） */
+  private readonly duelAt = new Map<string, number>();
   /** 见过的 (客人 id, ts)：防有人把抄来的敲门请求原样再发一遍 */
   private readonly knocksSeen = new Map<string, number>();
   /** 接待监听的端口（验签名、给应答签名都要拼进内容） */
@@ -635,6 +701,11 @@ export class VisitHost {
     this.lostTimer = null;
     this.pending?.finish('gone');
     this.session = null;
+    // 还挂着的隔空挑战：等主人答复的那次回 timeout（直接断开也行，这里如实结束），应战后的那场不再记账
+    if (this.duelAsk) this.finishDuelAsk(this.duelAsk, { ok: false, reason: 'timeout' });
+    if (this.duelSession?.timer) clearTimeout(this.duelSession.timer);
+    this.duelSession = null;
+    this.lastDuel = null;
     const server = this.server;
     this.server = null;
     if (!server) return;
@@ -691,6 +762,12 @@ export class VisitHost {
       const local = (req.socket.localAddress ?? '').replace(/^::ffff:/, '');
       return this.knock(address, local, body, res);
     }
+    // 隔空切磋（X15）不用先串门，也就没有进门令牌：和敲门一样在 session 检查之前处理
+    if (path === '/v1/duel') {
+      const local = (req.socket.localAddress ?? '').replace(/^::ffff:/, '');
+      return this.duel(address, local, body, res);
+    }
+    if (path === '/v1/duel/reveal') return this.duelReveal(address, body, res);
 
     const session = this.session;
     if (!session || body.token !== session.token || address !== session.visitor.address) {
@@ -843,6 +920,185 @@ export class VisitHost {
     const message = knockMessage({ hostId: identity.id, address: local, port: this.listenPort, ts: at, owner, pet });
     if (!verifyWithPub(pub, message, sig)) return stranger('签名不对');
     return id;
+  }
+
+  /**
+   * 隔空切磋（X15）的挑战：验签 → 验模式 / 承诺 / 名帖 → 挂着等主人答复，最多 DUEL_WAIT_MS。
+   * 没带 id 或验不过一律 bad-sig（奖励和邻居簿都靠 id 记，不接匿名挑战）。
+   */
+  private async duel(
+    address: string,
+    local: string,
+    body: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> {
+    const owner = cleanName(body.owner);
+    const pet = cleanName(body.pet);
+    if (!owner || !pet) return send(res, 400, { ok: false, reason: 'bad-request' });
+    // 同一时间只挂一个挑战；有客人在家、有人敲门、自己出门时也不接（和敲门同一口径）
+    if (this.session || this.pending || this.duelAsk || this.duelSession || !this.handlers.canHost())
+      return send(res, 200, { ok: false, reason: 'busy' });
+    const now = this.now();
+    const last = this.duelAt.get(address);
+    if (last !== undefined && now - last < KNOCK_COOLDOWN_MS) return send(res, 200, { ok: false, reason: 'too-soon' });
+    this.duelAt.set(address, now);
+
+    // 验签在冷却之后：和敲门一个顺序（验不过的也占一次冷却，免得同一地址反复打）
+    const challengerId = this.verifyDuel(body, owner, pet, local, now);
+    if (!challengerId) return send(res, 200, { ok: false, reason: 'bad-sig' });
+    if (body.mode !== SPAR_MODE) return send(res, 200, { ok: false, reason: 'unsupported-mode' });
+    const commit = typeof body.commit === 'string' ? body.commit : '';
+    if (!isSparNonce(commit)) return send(res, 400, { ok: false, reason: 'bad-request' });
+    const card = parseSparCard(body.card);
+    if (card === 'version') return send(res, 200, { ok: false, reason: 'version' });
+    if (card === null) return send(res, 200, { ok: false, reason: 'bad-card' });
+
+    const visitor: Visitor = { owner, pet, address, id: challengerId };
+    const answer = await new Promise<DuelAnswer | 'gone'>((resolve) => {
+      const pending: PendingDuelAsk = {
+        visitor,
+        timer: null,
+        finish: (result) => {
+          if (this.duelAsk !== pending) return;
+          this.duelAsk = null;
+          if (pending.timer !== null) clearTimeout(pending.timer);
+          resolve(result);
+        },
+      };
+      pending.timer = setTimeout(
+        () => pending.finish({ ok: false, reason: 'timeout' }),
+        this.options.duelWaitMs ?? DUEL_WAIT_MS,
+      );
+      // 对方等不及断开了：撤掉这次挑战（应答写完后也会触发 close，那时已经清掉，finish 不再生效）
+      res.once('close', () => pending.finish('gone'));
+      this.duelAsk = pending;
+      void this.handlers.duel(visitor, card, commit).then(
+        (result) => pending.finish(result),
+        (error: unknown) => {
+          this.options.log(`串门：隔空切磋出错：${error instanceof Error ? error.message : String(error)}`);
+          pending.finish({ ok: false, reason: 'busy' });
+        },
+      );
+    });
+    if (answer === 'gone') return;
+    if (!answer.ok) return send(res, 200, { ok: false, reason: answer.reason });
+
+    const identity = this.options.identity;
+    if (!identity) return send(res, 200, { ok: false, reason: 'bad-sig' });
+    const token = randomBytes(16).toString('hex');
+    const session: PendingDuel = {
+      visitor,
+      token,
+      commit,
+      card,
+      nonce: answer.nonce,
+      acceptedAt: this.now(),
+      timer: null,
+    };
+    session.timer = setTimeout(() => this.timeoutDuel(session), this.options.duelWaitMs ?? DUEL_WAIT_MS);
+    this.duelSession = session;
+    this.lastDuel = null;
+    // 给验明正身的挑战方签应答：挑战方拿它认下这家人（地址按挑战方拨的地址拼，转发来的就对不上）
+    const sig = identity.sign(duelAcceptMessage({ challengerId, address: local, port: this.listenPort, token }));
+    return send(res, 200, {
+      ok: true,
+      card: answer.card,
+      nonce: answer.nonce,
+      token,
+      id: identity.id,
+      pub: identity.pub,
+      sig,
+    });
+  }
+
+  /** 挑战方亮随机数（X15）：对不上或超时都按它认输；核过了交给 features.ts 开演 */
+  private duelReveal(address: string, body: Record<string, unknown>, res: ServerResponse): void {
+    const token = typeof body.token === 'string' ? body.token : '';
+    const session = this.duelSession;
+    if (!session || session.token !== token || session.visitor.address !== address) {
+      // 超时之后才到的 reveal：按迟到回，挑战方好按认输记（主人家已经在超时那一步记过了）
+      const late = this.lastDuel;
+      if (late && late.token === token && late.visitor.address === address)
+        return send(res, 200, { ok: false, reason: 'late' });
+      return send(res, 200, { ok: false, reason: 'not-visiting' });
+    }
+    const nonce = typeof body.nonce === 'string' ? body.nonce : '';
+    if (session.timer !== null) clearTimeout(session.timer);
+    this.duelSession = null;
+    if (this.now() - session.acceptedAt > (this.options.duelWaitMs ?? DUEL_WAIT_MS)) {
+      this.lastDuel = { token, visitor: session.visitor, at: session.acceptedAt };
+      this.handlers.duelConceded(session.visitor, 'late');
+      return send(res, 200, { ok: false, reason: 'late' });
+    }
+    if (sparCommit(nonce) !== session.commit) {
+      this.handlers.duelConceded(session.visitor, 'mismatch');
+      return send(res, 200, { ok: false, reason: 'mismatch' });
+    }
+    this.handlers.duelReveal(session.visitor, nonce, cleanText(body.line, LINE_MAX));
+    return send(res, 200, { ok: true });
+  }
+
+  /** 超时没亮随机数：主人家按挑战方认输记一场，槽位腾出来；迟到的 reveal 还能认出来回 late */
+  private timeoutDuel(session: PendingDuel): void {
+    if (this.duelSession !== session) return;
+    this.duelSession = null;
+    if (session.timer !== null) clearTimeout(session.timer);
+    this.lastDuel = { token: session.token, visitor: session.visitor, at: session.acceptedAt };
+    this.handlers.duelConceded(session.visitor, 'late');
+  }
+
+  /** 等主人答复的挑战被撤掉（应战 / 不应战 / 超时 / 断开 / 退出） */
+  private finishDuelAsk(pending: PendingDuelAsk, answer: DuelAnswer | 'gone'): void {
+    pending.finish(answer);
+  }
+
+  /**
+   * 验挑战方的隔空切磋签名：字段、公钥与 id、时间戳新鲜度、防重放、duelMessage 的签名，任何一步不过都 null。
+   * 和敲门不同：验不过就是 bad-sig，不当陌生人接——没有 id 的挑战不记账，也不进邻居簿。
+   */
+  private verifyDuel(
+    body: Record<string, unknown>,
+    owner: string,
+    pet: string,
+    local: string,
+    now: number,
+  ): string | null {
+    const { id, pub, ts, sig } = body;
+    if (
+      typeof id !== 'string' ||
+      typeof pub !== 'string' ||
+      typeof ts !== 'string' ||
+      typeof sig !== 'string' ||
+      id.length > 32 ||
+      pub.length > 100 ||
+      sig.length > 100 ||
+      !/^\d{1,16}$/.test(ts)
+    ) {
+      return null;
+    }
+    const pubId = idOfPub(pub);
+    if (!pubId || pubId !== id) return null;
+    const at = Number(ts);
+    if (Math.abs(now - at) > KNOCK_TS_SKEW_MS) return null;
+    // 防重放和敲门各用各的键：同一个 ts 的敲门签名挪不过来（前缀本来就不同）
+    for (const [seen, seenAt] of this.knocksSeen) if (now - seenAt > REPLAY_MS) this.knocksSeen.delete(seen);
+    const replayKey = `duel/${id}/${ts}`;
+    if (this.knocksSeen.has(replayKey)) return null;
+    this.knocksSeen.set(replayKey, now);
+    while (this.knocksSeen.size > REPLAY_MAX) this.knocksSeen.delete(this.knocksSeen.keys().next().value as string);
+    const identity = this.options.identity;
+    if (!identity) return null;
+    const commit = typeof body.commit === 'string' ? body.commit : '';
+    const message = duelMessage({
+      hostId: identity.id,
+      address: local,
+      port: this.listenPort,
+      ts: at,
+      owner,
+      pet,
+      commit,
+    });
+    return verifyWithPub(pub, message, sig) ? id : null;
   }
 
   private checkLost(): void {
@@ -1035,6 +1291,102 @@ export async function sendReveal(
   const reason = typeof result.reason === 'string' ? result.reason : '';
   if (reason === 'not-found') return { ok: false, reason: 'old-host' };
   if (reason === 'mismatch' || reason === 'late') return { ok: false, reason };
+  return { ok: false, reason: 'not-visiting' };
+}
+
+/** /v1/duel 拒绝时挑战方要能说人话的全部原因（mismatch / late 只出现在 reveal 的应答里） */
+const DUEL_FAILURES: readonly string[] = [
+  'bad-sig',
+  'off',
+  'busy',
+  'unsupported-mode',
+  'version',
+  'bad-card',
+  'bad-request',
+  'declined',
+  'timeout',
+  'too-soon',
+];
+
+/**
+ * 隔空切磋（X15 第 1 步）：带上签名（承诺签在里面）发 /v1/duel，挂着等对方主人答复；连不上时抛错。
+ * 应答里对方的名帖、随机数与签名照样不可信：名帖过 parseSparCard、随机数验格式、应答签名验过才算数。
+ * 旧版本的对端没有这条路径（404 / 被 session 检查挡回 not-visiting）：如实映射成 old-host。
+ */
+export async function sendDuel(
+  host: HostAddress,
+  hostId: string,
+  me: { owner: string; pet: string },
+  identity: VisitIdentity,
+  body: { mode: string; card: SparCard; commit: string },
+): Promise<DuelReply> {
+  const ts = Date.now();
+  // 名字先按接待端的口径清理再签：那边验签用的是 cleanName 之后的名字，原样签会因空格 / 半角斜杠对不上
+  const owner = cleanName(me.owner);
+  const pet = cleanName(me.pet);
+  const message = duelMessage({
+    hostId,
+    address: host.address,
+    port: host.port,
+    ts,
+    owner,
+    pet,
+    commit: body.commit,
+  });
+  const result = await post(
+    host,
+    '/v1/duel',
+    {
+      owner,
+      pet,
+      id: identity.id,
+      pub: identity.pub,
+      ts: String(ts),
+      sig: identity.sign(message),
+      mode: body.mode,
+      card: body.card,
+      commit: body.commit,
+    },
+    DUEL_WAIT_MS + 10_000,
+  );
+  if (result.ok === true) {
+    const token = typeof result.token === 'string' ? result.token : '';
+    // 令牌、公钥、id、签名缺一不可：验不过就当对方没应
+    if (
+      !/^[0-9a-f]{32}$/.test(token) ||
+      result.id !== hostId ||
+      typeof result.pub !== 'string' ||
+      typeof result.sig !== 'string' ||
+      idOfPub(result.pub) !== hostId
+    ) {
+      return { ok: false, reason: 'bad-sig' };
+    }
+    const nonce = typeof result.nonce === 'string' ? result.nonce : '';
+    const card = parseSparCard(result.card);
+    if (card === null || card === 'version' || !isSparNonce(nonce)) return { ok: false, reason: 'bad-card' };
+    const accepted = verifyWithPub(
+      result.pub,
+      duelAcceptMessage({ challengerId: identity.id, address: host.address, port: host.port, token }),
+      result.sig,
+    );
+    return accepted ? { ok: true, card, nonce, token } : { ok: false, reason: 'bad-sig' };
+  }
+  const reason = typeof result.reason === 'string' ? result.reason : '';
+  // 旧版本没有 /v1/duel：老代码会先撞上 session 检查回 not-visiting，两种都当「还不会隔空切磋」
+  if (reason === 'not-found' || reason === 'not-visiting') return { ok: false, reason: 'old-host' };
+  return { ok: false, reason: DUEL_FAILURES.includes(reason) ? (reason as DuelFailure) : 'bad-request' };
+}
+
+/** 亮随机数（X15 第 3 步），line 是挑战方宠物的赛后感言，应战方核过承诺后开演；连不上时抛错 */
+export async function sendDuelReveal(
+  host: HostAddress,
+  body: { token: string; nonce: string; line: string },
+): Promise<DuelRevealReply> {
+  const result = await post(host, '/v1/duel/reveal', body, 5_000);
+  if (result.ok === true) return { ok: true };
+  const reason = typeof result.reason === 'string' ? result.reason : '';
+  if (reason === 'not-found') return { ok: false, reason: 'old-host' };
+  if (reason === 'mismatch' || reason === 'late' || reason === 'not-visiting') return { ok: false, reason };
   return { ok: false, reason: 'not-visiting' };
 }
 

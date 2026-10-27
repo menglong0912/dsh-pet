@@ -147,3 +147,37 @@ export function knockMessage(input: {
 export function welcomeMessage(input: { guestId: string; address: string; port: number; token: string }): string {
   return ['dsh-pet/welcome/v1', input.guestId, `${input.address}:${input.port}`, input.token].join('\n');
 }
+
+/**
+ * 隔空切磋的挑战（挑战方签，X15）：<应战方 id> <挑战方拨的地址>:<端口> <ts> <owner> <pet> <commit>。
+ * 承诺签在里面，别人改不了；前缀和敲门不同，敲门的签名挪不过来用。
+ */
+export function duelMessage(input: {
+  hostId: string;
+  address: string;
+  port: number;
+  ts: number;
+  owner: string;
+  pet: string;
+  commit: string;
+}): string {
+  return [
+    'dsh-pet/duel/v1',
+    input.hostId,
+    `${input.address}:${input.port}`,
+    String(input.ts),
+    input.owner,
+    input.pet,
+    input.commit,
+  ].join('\n');
+}
+
+/** 隔空切磋的应答（应战方签）：<挑战方 id> <本机收到这个连接的地址>:<接待端口> <token>（口径同进门应答） */
+export function duelAcceptMessage(input: {
+  challengerId: string;
+  address: string;
+  port: number;
+  token: string;
+}): string {
+  return ['dsh-pet/duel-accept/v1', input.challengerId, `${input.address}:${input.port}`, input.token].join('\n');
+}

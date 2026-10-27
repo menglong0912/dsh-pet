@@ -29,6 +29,8 @@ import {
   knockOn,
   parseBeacon,
   randomSparNonce,
+  sendDuel,
+  sendDuelReveal,
   sendReveal,
   sendSpar,
   sparCardOf,
@@ -39,7 +41,7 @@ import {
   tripRequest,
   VisitHost,
 } from './visit.ts';
-import type { SparCard } from './visit.ts';
+import type { DuelAnswer, SparCard } from './visit.ts';
 import { generateVisitIdentity, loadVisitIdentity } from './visit-identity.ts';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -276,6 +278,8 @@ async function withFeatures(
     rng?: () => number;
     /** 启动前写进 cultivation.json 的存档（比如造一个快圆满的） */
     cultivation?: Record<string, unknown>;
+    /** 启动前写进 neighbors.json 的邻居簿（隔空切磋要按 id 记账） */
+    neighbors?: Record<string, unknown>;
     /** 切磋等应战 / 亮随机数的时限（默认 30 秒；测试调短） */
     sparWaitMs?: number;
     /** 信标的端口、发往地址与手动邻居的发往端口（测试注入：绑随机端口、不往真实广播地址发） */
@@ -341,6 +345,7 @@ async function withFeatures(
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const home = mkdtempSync(join(tmpdir(), 'dsh-pet-features-'));
   if (options.cultivation) writeFileSync(join(home, 'cultivation.json'), JSON.stringify(options.cultivation));
+  if (options.neighbors) writeFileSync(join(home, 'neighbors.json'), JSON.stringify(options.neighbors));
   const config = options.config ?? TEST_APP_CONFIG;
   const deps: FeatureDeps = {
     electron,
@@ -1377,6 +1382,38 @@ async function knockIn(
   return { port, token: answer.ok ? answer.token : '' };
 }
 
+/** 开着接待的 features 里，等接待端口开出来，返回端口与本机身份 id（隔空切磋要按 id 签名） */
+async function hostedApp(home: string, extras: FeaturesExtras): Promise<{ port: number; hostId: string }> {
+  await until(() => extras.logs.some((line) => /接待开了，端口 (\d+)/.test(line)), '接待开了');
+  const port = Number(/接待开了，端口 (\d+)/.exec(extras.logs.find((line) => /接待开了，端口/.test(line))!)![1]);
+  const hostId = loadVisitIdentity(join(home, 'visit-identity.json'), () => undefined).id;
+  return { port, hostId };
+}
+
+/** 一条邻居簿记录（隔空切磋的账要按 id 记；旧文件缺的字段照 zod 默认补上） */
+function neighborRecord(
+  id: string,
+  owner: string,
+  pet: string,
+  over: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id,
+    owner,
+    pet,
+    friend: false,
+    hosted: 0,
+    visited: 0,
+    firstMet: Date.now(),
+    lastMet: Date.now(),
+    summary: '',
+    sparWins: 0,
+    sparLosses: 0,
+    lastSparWon: null,
+    ...over,
+  };
+}
+
 /** 客人（阿花）的名帖：炼气二层、扑克牌、化鸽遁（都在 statCap(1) 之内） */
 function guestCard(): SparCard {
   return sparCardOf({ name: '阿花', hp: 56, power: 5, agility: 5, speed: 5, weapons: ['poker'], skills: ['dove'] }, 1);
@@ -1631,6 +1668,10 @@ test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数
         saw.line = line;
         return sparCommit(nonce) === saw.commit ? { ok: true } : { ok: false, reason: 'mismatch' };
       },
+      // 隔空切磋不在这条用例里测：默认不应战
+      duel: async () => ({ ok: false, reason: 'off' as const }),
+      duelReveal: () => undefined,
+      duelConceded: () => undefined,
       left: () => undefined,
     },
     { log: () => undefined },
@@ -1798,5 +1839,618 @@ test('串门：手动填的邻居收到信标，关掉「允许别人来我家�
     );
   } finally {
     peer.close();
+  }
+});
+
+// ---------- 隔空切磋（X15） ----------
+
+test('隔空切磋（应战方）：冒话、两个菜单项 → 点应战 → 三扇窗、拿锁、记账、日记 → 收摊全关', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const beaconPort = await freeUdpPort();
+  const challenger = generateVisitIdentity();
+  const ownNonce = 'c'.repeat(64);
+  const card = guestCard();
+  try {
+    await withFeatures(
+      {
+        config: visitConfig(),
+        cultivation: cultivationEarly(),
+        neighbors: { neighbors: [neighborRecord(challenger.id, '小李', '阿花')] },
+        clicks,
+        beacon: { port: beaconPort, targets: () => [] },
+      },
+      async (_features, said, _bodies, home, extras) => {
+        emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
+        const { port, hostId } = await hostedApp(home, extras);
+        const asking = sendDuel({ address: '127.0.0.1', port }, hostId, { owner: '小李', pet: '阿花' }, challenger, {
+          mode: SPAR_MODE,
+          card,
+          commit: sparCommit(ownNonce),
+        });
+        // 冒话 + 两项应答（和敲门的「让进 / 不让进」同一优先级，不能被菜单截掉）
+        await until(() => said.some((text) => text.includes('小李 家的 阿花 想跟我切磋')), '冒话');
+        await until(() => {
+          const latest = extras.menus[extras.menus.length - 1] ?? [];
+          return latest.includes('修炼/应战：小李 家的 阿花') && latest.includes('修炼/不应战');
+        }, '两个应答项');
+        clicks.push('修炼/应战：小李 家的 阿花');
+        const reply = await asking;
+        assert.ok(reply.ok, `应战没成：${JSON.stringify(reply)}`);
+        assert.deepEqual(reply.ok ? reply.card : null, sparCardOf(hostFighter, 0), '应战方回自己的名帖');
+        const hostNonce = reply.ok ? reply.nonce : '';
+        // 亮随机数 → 开打；两边各自算同一场（应战方 0 号）
+        assert.deepEqual(
+          await sendDuelReveal(
+            { address: '127.0.0.1', port },
+            { token: reply.ok ? reply.token : '', nonce: ownNonce, line: '承让承让～' },
+          ),
+          { ok: true },
+        );
+        const expected = sparFight(hostFighter, cardFighter('阿花', card), ownNonce, hostNonce);
+        const end = expected[expected.length - 1]!;
+        const won = end.kind === 'end' && end.winner === 0;
+        // 这边的账：修为进账、战绩、邻居簿、日记（都是开打那一步记的）
+        await until(() => fightCount(home) === 1, '战绩记上了');
+        const record = cultivationSave(home)!.record as { wins: number; losses: number };
+        assert.equal(won ? record.wins : record.losses, 1, '输赢跟两边各自算的那场一致');
+        assert.ok((cultivationSave(home)!.progress as number) > 0, '修为进了账');
+        const book = JSON.parse(readFileSync(join(home, 'neighbors.json'), 'utf8')) as {
+          neighbors: Array<Record<string, unknown>>;
+        };
+        assert.equal(book.neighbors[0][won ? 'sparWins' : 'sparLosses'], 1, '邻居簿记了隔空切磋账');
+        assert.equal(book.neighbors[0].lastSparWon, won);
+        await until(() => {
+          const path = join(home, 'diary', `${diaryDate(Date.now())}.json`);
+          if (!existsSync(path)) return false;
+          const day = JSON.parse(readFileSync(path, 'utf8')) as DiaryDay;
+          return day.events.some((event) => event.kind === 'cultivate' && event.text.includes('隔空切磋'));
+        }, '记了日记');
+        // 演出：三扇窗、对手名牌、自家宠物播 url 形态的动画、占锁、快进
+        await until(
+          () =>
+            windowOn('/app/guest') !== undefined &&
+            windowOn('/app/arena') !== undefined &&
+            windowOn('/app/fx') !== undefined,
+          '三扇窗',
+          400,
+        );
+        const foe = windowOn('/app/guest')!;
+        const arena = windowOn('/app/arena')!;
+        const fx = windowOn('/app/fx')!;
+        await until(
+          () => foe.calls.some((code) => code.startsWith('guest.arrive(') && code.includes('小李')),
+          '对手窗口名牌是挑战方的',
+        );
+        await until(
+          () =>
+            extras.anims.some(
+              (anim) => String(anim.url ?? '').includes(encodeURIComponent('战斗-起手')) && anim.facing !== undefined,
+            ),
+          '自家宠物播 url 形态的动画、带朝向',
+          400,
+        );
+        const hold = extras.requests.findIndex((request) => request.path === '/lock');
+        assert.ok(hold >= 0, '开演前拿了锁');
+        assert.ok(hold < extras.requests.findIndex((request) => request.path === '/anim'), '拿锁在自家第一段动画之前');
+        await until(() => arena.calls.some((code) => code.startsWith('arena.update(')), '擂台按时间线刷气血');
+        await until(() => extras.menus.some((labels) => labels.includes('修炼/快进')), '打的时候换成快进');
+        // 挑战方随 reveal 带来的赛后感言上对手窗口
+        await until(
+          () => foe.calls.some((code) => code.startsWith('guest.say(') && code.includes('承让承让')),
+          '挑战方感言上了对手窗口',
+          1000,
+        );
+        clicks.push('修炼/快进');
+        await until(() => extras.requests.some((request) => request.path === '/lock/release'), '演完放锁', 400);
+        await until(() => foe.destroyed && arena.destroyed && fx.destroyed, '收摊全关', 400);
+      },
+    );
+  } finally {
+    env.memeAnswer = '无';
+  }
+  // 退出时窗口全关（上面已经收完，这里再兜一遍）
+  assert.ok(
+    windows.every((win) => win.destroyed),
+    '退出时窗口全关',
+  );
+});
+
+test('隔空切磋（应战方）：点不应战不记账，也不开窗', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const beaconPort = await freeUdpPort();
+  const challenger = generateVisitIdentity();
+  await withFeatures(
+    {
+      config: visitConfig(),
+      cultivation: cultivationEarly(),
+      neighbors: { neighbors: [neighborRecord(challenger.id, '小李', '阿花')] },
+      clicks,
+      beacon: { port: beaconPort, targets: () => [] },
+    },
+    async (_features, said, _bodies, home, extras) => {
+      const { port, hostId } = await hostedApp(home, extras);
+      const asking = sendDuel({ address: '127.0.0.1', port }, hostId, { owner: '小李', pet: '阿花' }, challenger, {
+        mode: SPAR_MODE,
+        card: guestCard(),
+        commit: sparCommit('c'.repeat(64)),
+      });
+      await until(() => {
+        const latest = extras.menus[extras.menus.length - 1] ?? [];
+        return latest.includes('修炼/不应战');
+      }, '不应战菜单项');
+      clicks.push('修炼/不应战');
+      assert.deepEqual(await asking, { ok: false, reason: 'declined' });
+      await until(() => said.some((text) => text.includes('不跟 阿花 切磋')), '说了不应战');
+      await new Promise((done) => setTimeout(done, 200));
+      assert.equal(fightCount(home), 0, '不应战不记账');
+      assert.equal(windowOn('/app/arena'), undefined, '没开擂台');
+      assert.equal(windowOn('/app/guest'), undefined, '没开对手窗口');
+      const path = join(home, 'diary', `${diaryDate(Date.now())}.json`);
+      if (existsSync(path)) {
+        const day = JSON.parse(readFileSync(path, 'utf8')) as DiaryDay;
+        assert.ok(!day.events.some((event) => event.text.includes('隔空切磋')), '不应战不记日记');
+      }
+    },
+  );
+});
+
+test('隔空切磋（应战方）：熟人自动应战，不挂菜单；退出时窗口全关', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const beaconPort = await freeUdpPort();
+  const challenger = generateVisitIdentity();
+  const config = visitConfig();
+  config.visit.autoAdmitFriends = true;
+  try {
+    await withFeatures(
+      {
+        config,
+        cultivation: cultivationEarly(),
+        neighbors: { neighbors: [neighborRecord(challenger.id, '小李', '阿花', { friend: true })] },
+        clicks,
+        beacon: { port: beaconPort, targets: () => [] },
+      },
+      async (features, said, _bodies, home, extras) => {
+        emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
+        // 主人在电脑前才会自动应战（应该在第一拍采样之后就为 true）
+        await until(() => features.activity()?.present === true, '主人在电脑前');
+        const { port, hostId } = await hostedApp(home, extras);
+        const reply = await sendDuel(
+          { address: '127.0.0.1', port },
+          hostId,
+          { owner: '小李', pet: '阿花' },
+          challenger,
+          { mode: SPAR_MODE, card: guestCard(), commit: sparCommit('c'.repeat(64)) },
+        );
+        assert.ok(reply.ok, `熟人应自动应战：${JSON.stringify(reply)}`);
+        await until(() => said.some((text) => text.includes('直接应战')), '说了直接应战');
+        assert.ok(
+          extras.menus.every((labels) => !labels.some((label) => label.startsWith('修炼/应战'))),
+          '自动应战不挂「应战」菜单',
+        );
+        // 亮随机数开演：先看到三扇窗，然后直接退出（withFeatures 的 finally 收摊）
+        assert.deepEqual(
+          await sendDuelReveal(
+            { address: '127.0.0.1', port },
+            { token: reply.ok ? reply.token : '', nonce: 'c'.repeat(64), line: '承让承让～' },
+          ),
+          { ok: true },
+        );
+        await until(
+          () =>
+            windowOn('/app/guest') !== undefined &&
+            windowOn('/app/arena') !== undefined &&
+            windowOn('/app/fx') !== undefined,
+          '三扇窗',
+          400,
+        );
+      },
+    );
+  } finally {
+    env.memeAnswer = '无';
+  }
+  // 演出没快进就退出：dispose 把三扇窗全部关掉
+  assert.ok(
+    windows.every((win) => win.destroyed),
+    '退出时窗口全关',
+  );
+});
+
+test('隔空切磋：有客人在家、自己出门做客时都回 busy，不开应答菜单', async () => {
+  const challenger = generateVisitIdentity();
+  // 有客人在家：串门客人占着 session
+  const clicks: string[] = [];
+  windows.length = 0;
+  const beaconPort = await freeUdpPort();
+  await withFeatures(
+    {
+      config: visitConfig(),
+      cultivation: cultivationEarly(),
+      clicks,
+      beacon: { port: beaconPort, targets: () => [] },
+    },
+    async (_features, _said, _bodies, home, extras) => {
+      await knockIn(home, clicks, extras);
+      const { port, hostId } = await hostedApp(home, extras);
+      assert.deepEqual(
+        await sendDuel({ address: '127.0.0.1', port }, hostId, { owner: '小李', pet: '阿花' }, challenger, {
+          mode: SPAR_MODE,
+          card: guestCard(),
+          commit: sparCommit('c'.repeat(64)),
+        }),
+        { ok: false, reason: 'busy' },
+      );
+      await new Promise((done) => setTimeout(done, 100));
+      assert.ok(
+        extras.menus.every((labels) => !labels.some((label) => label.startsWith('修炼/应战'))),
+        '有客人在家不挂应答菜单',
+      );
+    },
+  );
+
+  // 自己出门做客：canHost 为 false
+  const config = visitConfig();
+  config.visit.visiting = true;
+  const tripClicks: string[] = [];
+  const appBeaconPort = await freeUdpPort();
+  const fakeIdentity = generateVisitIdentity();
+  const fake = new VisitHost(
+    {
+      canHost: () => true,
+      knocked: () => setTimeout(() => fake.answer(true), 50),
+      knockEnded: () => undefined,
+      line: () => Promise.resolve('欢迎欢迎～'),
+      note: () => false,
+      spar: async () => ({ ok: false, reason: 'off' as const }),
+      reveal: async () => ({ ok: false, reason: 'late' as const }),
+      duel: async () => ({ ok: false, reason: 'off' as const }),
+      duelReveal: () => undefined,
+      duelConceded: () => undefined,
+      left: () => undefined,
+    },
+    { log: () => undefined, identity: fakeIdentity },
+  );
+  const fakePort = await fake.listen('127.0.0.1');
+  const beacon = createSocket('udp4');
+  beacon.on('error', () => undefined);
+  const payload = encodeBeacon({ id: fakeIdentity.id, owner: '测试邻居', pet: '大个', port: fakePort });
+  const sendBeacon = () => beacon.send(payload, appBeaconPort, '127.0.0.1', () => undefined);
+  sendBeacon();
+  const timer = setInterval(sendBeacon, 300);
+  try {
+    await withFeatures(
+      {
+        config,
+        cultivation: cultivationEarly(),
+        clicks: tripClicks,
+        beacon: { port: appBeaconPort, targets: () => [] },
+      },
+      async (_features, _said, _bodies, home, extras) => {
+        await until(
+          () => extras.menus.some((labels) => labels.some((label) => label.startsWith('串门/去 '))),
+          '信标听见了邻居',
+          400,
+        );
+        tripClicks.push('串门/去 测试邻居 家');
+        await until(() => extras.menus.some((labels) => labels.includes('从 测试邻居 家回来')), '进了门', 400);
+        const { port, hostId } = await hostedApp(home, extras);
+        assert.deepEqual(
+          await sendDuel({ address: '127.0.0.1', port }, hostId, { owner: '小李', pet: '阿花' }, challenger, {
+            mode: SPAR_MODE,
+            card: guestCard(),
+            commit: sparCommit('c'.repeat(64)),
+          }),
+          { ok: false, reason: 'busy' },
+        );
+        tripClicks.push('从 测试邻居 家回来');
+        await until(
+          () => extras.menus.some((labels) => labels.some((label) => label.startsWith('串门/去 '))),
+          '回家了',
+          400,
+        );
+      },
+    );
+  } finally {
+    clearInterval(timer);
+    beacon.close();
+    await fake.close();
+  }
+});
+
+test('隔空切磋（挑战方）：只列带 id 的在线邻居，最多 3 个，熟人在前', async () => {
+  const config = visitConfig();
+  config.visit.hosting = false;
+  config.visit.visiting = true;
+  const beaconPort = await freeUdpPort();
+  // 四个邻居的名字按同一套 localeCompare 排：把排在最后的那位设成熟人，熟人优先时它才进得了前三
+  const owners = ['甲', '乙', '丙', '丁'];
+  const sorted = [...owners].sort((a, b) => a.localeCompare(b));
+  const friendOwner = sorted[sorted.length - 1]!;
+  const all = owners.map((owner, index) => ({
+    id: String.fromCharCode(97 + index).repeat(32),
+    owner,
+    pet: `小${owner}`,
+  }));
+  const friend = all.find((item) => item.owner === friendOwner)!;
+  const beacon = createSocket('udp4');
+  beacon.on('error', () => undefined);
+  await new Promise<void>((done) => beacon.bind(0, '127.0.0.1', () => done()));
+  const send = () => {
+    for (const item of all) {
+      const payload = encodeBeacon({ id: item.id, owner: item.owner, pet: item.pet, port: 9 });
+      beacon.send(payload, beaconPort, '127.0.0.1', () => undefined);
+    }
+  };
+  send();
+  const timer = setInterval(send, 200);
+  try {
+    await withFeatures(
+      {
+        config,
+        cultivation: cultivationEarly(),
+        neighbors: { neighbors: [neighborRecord(friend.id, friend.owner, friend.pet, { friend: true })] },
+        beacon: { port: beaconPort, targets: () => [] },
+      },
+      async (_features, _said, _bodies, _home, extras) => {
+        await until(
+          () => {
+            const latest = extras.menus[extras.menus.length - 1] ?? [];
+            return latest.filter((label) => label.startsWith('修炼/切磋/')).length === 3;
+          },
+          '三个切磋项',
+          600,
+        );
+        const latest = extras.menus[extras.menus.length - 1]!;
+        const duelLabels = latest.filter((label) => label.startsWith('修炼/切磋/'));
+        assert.equal(duelLabels.length, 3, '最多 3 个');
+        assert.ok(
+          duelLabels.includes(`修炼/切磋/${friend.owner} 家的 ${friend.pet}`),
+          '熟人在前（哪怕它按名字排在最后）',
+        );
+        const cut = sorted[sorted.length - 2]!;
+        assert.ok(!duelLabels.includes(`修炼/切磋/${cut} 家的 小${cut}`), '被截掉的是排序最后的那位');
+      },
+    );
+  } finally {
+    clearInterval(timer);
+    beacon.close();
+  }
+});
+
+/** 假邻居（隔空切磋的挑战方用）：应战 / 不应战、reveal 都按测试给的口径答 */
+async function fakeDuelHost(options: {
+  duel: (card: SparCard, commit: string) => Promise<DuelAnswer>;
+  duelReveal?: (nonce: string, line: string) => void;
+  duelConceded?: (reason: 'mismatch' | 'late') => void;
+}): Promise<{ host: VisitHost; id: string; port: number }> {
+  const identity = generateVisitIdentity();
+  const host = new VisitHost(
+    {
+      canHost: () => true,
+      knocked: () => undefined,
+      knockEnded: () => undefined,
+      line: () => Promise.resolve('欢迎欢迎～'),
+      note: () => false,
+      spar: async () => ({ ok: false, reason: 'off' as const }),
+      reveal: async () => ({ ok: false, reason: 'late' as const }),
+      duel: (_visitor, card, commit) => options.duel(card, commit),
+      duelReveal: (_visitor, nonce, line) => options.duelReveal?.(nonce, line),
+      duelConceded: (_visitor, reason) => options.duelConceded?.(reason),
+      left: () => undefined,
+    },
+    { log: () => undefined, identity },
+  );
+  const port = await host.listen('127.0.0.1');
+  return { host, id: identity.id, port };
+}
+
+test('隔空切磋（挑战方）：点菜单 → 应战 → 自家屏幕演全套、记账、没被叫回家', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const fakeFighter: Fighter = {
+    name: '大个',
+    hp: 70,
+    power: 8,
+    agility: 6,
+    speed: 6,
+    weapons: ['top'],
+    skills: ['shadow-fists'],
+  };
+  const fakeCard = sparCardOf(fakeFighter, 3);
+  const HOST_NONCE = 'b'.repeat(64);
+  const saw: { card: SparCard | null; commit: string | null; nonce: string | null; line: string | null } = {
+    card: null,
+    commit: null,
+    nonce: null,
+    line: null,
+  };
+  const fake = await fakeDuelHost({
+    duel: async (card, commit) => {
+      saw.card = card;
+      saw.commit = commit;
+      return { ok: true, card: fakeCard, nonce: HOST_NONCE };
+    },
+    duelReveal: (nonce, line) => {
+      saw.nonce = nonce;
+      saw.line = line;
+    },
+  });
+  const config = visitConfig();
+  config.visit.hosting = false;
+  config.visit.visiting = true;
+  const beaconPort = await freeUdpPort();
+  const beacon = createSocket('udp4');
+  beacon.on('error', () => undefined);
+  const payload = encodeBeacon({ id: fake.id, owner: '测试邻居', pet: '大个', port: fake.port });
+  const sendBeacon = () => beacon.send(payload, beaconPort, '127.0.0.1', () => undefined);
+  sendBeacon();
+  const timer = setInterval(sendBeacon, 300);
+  const oldAnswer = env.memeAnswer;
+  env.memeAnswer = '隔空切磋的感言～';
+  try {
+    await withFeatures(
+      {
+        config,
+        cultivation: cultivationEarly(),
+        neighbors: { neighbors: [neighborRecord(fake.id, '测试邻居', '大个')] },
+        clicks,
+        beacon: { port: beaconPort, targets: () => [] },
+      },
+      async (_features, said, bodies, home, extras) => {
+        emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
+        await until(
+          () => extras.menus.some((labels) => labels.includes('修炼/切磋/测试邻居 家的 大个')),
+          '挑战项出现',
+          400,
+        );
+        clicks.push('修炼/切磋/测试邻居 家的 大个');
+        await until(() => said.some((text) => text.includes('等它应战')), '出门那句');
+        await until(() => saw.card !== null, '挑战请求送到了应战方');
+        await until(() => saw.nonce !== null, '亮了随机数');
+        assert.equal(saw.line, env.memeAnswer, '感言走 compose（假模型的回答，不是兜底模板）');
+        // 账：测试拿同一对随机数复核这场谁赢，挑战方的记录必须一致
+        const expected = sparFight(cardFighter('大个', fakeCard), hostFighter, saw.nonce!, HOST_NONCE);
+        const end = expected[expected.length - 1]!;
+        const won = end.kind === 'end' && end.winner === 1;
+        await until(() => fightCount(home) === 1, '挑战方记了账');
+        const record = cultivationSave(home)!.record as { wins: number; losses: number };
+        assert.equal(won ? record.wins : record.losses, 1, '输赢跟两边各自算的那场一致');
+        assert.ok((cultivationSave(home)!.progress as number) > 0, '修为进了账');
+        const book = JSON.parse(readFileSync(join(home, 'neighbors.json'), 'utf8')) as {
+          neighbors: Array<Record<string, unknown>>;
+        };
+        assert.equal(book.neighbors[0][won ? 'sparWins' : 'sparLosses'], 1, '邻居簿记了隔空切磋账');
+        const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+        assert.ok(
+          day.events.some((event) => event.kind === 'cultivate' && event.text.includes('隔空切磋')),
+          '记了日记',
+        );
+        // 自家屏幕上也是全套：对手窗口（粉色、名牌是应战方的）、擂台、特效层
+        await until(
+          () =>
+            windowOn('/app/guest') !== undefined &&
+            windowOn('/app/arena') !== undefined &&
+            windowOn('/app/fx') !== undefined,
+          '挑战方的三扇窗',
+          400,
+        );
+        const foe = windowOn('/app/guest')!;
+        const arena = windowOn('/app/arena')!;
+        const fx = windowOn('/app/fx')!;
+        await until(
+          () => foe.calls.some((code) => code.startsWith('guest.arrive(') && code.includes('测试邻居')),
+          '对手窗口名牌是应战方的',
+        );
+        assert.ok(!foe.calls.some((code) => code.includes('"shadow"')), '隔空切磋的对手窗口照旧粉色');
+        await until(() => foe.calls.some((code) => code.startsWith('guest.play(')), '应战方按时间线播动画');
+        await until(
+          () =>
+            extras.anims.some(
+              (anim) => String(anim.url ?? '').includes(encodeURIComponent('战斗-起手')) && anim.facing !== undefined,
+            ),
+          '自家宠物播 url 形态的动画、带朝向',
+          400,
+        );
+        const hold = extras.requests.findIndex((request) => request.path === '/lock');
+        assert.ok(hold >= 0, '开演前拿了锁');
+        assert.ok(hold < extras.requests.findIndex((request) => request.path === '/anim'), '拿锁在自家第一段动画之前');
+        await until(() => arena.calls.some((code) => code.startsWith('arena.update(')), '擂台按时间线刷气血');
+        await until(() => extras.menus.some((labels) => labels.includes('修炼/快进')), '转播中可快进');
+        // 自家宠物的台词走 say(anim:false)：转播里能看到
+        await until(
+          () => bodies.some((body) => body.anim === false && typeof body.text === 'string' && body.text.length > 0),
+          '自家台词走 say(anim:false)',
+          1000,
+        );
+        clicks.push('修炼/快进');
+        await until(() => extras.requests.some((request) => request.path === '/lock/release'), '演完放锁', 400);
+        await until(() => foe.destroyed && arena.destroyed && fx.destroyed, '收摊全关', 400);
+        // 结果与感言照说；没被叫回家（还在自家），挑战项也回来了
+        await until(() => bodies.some((body) => String(body.text).includes('这场隔空切磋')), '结果说出来了', 1000);
+        await until(() => bodies.some((body) => body.text === env.memeAnswer), '感言说出来了', 1000);
+        await until(
+          () => {
+            const latest = extras.menus[extras.menus.length - 1] ?? [];
+            return latest.includes('修炼/切磋/测试邻居 家的 大个') && !latest.includes('修炼/快进');
+          },
+          '打完菜单收回来、挑战项回来',
+          400,
+        );
+        assert.ok(
+          extras.menus.every((labels) => !labels.includes('从 测试邻居 家回来')),
+          '一直在自家，没有出门',
+        );
+        assert.ok(
+          said.every((text) => !text.includes('我从 测试邻居 家回来')),
+          '没走串门的回家流程',
+        );
+      },
+    );
+  } finally {
+    clearInterval(timer);
+    beacon.close();
+    await fake.host.close();
+    env.memeAnswer = oldAnswer;
+  }
+  assert.ok(
+    windows.every((win) => win.destroyed),
+    '退出时窗口全关',
+  );
+});
+
+test('隔空切磋（挑战方）：对方不应战就说一句，不记账、不开窗', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const fake = await fakeDuelHost({ duel: async () => ({ ok: false, reason: 'declined' }) });
+  const config = visitConfig();
+  config.visit.hosting = false;
+  config.visit.visiting = true;
+  const beaconPort = await freeUdpPort();
+  const beacon = createSocket('udp4');
+  beacon.on('error', () => undefined);
+  const payload = encodeBeacon({ id: fake.id, owner: '测试邻居', pet: '大个', port: fake.port });
+  const sendBeacon = () => beacon.send(payload, beaconPort, '127.0.0.1', () => undefined);
+  sendBeacon();
+  const timer = setInterval(sendBeacon, 300);
+  try {
+    await withFeatures(
+      {
+        config,
+        cultivation: cultivationEarly(),
+        neighbors: { neighbors: [neighborRecord(fake.id, '测试邻居', '大个')] },
+        clicks,
+        beacon: { port: beaconPort, targets: () => [] },
+      },
+      async (_features, said, _bodies, home, extras) => {
+        await until(
+          () => extras.menus.some((labels) => labels.includes('修炼/切磋/测试邻居 家的 大个')),
+          '挑战项出现',
+          400,
+        );
+        clicks.push('修炼/切磋/测试邻居 家的 大个');
+        await until(() => said.some((text) => text.includes('没应战')), '说了没应战');
+        await new Promise((done) => setTimeout(done, 200));
+        assert.equal(fightCount(home), 0, '不记账');
+        assert.equal(windowOn('/app/arena'), undefined, '没开擂台');
+        assert.equal(windowOn('/app/guest'), undefined, '没开对手窗口');
+        const path = join(home, 'diary', `${diaryDate(Date.now())}.json`);
+        if (existsSync(path)) {
+          const day = JSON.parse(readFileSync(path, 'utf8')) as DiaryDay;
+          assert.ok(!day.events.some((event) => event.text.includes('隔空切磋')), '不记日记');
+        }
+        // 应战方没应战：挑战项回来，可以再点
+        await until(
+          () => extras.menus.some((labels) => labels.includes('修炼/切磋/测试邻居 家的 大个')),
+          '挑战项回来',
+          400,
+        );
+      },
+    );
+  } finally {
+    clearInterval(timer);
+    beacon.close();
+    await fake.host.close();
   }
 });

@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  duelAcceptMessage,
+  duelMessage,
   generateVisitIdentity,
   idOfPub,
   knockMessage,
@@ -98,4 +100,40 @@ test('idOfPub only accepts Ed25519 SPKI base64, and signatures verify only for t
   assert.equal(verifyWithPub(b.pub, message, a.sign(message)), false, '别人的公钥');
   assert.equal(verifyWithPub(a.pub, `${message}!`, a.sign(message)), false, '内容被改');
   assert.equal(verifyWithPub(a.pub, message, 'AAA'), false, '签名是坏的');
+});
+
+test('duel 与 duel-accept 的签名内容各拼各的，敲门的签名挪不过来用', () => {
+  const a = generateVisitIdentity();
+  const b = generateVisitIdentity();
+  const commit = 'c'.repeat(64);
+  const duel = duelMessage({
+    hostId: a.id,
+    address: '192.168.1.9',
+    port: 51234,
+    ts: 1_777_000_000_000,
+    owner: '小王',
+    pet: '小鱼',
+    commit,
+  });
+  assert.equal(duel, `dsh-pet/duel/v1\n${a.id}\n192.168.1.9:51234\n1777000000000\n小王\n小鱼\n${commit}`);
+  assert.equal(
+    duelAcceptMessage({ challengerId: a.id, address: '127.0.0.1', port: 41234, token: '0f'.repeat(16) }),
+    `dsh-pet/duel-accept/v1\n${a.id}\n127.0.0.1:41234\n${'0f'.repeat(16)}`,
+  );
+  assert.equal(verifyWithPub(a.pub, duel, a.sign(duel)), true);
+  assert.equal(verifyWithPub(b.pub, duel, a.sign(duel)), false, '别人的公钥');
+  assert.equal(verifyWithPub(a.pub, `${duel}!`, a.sign(duel)), false, '内容被改');
+  // 前缀不同、还多一段承诺：拿着敲门签名去冒充 duel 验不过
+  const knock = knockMessage({
+    hostId: a.id,
+    address: '192.168.1.9',
+    port: 51234,
+    ts: 1_777_000_000_000,
+    owner: '小王',
+    pet: '小鱼',
+  });
+  assert.notEqual(duel, knock);
+  assert.equal(verifyWithPub(a.pub, duel, a.sign(knock)), false, '敲门的签名挪不过来');
+  // 反过来也不行：duel 签名里多了承诺，验敲门同样不过
+  assert.equal(verifyWithPub(a.pub, knock, a.sign(duel)), false);
 });

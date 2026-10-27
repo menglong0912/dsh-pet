@@ -22,6 +22,8 @@ import {
   parseSparCard,
   PING_MS,
   randomSparNonce,
+  sendDuel,
+  sendDuelReveal,
   sendNote,
   sendReveal,
   sendSpar,
@@ -34,11 +36,11 @@ import {
   tripRequest,
   VisitHost,
 } from './visit.ts';
-import type { Beacon, HostHandlers, SparCard, Visitor } from './visit.ts';
+import type { Beacon, DuelAnswer, HostHandlers, SparCard, Visitor } from './visit.ts';
 import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS } from './battle.ts';
 import type { Fighter, SkillId, WeaponId } from './battle.ts';
 import { swapSides, timeline } from './battle-show.ts';
-import { generateVisitIdentity, knockMessage, welcomeMessage } from './visit-identity.ts';
+import { duelMessage, generateVisitIdentity, knockMessage, welcomeMessage } from './visit-identity.ts';
 import type { VisitIdentity } from './visit-identity.ts';
 
 const me = { owner: '小王', pet: '小鱼' };
@@ -398,7 +400,12 @@ test('a neighborhood lists other pets it hears from, ignores itself and junk, fo
 
 /** 起一个只听 127.0.0.1 的接待端，handlers 可按测试覆盖；fn 结束后关掉 */
 async function withHost(
-  overrides: Partial<HostHandlers> & { knockWaitMs?: number; now?: () => number; identity?: VisitIdentity | null },
+  overrides: Partial<HostHandlers> & {
+    knockWaitMs?: number;
+    duelWaitMs?: number;
+    now?: () => number;
+    identity?: VisitIdentity | null;
+  },
   fn: (host: VisitHost, port: number, calls: string[], logs: string[]) => Promise<void>,
 ): Promise<void> {
   const calls: string[] = [];
@@ -423,12 +430,21 @@ async function withHost(
       calls.push(`reveal ${visitor.pet} ${nonce.slice(0, 8)} ${line}`);
       return Promise.resolve({ ok: false, reason: 'late' });
     },
+    duel: (visitor, card, commit) => {
+      calls.push(`duel ${visitor.pet} stage${card.stage} hp${card.hp} ${commit.slice(0, 8)}`);
+      return Promise.resolve({ ok: false, reason: 'off' });
+    },
+    duelReveal: (visitor, nonce, line) => {
+      calls.push(`duel-reveal ${visitor.pet} ${nonce.slice(0, 8)} ${line}`);
+    },
+    duelConceded: (visitor, reason) => calls.push(`duel-conceded ${visitor.pet} ${reason}`),
     left: (_visitor, reason, text) => calls.push(`left ${reason} ${text}`),
     ...overrides,
   };
   const host = new VisitHost(handlers, {
     log: (message) => logs.push(message),
     knockWaitMs: overrides.knockWaitMs,
+    duelWaitMs: overrides.duelWaitMs,
     now: overrides.now,
     identity: overrides.identity,
   });
@@ -1170,4 +1186,564 @@ test('a spar invite rides the next ping, and parseEvents keeps it while still dr
     const ping = await tripRequest(target, '/v1/ping', { token });
     assert.deepEqual(ping.ok && ping.events, [{ type: 'spar-invite' }]);
   });
+});
+
+// ---------- 隔空切磋（X15） ----------
+
+/** 直接往指定路径发一个请求（fetch 不让随便设 Origin / 手拼签名） */
+function rawPost(
+  port: number,
+  path: string,
+  body: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path, method: 'POST', headers }, (res) => {
+      let text = '';
+      res.on('data', (chunk: Buffer) => (text += chunk.toString('utf8')));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+/** 手拼一个签过名的 /v1/duel 请求体（默认按 127.0.0.1、给定 ts、要发出去的名字与承诺签） */
+function signedDuel(
+  port: number,
+  challenger: VisitIdentity,
+  host: VisitIdentity,
+  tweaks: {
+    id?: string;
+    ts?: number;
+    owner?: string;
+    pet?: string;
+    signOwner?: string;
+    signPet?: string;
+    commit?: string;
+    signCommit?: string;
+    address?: string;
+    mode?: string;
+    card?: unknown;
+    sig?: string;
+  } = {},
+): Record<string, unknown> {
+  const owner = tweaks.owner ?? me.owner;
+  const pet = tweaks.pet ?? me.pet;
+  const ts = tweaks.ts ?? Date.now();
+  const commit = tweaks.commit ?? 'c'.repeat(64);
+  const sig =
+    tweaks.sig ??
+    challenger.sign(
+      duelMessage({
+        hostId: host.id,
+        address: tweaks.address ?? '127.0.0.1',
+        port,
+        ts,
+        owner: tweaks.signOwner ?? owner,
+        pet: tweaks.signPet ?? pet,
+        commit: tweaks.signCommit ?? commit,
+      }),
+    );
+  return {
+    owner,
+    pet,
+    id: tweaks.id ?? challenger.id,
+    pub: challenger.pub,
+    ts: String(ts),
+    sig,
+    mode: tweaks.mode ?? SPAR_MODE,
+    card: tweaks.card ?? aCard,
+    commit,
+  };
+}
+
+async function bodyOf(result: Promise<{ status: number; body: string }>): Promise<Record<string, unknown>> {
+  const { body } = await result;
+  return JSON.parse(body) as Record<string, unknown>;
+}
+
+test('隔空切磋：签名挑战 → 应战 → 亮随机数 → 两边算出同一场，应答签名验得过', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  const guestNonce = 'c'.repeat(64);
+  const hostNonce = 'b'.repeat(64);
+  let revealed: { nonce: string; line: string } | null = null;
+  await withHost(
+    {
+      identity: hostIdentity,
+      duel: async (visitor, card, commit) => {
+        assert.equal(visitor.id, challenger.id);
+        assert.equal(visitor.owner, me.owner);
+        assert.equal(visitor.pet, me.pet);
+        assert.deepEqual(card, aCard);
+        assert.equal(commit, sparCommit(guestNonce));
+        return { ok: true, card: sparCardOf(aFighter, 4), nonce: hostNonce };
+      },
+      duelReveal: (visitor, nonce, line) => {
+        assert.equal(visitor.id, challenger.id);
+        revealed = { nonce, line };
+      },
+      duelConceded: () => assert.fail('不该认输'),
+    },
+    async (_host, port) => {
+      const reply = await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+        mode: SPAR_MODE,
+        card: aCard,
+        commit: sparCommit(guestNonce),
+      });
+      assert.ok(reply.ok, JSON.stringify(reply));
+      assert.equal(reply.ok && reply.nonce, hostNonce);
+      assert.match(reply.ok ? reply.token : '', /^[0-9a-f]{32}$/);
+      // 应战方手里是挑战方的名帖；挑战方手里是应战方的名帖：两边各自算同一场，应战方是 0 号
+      const fight = sparFight(aFighter, cardFighter(me.pet, aCard), guestNonce, hostNonce);
+      assert.equal(fight[0].kind, 'start');
+      assert.equal(fight[0].actor, 0, '应战方是 0 号');
+      assert.deepEqual(
+        sparFight(
+          cardFighter('阿花', reply.ok ? reply.card : aCard),
+          cardFighter(me.pet, aCard),
+          guestNonce,
+          hostNonce,
+        ),
+        fight,
+      );
+      const token = reply.ok ? reply.token : '';
+      // 感言照台词清洗截断；亮完随机数就开打
+      assert.deepEqual(
+        await sendDuelReveal({ address: '127.0.0.1', port }, { token, nonce: guestNonce, line: '  你好\u202e呀\n' }),
+        { ok: true },
+      );
+      assert.deepEqual(revealed, { nonce: guestNonce, line: '你好 呀' });
+    },
+  );
+});
+
+test('隔空切磋：不应战、超时都不亮随机数，也不记账', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  let answers = 0;
+  await withHost(
+    {
+      identity: hostIdentity,
+      duel: async () => {
+        answers += 1;
+        return { ok: false, reason: 'declined' as const };
+      },
+      duelReveal: () => assert.fail('不应战时不该开打'),
+      duelConceded: () => assert.fail('不应战不记输赢'),
+    },
+    async (_host, port) => {
+      assert.deepEqual(
+        await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+          mode: SPAR_MODE,
+          card: aCard,
+          commit: sparCommit('c'.repeat(64)),
+        }),
+        { ok: false, reason: 'declined' },
+      );
+    },
+  );
+  assert.equal(answers, 1);
+
+  // 主人一直不点：DUEL_WAIT_MS 到点回 timeout
+  await withHost(
+    {
+      identity: hostIdentity,
+      duel: () => new Promise<DuelAnswer>(() => undefined),
+      duelWaitMs: 50,
+      duelReveal: () => assert.fail('超时不该开打'),
+      duelConceded: () => assert.fail('没应战不记输赢'),
+    },
+    async (_host, port) => {
+      assert.deepEqual(
+        await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+          mode: SPAR_MODE,
+          card: aCard,
+          commit: sparCommit('c'.repeat(64)),
+        }),
+        { ok: false, reason: 'timeout' },
+      );
+    },
+  );
+});
+
+test('隔空切磋：签名不对、没有 id、改过 commit / 名字、拿敲门签名来冒充，都回 bad-sig', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  let clock = Date.now();
+  await withHost(
+    {
+      identity: hostIdentity,
+      now: () => clock,
+      duel: async () => {
+        assert.fail('验不过的挑战不该到 handlers.duel');
+      },
+    },
+    async (_host, port) => {
+      const send = (tweaks: Parameters<typeof signedDuel>[3] = {}) =>
+        bodyOf(
+          rawPost(
+            port,
+            '/v1/duel',
+            JSON.stringify(signedDuel(port, challenger, hostIdentity, { ts: clock, ...tweaks })),
+          ),
+        );
+      // 没有 id
+      assert.deepEqual(await send({ id: '' }), { ok: false, reason: 'bad-sig' });
+      clock += 31_000;
+      // 拿敲门的签名来冒充
+      assert.deepEqual(
+        await send({
+          sig: challenger.sign(
+            knockMessage({
+              hostId: hostIdentity.id,
+              address: '127.0.0.1',
+              port,
+              ts: clock,
+              owner: me.owner,
+              pet: me.pet,
+            }),
+          ),
+        }),
+        { ok: false, reason: 'bad-sig' },
+      );
+      clock += 31_000;
+      // 签的是另一个承诺，发出去的 commit 被改过
+      assert.deepEqual(await send({ signCommit: 'd'.repeat(64) }), { ok: false, reason: 'bad-sig' });
+      clock += 31_000;
+      // 签的是另一个名字
+      assert.deepEqual(await send({ signOwner: '小李' }), { ok: false, reason: 'bad-sig' });
+    },
+  );
+});
+
+test('隔空切磋：版本不同、模式不认识、名帖超上限、承诺格式不对，各有各的原因', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  let clock = Date.now();
+  let asked = 0;
+  await withHost(
+    {
+      identity: hostIdentity,
+      now: () => clock,
+      duel: async () => {
+        asked += 1;
+        return { ok: false, reason: 'off' as const };
+      },
+    },
+    async (_host, port) => {
+      const send = (tweaks: Parameters<typeof signedDuel>[3] = {}) =>
+        bodyOf(
+          rawPost(
+            port,
+            '/v1/duel',
+            JSON.stringify(signedDuel(port, challenger, hostIdentity, { ts: clock, ...tweaks })),
+          ),
+        );
+      assert.deepEqual(await send({ mode: 'manual' }), { ok: false, reason: 'unsupported-mode' });
+      clock += 31_000;
+      assert.deepEqual(await send({ card: { ...aCard, v: BATTLE_VERSION + 1 } }), {
+        ok: false,
+        reason: 'version',
+      });
+      clock += 31_000;
+      assert.deepEqual(await send({ card: { ...aCard, hp: 9_999 } }), { ok: false, reason: 'bad-card' });
+      clock += 31_000;
+      assert.deepEqual(await send({ commit: 'nope' }), { ok: false, reason: 'bad-request' });
+      assert.equal(asked, 0, '这些请求都没到 handlers.duel');
+    },
+  );
+});
+
+let finishFirst: ((answer: DuelAnswer) => void) | null = null;
+
+test('隔空切磋：同一地址 30 秒内再挑回 too-soon；同时来第二个挑战回 busy', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  let clock = Date.now();
+  await withHost(
+    {
+      identity: hostIdentity,
+      now: () => clock,
+      duel: () => new Promise<DuelAnswer>((resolve) => (finishFirst = resolve)),
+    },
+    async (_host, port) => {
+      const first = sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+        mode: SPAR_MODE,
+        card: aCard,
+        commit: sparCommit('c'.repeat(64)),
+      });
+      // 等第一个挑战挂上（handler 被问了才说明已经过了验签）
+      await waitUntil(() => finishFirst !== null, '第一个挑战挂上');
+      assert.deepEqual(
+        await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+          mode: SPAR_MODE,
+          card: aCard,
+          commit: sparCommit('d'.repeat(64)),
+        }),
+        { ok: false, reason: 'busy' },
+      );
+      finishFirst!({ ok: false, reason: 'declined' });
+      assert.deepEqual(await first, { ok: false, reason: 'declined' });
+    },
+  );
+
+  // 冷却按地址算，和敲门分开：一次已结束的挑战之后，30 秒内再挑回 too-soon
+  clock = Date.now();
+  await withHost(
+    {
+      identity: hostIdentity,
+      now: () => clock,
+      duel: async () => ({ ok: false, reason: 'declined' as const }),
+    },
+    async (_host, port) => {
+      assert.deepEqual(
+        await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+          mode: SPAR_MODE,
+          card: aCard,
+          commit: sparCommit('c'.repeat(64)),
+        }),
+        { ok: false, reason: 'declined' },
+      );
+      assert.deepEqual(
+        await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+          mode: SPAR_MODE,
+          card: aCard,
+          commit: sparCommit('d'.repeat(64)),
+        }),
+        { ok: false, reason: 'too-soon' },
+      );
+      clock += 31_000;
+      assert.deepEqual(
+        await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+          mode: SPAR_MODE,
+          card: aCard,
+          commit: sparCommit('e'.repeat(64)),
+        }),
+        { ok: false, reason: 'declined' },
+      );
+    },
+  );
+});
+
+test('隔空切磋：敲门的冷却不占隔空切磋的（各算各的）', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  await withHost(
+    {
+      identity: hostIdentity,
+      knockWaitMs: 50,
+      duel: async () => ({ ok: false, reason: 'declined' as const }),
+    },
+    async (_host, port) => {
+      // 敲门没人应：这一下占掉的是敲门的冷却
+      assert.deepEqual(await knockOn({ address: '127.0.0.1', port }, me), { ok: false, reason: 'no-answer' });
+      // 30 秒内接着隔空切磋：不该被敲门的冷却挡住
+      assert.deepEqual(
+        await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+          mode: SPAR_MODE,
+          card: aCard,
+          commit: sparCommit('c'.repeat(64)),
+        }),
+        { ok: false, reason: 'declined' },
+      );
+    },
+  );
+});
+
+test('隔空切磋：名字先按接待端口径清理再签，空格和半角斜杠也验得上', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  let seen = '';
+  await withHost(
+    {
+      identity: hostIdentity,
+      duel: async (visitor) => {
+        seen = `${visitor.owner}/${visitor.pet}`;
+        return { ok: false, reason: 'declined' as const };
+      },
+    },
+    async (_host, port) => {
+      assert.deepEqual(
+        await sendDuel(
+          { address: '127.0.0.1', port },
+          hostIdentity.id,
+          { owner: ' 小/王 ', pet: '小 鱼' },
+          challenger,
+          { mode: SPAR_MODE, card: aCard, commit: sparCommit('c'.repeat(64)) },
+        ),
+        { ok: false, reason: 'declined' },
+      );
+      // 接待端看到的是 cleanName 之后的名字；签名要是按原样签的，这里根本到不了 handlers.duel
+      assert.equal(seen, '小／王/小 鱼');
+    },
+  );
+});
+
+test('隔空切磋：有客人在家、自己不在家时都回 busy', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  const ask = (port: number) =>
+    sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+      mode: SPAR_MODE,
+      card: aCard,
+      commit: sparCommit('c'.repeat(64)),
+    });
+  // 有客人在家：session 占着，协议层直接回 busy
+  await withHost({ identity: hostIdentity }, async (host, port) => {
+    await knockAndAnswer(host, port, true);
+    assert.deepEqual(await ask(port), { ok: false, reason: 'busy' });
+  });
+  // 主人说不能接待（自己出门了）：canHost 为 false
+  await withHost({ identity: hostIdentity, canHost: () => false }, async (_host, port) => {
+    assert.deepEqual(await ask(port), { ok: false, reason: 'busy' });
+  });
+});
+
+test('隔空切磋：reveal 对不上或超时，按挑战方认输；迟到的 reveal 回 late', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  const guestNonce = 'c'.repeat(64);
+  const calls: string[] = [];
+  await withHost(
+    {
+      identity: hostIdentity,
+      duel: async () => ({ ok: true, card: aCard, nonce: 'b'.repeat(64) }),
+      duelReveal: () => calls.push('reveal'),
+      duelConceded: (_visitor, reason) => calls.push(`conceded ${reason}`),
+    },
+    async (_host, port) => {
+      const reply = await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+        mode: SPAR_MODE,
+        card: aCard,
+        commit: sparCommit(guestNonce),
+      });
+      assert.ok(reply.ok);
+      const token = reply.ok ? reply.token : '';
+      assert.deepEqual(
+        await sendDuelReveal({ address: '127.0.0.1', port }, { token, nonce: 'd'.repeat(64), line: '胡说的' }),
+        { ok: false, reason: 'mismatch' },
+      );
+      assert.deepEqual(calls, ['conceded mismatch']);
+      // 这场已经收了：再亮一次就是 not-visiting，不会重复记账
+      assert.deepEqual(await sendDuelReveal({ address: '127.0.0.1', port }, { token, nonce: guestNonce, line: '' }), {
+        ok: false,
+        reason: 'not-visiting',
+      });
+    },
+  );
+
+  // 超时没亮：主人家按挑战方认输；之后迟到的 reveal 回 late
+  const lateCalls: string[] = [];
+  await withHost(
+    {
+      identity: hostIdentity,
+      duelWaitMs: 50,
+      duel: async () => ({ ok: true, card: aCard, nonce: 'b'.repeat(64) }),
+      duelReveal: () => lateCalls.push('reveal'),
+      duelConceded: (_visitor, reason) => lateCalls.push(`conceded ${reason}`),
+    },
+    async (_host, port) => {
+      const reply = await sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+        mode: SPAR_MODE,
+        card: aCard,
+        commit: sparCommit(guestNonce),
+      });
+      assert.ok(reply.ok);
+      const token = reply.ok ? reply.token : '';
+      await waitUntil(() => lateCalls.includes('conceded late'), '超时认输');
+      assert.deepEqual(
+        await sendDuelReveal({ address: '127.0.0.1', port }, { token, nonce: guestNonce, line: '迟到的' }),
+        { ok: false, reason: 'late' },
+      );
+      assert.deepEqual(lateCalls, ['conceded late'], '超时只记一次，迟到的 reveal 不再开打');
+    },
+  );
+});
+
+test('隔空切磋：旧对端（404 / 被 session 挡回）映射成 old-host；应答签名验不过当对方没应', async () => {
+  const challenger = generateVisitIdentity();
+  const hostIdentity = generateVisitIdentity();
+  const fakeServer = (reply: (res: import('node:http').ServerResponse) => void) =>
+    new Promise<{ server: import('node:http').Server; port: number }>((resolve) => {
+      const server = createServer((req, res) => {
+        req.resume();
+        req.on('end', () => reply(res));
+      });
+      server.listen(0, '127.0.0.1', () => resolve({ server, port: (server.address() as AddressInfo).port }));
+    });
+  const close = (server: import('node:http').Server) =>
+    new Promise<void>((done) => {
+      server.closeAllConnections();
+      server.close(() => done());
+    });
+  const send = (port: number) =>
+    sendDuel({ address: '127.0.0.1', port }, hostIdentity.id, me, challenger, {
+      mode: SPAR_MODE,
+      card: aCard,
+      commit: sparCommit('c'.repeat(64)),
+    });
+
+  // 旧版本没有 /v1/duel：404 + not-found
+  const old = await fakeServer((res) => {
+    const payload = JSON.stringify({ ok: false, reason: 'not-found' });
+    res.writeHead(404, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+    res.end(payload);
+  });
+  try {
+    assert.deepEqual(await send(old.port), { ok: false, reason: 'old-host' });
+  } finally {
+    await close(old.server);
+  }
+  // 老代码会先撞 session 检查回 not-visiting：同样当还不会隔空切磋
+  const older = await fakeServer((res) => {
+    const payload = JSON.stringify({ ok: false, reason: 'not-visiting' });
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+    res.end(payload);
+  });
+  try {
+    assert.deepEqual(await send(older.port), { ok: false, reason: 'old-host' });
+  } finally {
+    await close(older.server);
+  }
+
+  // 应战应答的签名验不过（拿假签名 / 别人的公钥）：当对方没应
+  const badSig = await fakeServer((res) => {
+    const payload = JSON.stringify({
+      ok: true,
+      card: aCard,
+      nonce: 'b'.repeat(64),
+      token: 'ab'.repeat(16),
+      id: hostIdentity.id,
+      pub: hostIdentity.pub,
+      sig: 'AAAA',
+    });
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+    res.end(payload);
+  });
+  try {
+    assert.deepEqual(await send(badSig.port), { ok: false, reason: 'bad-sig' });
+  } finally {
+    await close(badSig.server);
+  }
+  // 应答里的公钥不是那个 id 的：同样不认
+  const stranger = await fakeServer((res) => {
+    const payload = JSON.stringify({
+      ok: true,
+      card: aCard,
+      nonce: 'b'.repeat(64),
+      token: 'ab'.repeat(16),
+      id: hostIdentity.id,
+      pub: generateVisitIdentity().pub,
+      sig: 'AAAA',
+    });
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+    res.end(payload);
+  });
+  try {
+    assert.deepEqual(await send(stranger.port), { ok: false, reason: 'bad-sig' });
+  } finally {
+    await close(stranger.server);
+  }
 });

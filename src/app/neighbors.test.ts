@@ -214,6 +214,52 @@ test('recordSpar keeps win/loss counts and the last result; old files without th
   });
 });
 
+test('dueled records a neighbor met only through 隔空切磋 (no visits), and updates an existing one', () => {
+  withPath((path) => {
+    const book = new NeighborBook(path, () => undefined);
+    const stranger = 'c'.repeat(32);
+    // 没串过门：照样进簿子，来往次数都是 0，战绩记上——之后才能标熟人
+    book.dueled(stranger, { owner: '小王', pet: '小鱼' }, true, 5_000);
+    assert.deepEqual(
+      (({ owner, pet, hosted, visited, firstMet, lastMet, sparWins, sparLosses, lastSparWon }) => ({
+        owner,
+        pet,
+        hosted,
+        visited,
+        firstMet,
+        lastMet,
+        sparWins,
+        sparLosses,
+        lastSparWon,
+      }))(book.get(stranger)!),
+      {
+        owner: '小王',
+        pet: '小鱼',
+        hosted: 0,
+        visited: 0,
+        firstMet: 5_000,
+        lastMet: 5_000,
+        sparWins: 1,
+        sparLosses: 0,
+        lastSparWon: true,
+      },
+    );
+    // 记过的：名字跟着换、lastMet 更新、来往次数不动
+    book.met(stranger, { owner: '小王', pet: '小鱼' }, 'hosted', 6_000);
+    book.dueled(stranger, { owner: '王老板', pet: '小鱼' }, false, 7_000);
+    const record = new NeighborBook(path, () => undefined).get(stranger)!;
+    assert.equal(record.owner, '王老板');
+    assert.equal(record.hosted, 1);
+    assert.equal(record.visited, 0);
+    assert.equal(record.lastMet, 7_000);
+    assert.equal(record.sparLosses, 1);
+    assert.equal(record.lastSparWon, false);
+    // 名字清理后是空的：不记
+    book.dueled('d'.repeat(32), { owner: ' ', pet: '小鱼' }, true, 8_000);
+    assert.equal(book.get('d'.repeat(32)), undefined);
+  });
+});
+
 test('shouldAutoAdmit only fires for a verified friend with the switch on and the owner present', () => {
   withPath((path) => {
     const book = new NeighborBook(path, () => undefined);
