@@ -487,7 +487,6 @@ button{font-family:inherit}
 .entryRight{flex:.82;min-width:0}
 #entry button.primary{margin-top:6px}
 #scene{position:relative;width:100%;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:#2f3a35;flex:none}
-body:not(.cutscene) #run:has(#loadout:not([hidden])) #scene{max-height:110px}
 #scene img,#scene video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
 #scene img{opacity:0;transition:opacity .45s}
 #scene img.on{opacity:1}
