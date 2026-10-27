@@ -1,7 +1,7 @@
 /**
  * 轮询统一状态（S）—— host 侧维护的**唯一**「给前端轮询读」的数据源。
  *
- * 背景：改造前有 4 个 1s 轮询端点（/broadcast、/work-status、/notify、/balance/trigger），
+ * 背景：改造前有多个 1s 轮询端点（/broadcast、/work-status、/notify 等），
  * 浏览器是 N+3 请求/秒、桌面是 3N 请求/秒（一窗一宠，每个窗口各跑一遍），而且每个端点
  * 各写了一套"首拉记基线 / 比对 / 触发"。统一成一个 GET /state 之后：浏览器 1 请求/秒、
  * 桌面 N 请求/秒，前端只剩一份通用的「比对 counter → 渲染」逻辑。
@@ -9,7 +9,7 @@
  * 形状：
  *   {
  *     counter: 1755000000007,   // 全局写入版本 = 最后一次写入的编号（顶层，不是叶子）
- *     sections: { balance: {counter,data}, workStatus: {…}, notify: {…}, config: {…} },  // 全局，所有端共享
+ *     sections: { workStatus: {counter,data}, notify: {…}, menu: {…} },  // 全局，所有端共享
  *     pets: { <宠物id>: { say: {…}, anim: {…}, position: {…}, throw: {…}, lock: {…} } } // 每只宠物各自一份
  *   }
  *
@@ -39,13 +39,8 @@ export interface StateLeaf {
   data: unknown;
 }
 
-/** 全局段（所有端共享一份）。
- *  `config` 是**纯信号叶子**：`data` 恒为 `{}`，只看 `counter`——它变了就说明配置被写过，
- *  消费端据此重拉 `GET /config`（配置本体太大，不能塞进每秒一次的 /state）。
- *  当前只有 `POST /pet-display` 写它：那是唯一一个**不是发起页面自己**的配置改动
- *  （桌面端右键改显示位置），浏览器端只能靠这个信号知道。
- *  保存 / 同步配置（PUT / POST /config）**不写**——它们的调用方自己就拿到了成品聚合。 */
-export type SectionName = 'balance' | 'workStatus' | 'notify' | 'config' | 'menu';
+/** 全局段（所有端共享一份）。 */
+export type SectionName = 'workStatus' | 'notify' | 'menu';
 
 /** 每宠物段（say = 要说的话；anim = 要播的动画名；position = 要挪到的位置；throw = 要给的初速度；
  *  lock = 占用锁状态）。
@@ -121,7 +116,7 @@ interface Waiter {
 /** 轮询统一状态存储（一个插件实例一个；进程内内存态，重启即空） */
 export class PollStateStore {
   // 用 declare + 构造器赋值（不用类字段初始化器）：类字段会降级出 @oxc-project/runtime 外部
-  // helper，而它是未声明的依赖，会被 prepack 门禁拦下（同 src/host/helper-process.ts 的约定）。
+  // helper，而它是未声明的依赖（构建目标已提到 es2022，保留这个写法）。
   /** 严格递增的计数器种子（保证同一毫秒内连写两次也拿到不同的 counter） */
   declare private last: number;
   declare private readonly sections: Record<SectionName, StateLeaf>;
@@ -132,10 +127,8 @@ export class PollStateStore {
   constructor() {
     this.last = 0;
     this.sections = {
-      balance: emptyLeaf(),
       workStatus: emptyLeaf(),
       notify: emptyLeaf(),
-      config: emptyLeaf(),
       // 第三方右键菜单项（src/host/menu 的注册表快照）：第三方菜单注册/覆盖时写它，
       // 浏览器与桌面两端据此在右键菜单里拼出「更多」。data 形状见 shared/menu 的 readMenuItems。
       menu: emptyLeaf(),
@@ -151,7 +144,7 @@ export class PollStateStore {
   }
 
   /**
-   * 写一个全局叶子（余额 / 工作状态 / 通知 / 配置变更信号）。
+   * 写一个全局叶子（工作状态 / 通知 / 配置变更信号 / 第三方菜单）。
    * 每次都整体替换叶子对象（不原地改字段），保证 `read()` 拿到的引用不会半新半旧。
    */
   writeSection(name: SectionName, data: unknown): void {

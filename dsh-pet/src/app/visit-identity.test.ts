@@ -45,7 +45,8 @@ test('the identity file is 0600 and holds a v1 PKCS8 PEM', () => {
     assert.match(saved.key, /^-----BEGIN PRIVATE KEY-----/);
     // 换个身份文件签名验证不过：存的确实是这把私钥
     assert.equal(verifyWithPub(identity.pub, 'dsh-pet/test', identity.sign('dsh-pet/test')), true);
-    assert.equal(statSync(path).mode & 0o777, 0o600);
+    // Windows 没有 POSIX 权限位：mode 恒报 0o666（只读文件 0o444），0600 在那里无从谈起
+    if (process.platform !== 'win32') assert.equal(statSync(path).mode & 0o777, 0o600);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

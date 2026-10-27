@@ -33,9 +33,6 @@ const settingsSchema = z
     apiKey: z.string().max(8192).optional(),
     clearApiKey: z.boolean().optional(),
     enabled: z.boolean().optional(),
-    automaticWhispers: z.boolean().optional(),
-    whisperIntervalSec: z.number().int().min(60).max(86400).optional(),
-    maxTokens: z.number().int().min(128).max(4096).optional(),
     timeoutMs: z.number().int().min(1000).max(60000).optional(),
     disableThinking: z.boolean().optional(),
   })
@@ -43,22 +40,11 @@ const settingsSchema = z
 
 export function validateSettings(input: unknown): z.infer<typeof settingsSchema> {
   const result = settingsSchema.safeParse(input);
-  if (!result.success) throw new Error('设置无效：请检查协议、接口地址、间隔（至少 60 秒）和输出上限（128–4096）');
+  if (!result.success) throw new Error('设置无效：请检查协议和接口地址');
   return result.data;
 }
 
-const publicNames = [
-  'protocol',
-  'baseUrl',
-  'model',
-  'enabled',
-  'automaticWhispers',
-  'whisperIntervalSec',
-  'maxTokens',
-  'timeoutMs',
-  'disableThinking',
-  'hasKey',
-] as const;
+const publicNames = ['protocol', 'baseUrl', 'model', 'enabled', 'timeoutMs', 'disableThinking', 'hasKey'] as const;
 export function publicSettings(input: unknown): Record<string, unknown> {
   if (input === null || typeof input !== 'object') return {};
   const record = input as Record<string, unknown>;

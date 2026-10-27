@@ -2,8 +2,7 @@
  * 独立应用自己的本机接口（`/app/*`），给 `dsh-pet` 命令行（scripts/pet-cli.mjs）与 Claude Code hook 用：
  *   GET  /app/activity      主人此刻的采样快照与给模型的那行背景（调试用）
  *   POST /app/say           { text }：让桌宠说一句给定的话
- *   POST /app/whisper       让桌宠按人设碎碎念一句（转调插件的 /whisper）
- *   POST /app/look          看一眼屏幕并吐槽（等同右键「看看我在干嘛」）
+ *   POST /app/look          看一眼屏幕并吐槽；看不了时降级成按人设说一句（等同右键「看看我在干嘛」）
  *   POST /app/claude-hook   Claude Code hook 的 stdin JSON 原样转进来
  *   GET  /app/guest         串门客人窗口的页面（visit-windows.ts 开的窗口加载它）
  *   GET  /app/foe           历练对手窗口的页面（foe-window.ts 开的窗口加载它）
@@ -117,8 +116,6 @@ async function handle(
       if (!text || text.length > MAX_SAY_CHARS) return send(res, 400, { error: `text 必填，≤${MAX_SAY_CHARS} 字` });
       return send(res, 200, { ok: await features.say(text) });
     }
-    case '/app/whisper':
-      return send(res, 200, await features.whisper());
     case '/app/look':
       return send(res, 200, await features.lookAtScreen(true));
     case '/app/claude-hook':

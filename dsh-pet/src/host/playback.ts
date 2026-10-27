@@ -176,9 +176,8 @@ export interface WaitArgs {
  */
 export class PlaybackStore {
   // 用 declare + 构造器赋值（**不用类字段初始化器**）：类字段会降级出
-  // @oxc-project/runtime 外部 helper，而它是未声明的依赖，会被 prepack 门禁拦下
-  // （同 ./state.ts 的 PollStateStore 与 ./helper-process.ts 的约定——用初始化器时
-  //  构建会报 UNRESOLVED_IMPORT 警告）。
+  // @oxc-project/runtime 外部 helper，而它是未声明的依赖（同 ./state.ts 的 PollStateStore
+  // 约定——用初始化器时构建会报 UNRESOLVED_IMPORT 警告）。
   declare private readonly records: Map<string, PlaybackRecord>;
   declare private readonly waiters: Map<string, Set<Waiter>>;
   /**

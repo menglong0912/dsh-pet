@@ -44,7 +44,6 @@ test('disabled model selection cannot be overridden; metadata and saves make no 
     await assert.rejects(collect(ai.stream(options)), /not ready/);
     await ai.saveSettings(config);
     assert.equal(ai.isReady(), true);
-    assert.equal(ai.canWhisper(), false);
     assert.deepEqual(ai.currentSelection(), { provider: 'standalone', model: 'test-model' });
     assert.equal((await ai.listModels('standalone'))[0].id, 'test-model');
     assert.equal((await ai.resolveModelInfo('standalone', 'test-model'))?.id, 'test-model');
@@ -196,11 +195,10 @@ test('text history ignores nontext/source data; provider-global rate limits rese
         { role: 'assistant', content: 'reply' },
         ...options.messages,
       ];
-      for (let n = 0; n < 6; n++)
+      for (let n = 0; n < 12; n++)
         assert.equal(await collect(ai.stream({ ...options, messages: history, sessionId: String(n) })), 'ok');
       await assert.rejects(collect(ai.stream(options)), /rate limit/);
-      await ai.saveSettings({ automaticWhispers: true });
-      assert.equal(ai.canWhisper(), true);
+      await ai.saveSettings({});
       await assert.rejects(collect(ai.stream(options)), /rate limit/);
       time = 60001;
       assert.equal(await collect(ai.stream(options)), 'ok');
@@ -389,6 +387,11 @@ test('disableThinking sends chat_template_kwargs only when enabled, including te
     bodies.map((body) => body.chat_template_kwargs),
     [undefined, off, off, undefined],
   );
+  // 正常请求固定 1024；连通性测试仍用 32 的小上限
+  assert.deepEqual(
+    bodies.map((body) => body.max_tokens),
+    [1024, 1024, 32, 32],
+  );
 });
 
 test('streamVision sends the image to the configured endpoint on both protocols, local or remote', async () => {
@@ -458,5 +461,53 @@ test('streamVision sends the image to the configured endpoint on both protocols,
       });
     },
     'anthropic',
+  );
+});
+
+test('vision 400 / 404 / 415 / 422 marks the model as not accepting images; other failures do not', async () => {
+  const image = 'data:image/jpeg;base64,AAAA';
+  const vision = { system: 'persona', prompt: 'look', image };
+  for (const status of [400, 404, 415, 422]) {
+    await fixture(
+      async (ai) => {
+        assert.equal(ai.canSeeScreen(), true);
+        await assert.rejects(collect(ai.streamVision(vision)), /^Error: Standalone AI model does not accept images\.$/);
+        assert.equal(ai.canSeeScreen(), false);
+        // 保存设置（换模型 / 换地址）后重新给视觉一次机会
+        await ai.saveSettings({ model: 'other-model' });
+        assert.equal(ai.canSeeScreen(), true);
+      },
+      async () => new Response('test-secret', { status }),
+    );
+  }
+  for (const status of [401, 403, 429, 500]) {
+    await fixture(
+      async (ai) => {
+        await assert.rejects(collect(ai.streamVision(vision)));
+        if (status === 401 || status === 403) {
+          // 鉴权失败本来就会暂停到下次保存；保存后恢复，且不是「不支持看图」记下的
+          await ai.saveSettings({});
+        }
+        assert.equal(ai.canSeeScreen(), true, `HTTP ${status} 不该被记成不支持看图`);
+      },
+      async () => new Response('test-secret', { status }),
+    );
+  }
+  // 文本请求的 400 不是视觉拒绝
+  await fixture(
+    async (ai) => {
+      await assert.rejects(collect(ai.stream(options)), /request failed/);
+      assert.equal(ai.canSeeScreen(), true);
+    },
+    async () => new Response('test-secret', { status: 400 }),
+  );
+  // 超时不是视觉拒绝
+  await fixture(
+    async (ai) => {
+      await ai.saveSettings({ timeoutMs: 1000 });
+      await assert.rejects(collect(ai.streamVision(vision)), /timed out/);
+      assert.equal(ai.canSeeScreen(), true);
+    },
+    async () => await new Promise<Response>(() => {}),
   );
 });

@@ -16,11 +16,14 @@ const schema = z
   .object({
     /** 离开超过多少分钟、回来时打招呼 */
     greetAfterAwayMin: z.number().min(1).max(1440),
-    screen: z.object({
-      /** 自动看屏幕（右键手动看不受此开关限制）；模型接口没配好时不生效 */
-      enabled: z.boolean(),
-      intervalMin: z.number().min(3).max(1440),
-    }),
+    screen: z
+      .object({
+        /** 自动看屏幕（右键手动看不受此开关限制）；模型接口没配好时不生效 */
+        enabled: z.boolean(),
+        /** 自动看屏幕的间隔（秒）；最少 10 秒，tick 是 5 秒一次 */
+        intervalSec: z.number().min(10).max(86400).default(900),
+      })
+      .default({ enabled: true, intervalSec: 900 }),
     sitting: z.object({
       enabled: z.boolean(),
       afterMin: z.number().min(5).max(600),
@@ -87,11 +90,29 @@ export type AppConfig = z.infer<typeof schema>;
 /** 去掉的功能留在旧文件里的字段（番茄钟）：读和存时都先丢掉，不让整份配置因多一个字段作废 */
 const RETIRED_KEYS = ['pomodoro'];
 
-function withoutRetired(value: unknown): unknown {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+/** 旧字段迁移：screen.intervalMin（分钟）→ screen.intervalSec（秒）。只迁移不写盘。 */
+function migrateRetired(value: Record<string, unknown>): Record<string, unknown> {
   const rest: Record<string, unknown> = { ...value };
   for (const key of RETIRED_KEYS) delete rest[key];
+  const screen = rest.screen;
+  if (screen && typeof screen === 'object' && !Array.isArray(screen)) {
+    const old = screen as Record<string, unknown>;
+    if (old.intervalSec === undefined && typeof old.intervalMin === 'number') {
+      const seconds = old.intervalMin * 60;
+      rest.screen = { ...old, intervalSec: seconds };
+      delete (rest.screen as Record<string, unknown>).intervalMin;
+    } else if ('intervalMin' in old) {
+      const next = { ...old };
+      delete next.intervalMin;
+      rest.screen = next;
+    }
+  }
   return rest;
+}
+
+function withoutRetired(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  return migrateRetired(value as Record<string, unknown>);
 }
 
 /**
@@ -108,7 +129,7 @@ export function saveAppConfig(path: string, input: unknown): AppConfig {
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
   greetAfterAwayMin: 10,
-  screen: { enabled: true, intervalMin: 15 },
+  screen: { enabled: true, intervalSec: 900 },
   sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
   water: { enabled: true, everyMin: 60 },
   offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },

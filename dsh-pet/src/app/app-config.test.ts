@@ -14,14 +14,14 @@ test('writes defaults when missing, reloads on change, keeps last good config on
     assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), DEFAULT_APP_CONFIG);
     assert.deepEqual(config(), DEFAULT_APP_CONFIG);
 
-    const edited = { ...DEFAULT_APP_CONFIG, screen: { enabled: false, intervalMin: 30 } };
+    const edited = { ...DEFAULT_APP_CONFIG, screen: { enabled: false, intervalSec: 1800 } };
     writeFileSync(path, JSON.stringify(edited));
     utimesSync(path, new Date(), new Date(Date.now() + 1000));
-    assert.deepEqual(config().screen, { enabled: false, intervalMin: 30 });
+    assert.deepEqual(config().screen, { enabled: false, intervalSec: 1800 });
 
     writeFileSync(path, JSON.stringify({ ...edited, unknown: 1 }));
     utimesSync(path, new Date(), new Date(Date.now() + 2000));
-    assert.deepEqual(config().screen, { enabled: false, intervalMin: 30 });
+    assert.deepEqual(config().screen, { enabled: false, intervalSec: 1800 });
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /应用配置无效/);
   } finally {
@@ -37,7 +37,7 @@ test('settings page saves the whole config, validates ranges, and the getter pic
     const config = createAppConfig(path, () => undefined);
     const edited = {
       ...DEFAULT_APP_CONFIG,
-      screen: { enabled: false, intervalMin: 30 },
+      screen: { enabled: false, intervalSec: 1800 },
       water: { enabled: false, everyMin: 90 },
     };
     assert.deepEqual(saveAppConfig(path, edited), edited);
@@ -47,11 +47,48 @@ test('settings page saves the whole config, validates ranges, and the getter pic
 
     // 越界 / 多余字段 / 缺字段：拒绝，文件不动
     const before = readFileSync(path, 'utf8');
-    assert.throws(() => saveAppConfig(path, { ...edited, screen: { enabled: true, intervalMin: 1 } }));
+    assert.throws(() => saveAppConfig(path, { ...edited, screen: { enabled: true, intervalSec: 9 } }));
     assert.throws(() => saveAppConfig(path, { ...edited, unknown: 1 }));
     assert.throws(() => saveAppConfig(path, { screen: edited.screen }));
     assert.throws(() => saveAppConfig(path, undefined));
     assert.equal(readFileSync(path, 'utf8'), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an older screen section with intervalMin still loads as seconds, without warnings or a whole-config fallback', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pet-app-config-'));
+  const path = join(dir, 'app-config.json');
+  const warnings: string[] = [];
+  try {
+    const older: Record<string, unknown> = { ...DEFAULT_APP_CONFIG };
+    older.screen = { enabled: false, intervalMin: 3 };
+    writeFileSync(path, JSON.stringify(older));
+    const config = createAppConfig(path, (m) => warnings.push(m));
+    // 用户现在是 intervalMin: 3，读出来应是 180 秒
+    assert.deepEqual(config().screen, { enabled: false, intervalSec: 180 });
+    assert.deepEqual(warnings, []);
+    // 保存只写 intervalSec，不再回写 intervalMin
+    const saved = saveAppConfig(path, older);
+    assert.deepEqual(saved.screen, { enabled: false, intervalSec: 180 });
+    assert.equal('intervalMin' in JSON.parse(readFileSync(path, 'utf8')).screen, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('screen intervalSec accepts 10 seconds but rejects 9', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pet-app-config-'));
+  const path = join(dir, 'app-config.json');
+  try {
+    const config = createAppConfig(path, () => undefined);
+    // 默认仍是 15 分钟
+    assert.deepEqual(DEFAULT_APP_CONFIG.screen, { enabled: true, intervalSec: 900 });
+    assert.deepEqual(config().screen, { enabled: true, intervalSec: 900 });
+    const ten = { ...DEFAULT_APP_CONFIG, screen: { enabled: true, intervalSec: 10 } };
+    assert.deepEqual(saveAppConfig(path, ten).screen, { enabled: true, intervalSec: 10 });
+    assert.throws(() => saveAppConfig(path, { ...DEFAULT_APP_CONFIG, screen: { enabled: true, intervalSec: 9 } }));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -10,9 +10,6 @@ test('settings validation accepts explicit costs and write-only blank/clear key 
     model: 'model',
     apiKey: '',
     enabled: false,
-    automaticWhispers: false,
-    whisperIntervalSec: 300,
-    maxTokens: 512,
   };
   assert.deepEqual(validateSettings(input), input);
   assert.deepEqual(validateSettings({ clearApiKey: true }), { clearApiKey: true });
@@ -21,9 +18,7 @@ test('settings validation accepts explicit costs and write-only blank/clear key 
     [],
     { protocol: 'other' },
     { enabled: 'true' },
-    { whisperIntervalSec: 59 },
-    { whisperIntervalSec: 1.5 },
-    { maxTokens: 99999 },
+    { timeoutMs: 999 },
     { apiKey: 123 },
     { hasKey: true },
     { baseUrl: 'file:///a' },
@@ -45,18 +40,147 @@ test('public settings are an allowlist even if backend accidentally includes cre
   assert.deepEqual(actual, { protocol: 'anthropic', hasKey: true, model: 'x', enabled: false });
   assert.equal(JSON.stringify(actual).includes('never expose'), false);
 });
-test('settings shell is accessible, self contained, and never saves browser secrets', () => {
+test('settings shell is accessible, paged, self contained, and never saves browser secrets', () => {
   assert.match(settingsPage, /lang="zh-CN"/);
   assert.match(settingsPage, /type="password"/);
   assert.match(settingsPage, /aria-live="polite"/);
-  assert.match(settingsPage, /automaticWhispers/);
-  assert.match(settingsPage, /费用/);
-  assert.match(settingsPage, /min="60"/);
+  assert.match(settingsPage, /screenIntervalSec/);
+  assert.match(settingsPage, /截图会发给/);
+  assert.match(settingsPage, /min="10"/);
+  assert.match(settingsPage, /<title>桌宠设置<\/title>/);
+  assert.match(settingsPage, /<h1>桌宠设置<\/h1>/);
   assert.match(settingsScript, /history\.replaceState/);
   assert.match(settingsScript, /X-DSH-Pet-Token/);
-  assert.doesNotMatch(settingsScript, /localStorage|sessionStorage|document\.cookie|innerHTML/);
+  assert.doesNotMatch(settingsScript, /sessionStorage|document\.cookie|innerHTML/);
   assert.doesNotMatch(settingsPage, /https?:\/\/(?!example)/);
   assert.match(settingsStyle, /focus-visible/);
+  // 导航项与 fieldset 一一对应，各占一页
+  const navPages = [...settingsPage.matchAll(/<button[^>]*class="page-tab"[^>]*data-page="([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+  const sectionPages = [...settingsPage.matchAll(/<fieldset[^>]*data-page="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(navPages, sectionPages);
+  assert.deepEqual(navPages, ['model', 'pet', 'app', 'visit', 'neighbors', 'cultivation']);
+  // 保存按钮和结果提示都在固定的保存栏里
+  const footer = settingsPage.match(/<footer[\s\S]*?<\/footer>/)?.[0] ?? '';
+  assert.match(footer, /id="save"/);
+  assert.match(footer, /id="status"/);
+  assert.match(settingsStyle, /footer\{[^}]*position:sticky[^}]*bottom:0/);
+  // 没有内联脚本和样式（CSP 不放宽）
+  assert.doesNotMatch(settingsPage, /<script(?![^>]*\bsrc=)/i);
+  assert.doesNotMatch(settingsPage, /<style[\s>]/i);
+  assert.doesNotMatch(settingsPage, /\sstyle="/i);
+  // 必填项落在别的页时先切页；页码记在 localStorage，读不到也不影响使用
+  assert.match(settingsScript, /addEventListener\('invalid'/);
+  assert.match(settingsScript, /try \{ return localStorage\.getItem\(PAGE_KEY\)/);
+  assert.match(settingsScript, /try \{ localStorage\.setItem\(PAGE_KEY, name\)/);
+});
+
+test('settings browser script restores the last page, switches on invalid, and remembers tab clicks', async () => {
+  const { runInNewContext } = await import('node:vm');
+  type Element = {
+    value: string;
+    checked: boolean;
+    disabled: boolean;
+    hidden: boolean;
+    textContent: string;
+    dataset: Record<string, string>;
+    listeners: Record<string, (event?: unknown) => void>;
+    addEventListener: (name: string, fn: (event?: unknown) => void) => void;
+    reportValidity: () => boolean;
+    setCustomValidity: () => void;
+  };
+  const initiallyHidden = new Set([
+    'pet-settings',
+    'app-settings',
+    'visit-settings',
+    'neighbors-settings',
+    'cultivation-settings',
+    'nav-pet',
+    'nav-app',
+    'nav-visit',
+    'nav-neighbors',
+    'nav-cultivation',
+  ]);
+  const elements = new Map<string, Element>();
+  const element = (id: string): Element => {
+    if (!elements.has(id))
+      elements.set(id, {
+        value: '',
+        checked: false,
+        disabled: false,
+        hidden: initiallyHidden.has(id),
+        textContent: '',
+        dataset: {},
+        listeners: {},
+        addEventListener(name, fn) {
+          this.listeners[name] = fn;
+        },
+        reportValidity: () => true,
+        setCustomValidity: () => undefined,
+      });
+    return elements.get(id)!;
+  };
+  const stored = new Map<string, string>([['dsh-pet-settings-page', 'visit']]);
+  const app = {
+    greetAfterAwayMin: 10,
+    screen: { enabled: true, intervalSec: 900 },
+    sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
+    water: { enabled: true, everyMin: 60 },
+    offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
+    visit: {
+      enabled: true,
+      hosting: true,
+      visiting: true,
+      chat: true,
+      nickname: '',
+      stayMin: 10,
+      autoAdmitFriends: false,
+      notes: true,
+      peers: [],
+    },
+    cultivation: { enabled: true },
+  };
+  runInNewContext(settingsScript, {
+    URLSearchParams,
+    location: { hash: '#token=process-capability', pathname: '/standalone-ai/' },
+    history: { replaceState: () => undefined },
+    localStorage: {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => stored.set(key, value),
+    },
+    document: { getElementById: element },
+    fetch: async (url: string) => {
+      if (url === '/standalone-ai/app-settings') return { ok: true, json: async () => app };
+      if (url === '/standalone-ai/pet-settings')
+        return {
+          ok: true,
+          json: async () => ({
+            config: {
+              main: { whisperPrompt: '', chatMemoryRounds: 5, pets: [{ id: 'main', name: '吃白饭的', size: 500 }] },
+            },
+            file: '/data/dsh-pet/main-config.jsonc',
+          }),
+        };
+      if (url === '/standalone-ai/settings') return { ok: true, json: async () => ({ hasKey: false }) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  // 记住的「串门」页在数据读回来、这一节可用后再切过去；不可用的「邻居」「修炼」导航项隐藏
+  assert.equal(element('visit-settings').dataset.active, 'true');
+  assert.equal(element('model-settings').dataset.active, undefined);
+  assert.equal(element('nav-visit').hidden, false);
+  assert.equal(element('nav-neighbors').hidden, true);
+  assert.equal(element('nav-cultivation').hidden, true);
+  // 必填项在「宠物」页、当前在「串门」页：invalid 捕获阶段先切到宠物页
+  element('settings').listeners.invalid({ target: { closest: () => ({ id: 'pet-settings' }) } });
+  assert.equal(element('pet-settings').dataset.active, 'true');
+  assert.equal(element('visit-settings').dataset.active, undefined);
+  // 点导航切回模型页，并把页码写进 localStorage
+  element('nav-model').listeners.click();
+  assert.equal(element('model-settings').dataset.active, 'true');
+  assert.equal(stored.get('dsh-pet-settings-page'), 'model');
 });
 
 test('settings browser script strips fragment, keeps key write-only and explicitly clears without AI requests', async () => {
@@ -126,9 +250,6 @@ test('settings browser script strips fragment, keeps key write-only and explicit
           model: 'x',
           hasKey: true,
           enabled: true,
-          automaticWhispers: false,
-          whisperIntervalSec: 300,
-          maxTokens: 1024,
         }),
       };
     },
@@ -217,7 +338,7 @@ test('settings browser script shows and saves the app section when the app serve
   const requests: Array<{ url: string; options: { method: string; body?: string } }> = [];
   const app = {
     greetAfterAwayMin: 10,
-    screen: { enabled: true, intervalMin: 15 },
+    screen: { enabled: true, intervalSec: 900 },
     sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
     water: { enabled: true, everyMin: 60 },
     offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
@@ -250,7 +371,7 @@ test('settings browser script shows and saves the app section when the app serve
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(element('app-settings').hidden, false);
   assert.equal(element('screenEnabled').checked, true);
-  assert.equal(element('screenIntervalMin').value, '15');
+  assert.equal(element('screenIntervalSec').value, '900');
   assert.equal(element('sittingAfterMin').value, '50');
   assert.equal(element('greetAfterAwayMin').value, '10');
   assert.equal(element('offWorkTime').value, '18:00');
@@ -266,7 +387,7 @@ test('settings browser script shows and saves the app section when the app serve
   assert.equal(element('visitHosting').disabled, true);
   assert.equal(element('visitStayMin').disabled, true);
   assert.equal(element('visitPeers').disabled, true);
-  element('screenIntervalMin').value = '30';
+  element('screenIntervalSec').value = '1800';
   element('waterEnabled').checked = false;
   element('offWorkTime').value = '17:30';
   element('offWorkLeadMin').value = '15';
@@ -285,7 +406,7 @@ test('settings browser script shows and saves the app section when the app serve
   const post = requests.find(({ url, options }) => url === '/standalone-ai/app-settings' && options.method === 'POST');
   assert.deepEqual(JSON.parse(post?.options.body ?? '{}'), {
     ...app,
-    screen: { enabled: true, intervalMin: 30 },
+    screen: { enabled: true, intervalSec: 1800 },
     water: { enabled: false, everyMin: 60 },
     offWork: { enabled: true, time: '17:30', weekdaysOnly: true, leadMin: 15 },
     visit: {
@@ -314,7 +435,7 @@ test('settings browser script shows and saves the app section when the app serve
   assert.equal(saved(), before, '超过 20 项也没有发出去');
 });
 
-test('settings browser script edits the first desktop pet and shows one automatic-whisper switch', async () => {
+test('settings browser script edits the main pet', async () => {
   const { runInNewContext } = await import('node:vm');
   type Element = Record<string, unknown> & {
     value: string;
@@ -346,7 +467,7 @@ test('settings browser script edits the first desktop pet and shows one automati
     return elements.get(id)!;
   };
   const position = { corner: 'top-left', marginX: 24, marginY: 100 };
-  const webPet = { id: 'web1', name: '网页', size: 300, display: 'web', balanceEnabled: false, position };
+  const webPet = { id: 'web1', name: '网页', size: 300, position };
   const config = {
     main: {
       whisperPrompt: '默认人设',
@@ -359,9 +480,6 @@ test('settings browser script edits the first desktop pet and shows one automati
           id: 'main',
           name: '吃白饭的',
           size: 500,
-          display: 'desktop',
-          balanceEnabled: false,
-          whisperEnabled: false,
           workStatusEnabled: true,
           fixedEnabled: false,
           position,
@@ -386,29 +504,26 @@ test('settings browser script edits the first desktop pet and shows one automati
       ) {
         return { ok: false, status: 404, json: async () => ({}) };
       }
-      return { ok: true, json: async () => ({ hasKey: true, enabled: true, automaticWhispers: true }) };
+      return { ok: true, json: async () => ({ hasKey: true, enabled: true }) };
     },
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(element('pet-settings').hidden, false);
-  // 改的是第一只桌面宠物，不是列表里的第一只
+  // 改的是 id=main 的那只，不是列表里的第一只
   assert.equal(element('petName').value, '吃白饭的');
   assert.equal(element('petSize').value, '500');
   assert.equal(element('petPersona').value, '', '没有自己的人设：框里留空，灰字是默认人设');
   assert.equal(element('petPersona').placeholder, '默认人设');
   assert.equal(element('chatMemoryRounds').value, '5');
   assert.equal(element('petConfigFile').textContent, file);
-  // 设置里开着自动碎碎念，但这只宠物的 whisperEnabled 关着：合起来就是没开
-  assert.equal(element('automaticWhispers').checked, false);
 
-  element('automaticWhispers').checked = true;
   element('petPersona').value = '傲娇的小女仆';
   element('petFixed').checked = true;
   element('chatMemoryRounds').value = '8';
   await element('settings').listeners.submit({ preventDefault() {} });
   const posts = (url: string) =>
     requests.filter((r) => r.url === url && r.options.method === 'POST').map((r) => JSON.parse(r.options.body ?? '{}'));
-  assert.equal(posts('/standalone-ai/settings')[0].automaticWhispers, true);
+  assert.equal('automaticWhispers' in posts('/standalone-ai/settings')[0], false);
   assert.deepEqual(posts('/standalone-ai/pet-settings')[0], {
     pets: [
       webPet,
@@ -416,8 +531,6 @@ test('settings browser script edits the first desktop pet and shows one automati
         ...config.main.pets[1],
         whisperPrompt: '傲娇的小女仆',
         fixedEnabled: true,
-        // 打开自动碎碎念时顺带把这只宠物的碎碎念打开
-        whisperEnabled: true,
       },
     ],
     whisperImageEnabled: true,
@@ -652,7 +765,7 @@ test('settings browser script renders the cultivation view and saves its switch 
   };
   const config = {
     greetAfterAwayMin: 10,
-    screen: { enabled: true, intervalMin: 15 },
+    screen: { enabled: true, intervalSec: 900 },
     sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
     water: { enabled: true, everyMin: 60 },
     offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },

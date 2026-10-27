@@ -53,9 +53,9 @@ describe('pickSlot —— 事件档位取值', () => {
 });
 
 describe('成员判断 —— 数组槽位成员也要命中', () => {
-  // 与 config.jsonc 同构：balance / whisper / workStatus，其中部分档位是候选数组
+  // 与 config.jsonc 同构：whisper / workStatus，其中部分档位是候选数组
   const events = {
-    balance: ['余额-钱袋满溢', ['余额-金袋叮当', '余额-金袋叮当2']],
+    whisper: ['碎碎念-擦桌', ['碎碎念-发呆', '碎碎念-对屏']],
     workStatus: [['工作思考', '开始工作'], '认真工作'],
   };
 
@@ -70,12 +70,12 @@ describe('成员判断 —— 数组槽位成员也要命中', () => {
     assert.equal(poolIncludes(events.workStatus, '工作思考'), true);
     assert.equal(poolIncludes(events.workStatus, '开始工作'), true);
     assert.equal(poolIncludes(events.workStatus, '认真工作'), true);
-    assert.equal(poolIncludes(events.workStatus, '余额-钱袋满溢'), false);
+    assert.equal(poolIncludes(events.workStatus, '碎碎念-擦桌'), false);
   });
 
   test('isEventAnim：整个 events 段（含嵌套候选）命中；未定义返回 false', () => {
-    assert.equal(isEventAnim(events, '余额-钱袋满溢'), true);
-    assert.equal(isEventAnim(events, '余额-金袋叮当2'), true);
+    assert.equal(isEventAnim(events, '碎碎念-擦桌'), true);
+    assert.equal(isEventAnim(events, '碎碎念-发呆'), true);
     assert.equal(isEventAnim(events, '开始工作'), true);
     assert.equal(isEventAnim(events, '不存在'), false);
     assert.equal(isEventAnim(undefined, '开始工作'), false);
@@ -111,7 +111,7 @@ describe('nextWorkStatusAnim —— workStatus 播完续播决策（档内轮换
   });
 
   test('动画不属于 workStatus 池 → null（按原语义处理，如回 idle）', () => {
-    assert.equal(nextWorkStatusAnim(wsPool, '余额-钱袋满溢'), null);
+    assert.equal(nextWorkStatusAnim(wsPool, '碎碎念-擦桌'), null);
     assert.equal(nextWorkStatusAnim([], '认真工作'), null);
   });
 });
@@ -164,22 +164,14 @@ describe('rollKind —— 随机链掷骰（含宠物固定 fixedEnabled）', ()
   });
 });
 
-describe('宠物固定 —— 双端一致守卫（两端必须都把这个开关传进掷骰）', () => {
-  // 背景：随机链在两端各有一层薄壳（浏览器 React 组件 / 桌面 DOM sprite），掷骰本身共用
-  // src/shared/pickers 的 rollKind。若只在其中一端传 fixed，另一端的宠物照样自己走/自己翻，
-  // 表现为「设置页勾了没用」——而且只在一种显示模式下复现，极难排查。这里把两侧钉住。
-  const browserShell = readFileSync(fileURLToPath(new URL('../client/pet.ts', import.meta.url)), 'utf8');
+describe('宠物固定 —— 桌面壳守卫（必须把这个开关传进掷骰）', () => {
+  // 背景：随机链在两端各有一层薄壳（原浏览器 React 组件 / 桌面 DOM sprite），掷骰本身共用
+  // src/shared/pickers 的 rollKind。若漏传 fixed，宠物照样自己走/自己翻，表现为「设置页勾了没用」。
+  // 网页版已删除，这里钉住剩下的桌面壳。
   const desktopShell = readFileSync(
     fileURLToPath(new URL('../../runtime/electron-helper/sprite.js', import.meta.url)),
     'utf8',
   );
-
-  test('浏览器壳（client/pet.ts 的 pickNext）传了 fixed', () => {
-    assert.ok(
-      /rollKind\([^)]*fixed:/.test(browserShell),
-      'client/pet.ts 的 pickNext 必须把 fixed 传进 rollKind（否则浏览器里的宠物照旧乱走）',
-    );
-  });
 
   test('桌面壳（sprite.js 的 playIdle）传了 fixed', () => {
     assert.ok(
@@ -188,8 +180,7 @@ describe('宠物固定 —— 双端一致守卫（两端必须都把这个开�
     );
   });
 
-  test('两端传的都是该宠物自己的配置项（不是写死的 true/false）', () => {
-    assert.ok(/fixed:\s*cfg\.fixedEnabled/.test(browserShell), '浏览器壳必须传 cfg.fixedEnabled');
+  test('传的是该宠物自己的配置项（不是写死的 true/false）', () => {
     assert.ok(/fixed:\s*this\.pet\.fixedEnabled/.test(desktopShell), '桌面壳必须传 this.pet.fixedEnabled');
   });
 });

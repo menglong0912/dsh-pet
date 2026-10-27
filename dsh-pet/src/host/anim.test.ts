@@ -29,7 +29,6 @@ const ANIMATIONS = {
     { id: '文字类', noMirror: true, actions: ['举牌文字'] },
   ],
   events: {
-    balance: ['看钱包'],
     whisper: ['深度思考碎碎念'],
     workStatus: [
       ['档位0-A', '档位0-B'], // 数组槽位：候选多个
@@ -63,7 +62,6 @@ describe('animationNames —— 与右键菜单同一份动画集合', () => {
       '原地漂浮踏步', // moves.actions[].name
       '原地专心玩魔方', // categories[].actions
       '举牌文字', // noMirror 分类照样可点播
-      '看钱包', // events.balance
       '深度思考碎碎念', // events.whisper
       '档位0-A', // events.workStatus 数组槽位展平
       '档位0-B',

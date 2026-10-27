@@ -1,6 +1,6 @@
 /**
  * 存储位置清单单元测试 —— 钉住设置页「卸载与存储」展示的每一条路径：
- * 必须与真实写入方（index.ts 的 userRoot、helper-process.ts 的 Electron 落地目录、
+ * 必须与真实写入方（index.ts 的 userRoot、paths.ts 的 Electron 落地目录、
  * main.js 的 app.setName、@electron/get 的 env-paths cacheRoot）逐平台一致。
  *
  * 其中 DESKTOP_APP_NAME 直接读 runtime/electron-helper/main.js 校验——两边改名不同步时

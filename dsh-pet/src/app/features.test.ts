@@ -7,6 +7,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { UNSUPPORTED_IMAGE_MESSAGE } from '../standalone/ai-provider.ts';
 import type { StandaloneAiService } from '../standalone/ai-provider.ts';
 import { configPathsFor } from '../standalone/options.ts';
 import { flattenPetList, readAllConfig } from '../host/config.ts';
@@ -43,10 +44,16 @@ import { generateVisitIdentity, loadVisitIdentity } from './visit-identity.ts';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-/** 假环境里可调的：键鼠空闲秒数、插件碎碎念间隔、挑表情包时模型的回答、看屏幕时模型磨蹭多久（测试改完要还原） */
+/** 假环境里可调的：键鼠空闲秒数、模型是否就绪 / 能否看图、屏幕录制授权、挑表情包时模型的回答、看屏幕时模型磨蹭多久（测试改完要还原） */
 const env = {
   idleSec: 0,
-  whisperSec: 60,
+  ready: true,
+  canSeeScreen: true,
+  permission: 'granted',
+  visionCalls: 0,
+  getSourcesCalls: 0,
+  /** 非 null 时 streamVision 抛这个错（测「识别出不支持看图」那一拍） */
+  visionError: null as Error | null,
   memeAnswer: '无',
   /** 按调用顺序吐给 compose 的回答（用完后回落到 memeAnswer） */
   memeReplies: [] as string[],
@@ -149,8 +156,8 @@ function emitPetBounds(payload: Record<string, number>): void {
 function petNameIn(home: string): string {
   try {
     const pets = flattenPetList(readAllConfig(configPathsFor(packageRoot, home)));
-    const desktop = pets.find((pet) => pet.display === 'desktop' || pet.display === 'both') ?? pets[0];
-    return String(desktop?.name ?? '') || '桌宠';
+    const target = pets.find((pet) => String(pet.id) === 'main') ?? pets[0];
+    return String(target?.name ?? '') || '桌宠';
   } catch {
     return '桌宠';
   }
@@ -159,14 +166,18 @@ function petNameIn(home: string): string {
 const electron: FeatureElectron = {
   powerMonitor: { getSystemIdleTime: () => env.idleSec, getSystemIdleState: () => 'active' },
   desktopCapturer: {
-    getSources: () =>
-      Promise.resolve([{ display_id: '1', thumbnail: { isEmpty: () => false, toJPEG: () => Buffer.from('jpeg') } }]),
+    getSources: () => {
+      env.getSourcesCalls += 1;
+      return Promise.resolve([
+        { display_id: '1', thumbnail: { isEmpty: () => false, toJPEG: () => Buffer.from('jpeg') } },
+      ]);
+    },
   },
   screen: {
     getCursorScreenPoint: () => ({ x: 0, y: 0 }),
     getDisplayNearestPoint: () => ({ id: 1, workArea: { x: 0, y: 0, width: 1440, height: 900 } }),
   },
-  systemPreferences: { getMediaAccessStatus: () => 'granted' },
+  systemPreferences: { getMediaAccessStatus: () => env.permission },
   shell: { openExternal: () => Promise.resolve(), openPath: () => Promise.resolve('') },
   // 只有心魔试炼 / 切磋那几项会开窗口（客人、擂台、特效层），其余测试一个都不建
   BrowserWindow: Object.assign(
@@ -192,8 +203,8 @@ const visionPrompts: string[] = [];
 const memeAsks: string[] = [];
 
 const ai = {
-  canSeeScreen: () => true,
-  isReady: () => true,
+  canSeeScreen: () => env.canSeeScreen,
+  isReady: () => env.ready,
   currentSelection: () => ({ provider: 'local', model: 'qwen' }),
   stream: async function* (options: { messages: Array<{ content: Array<{ text: string }> }> }) {
     memeAsks.push(options.messages[0].content[0].text);
@@ -201,9 +212,14 @@ const ai = {
     const reply = env.memeReplies.length > 0 ? env.memeReplies.shift()! : env.memeAnswer;
     yield { type: 'text', text: reply };
   },
-  getSettings: () => ({ whisperIntervalSec: env.whisperSec }),
   streamVision: async function* (input: { prompt: string }) {
     visionPrompts.push(input.prompt);
+    env.visionCalls += 1;
+    if (env.visionError) {
+      const error = env.visionError;
+      env.canSeeScreen = false;
+      throw error;
+    }
     if (env.visionDelayMs > 0) await new Promise((done) => setTimeout(done, env.visionDelayMs));
     yield { type: 'text', text: '主人在写代码呀' };
     env.visionDone += 1;
@@ -235,6 +251,16 @@ interface FeaturesExtras {
 }
 
 /**
+ * 测试用的应用配置：默认配置里下班提醒是开着的，它按真实钟点触发（工作日 17:50 起），
+ * 晚上跑测试时会插进来说一句、占住模型（被 memeHold 卡住时后面的 compose 全排在它后头）。
+ * 这里的用例都不测下班提醒（它在 reminders.test.ts 里单测），一律关掉，结果才不随钟点变。
+ */
+const TEST_APP_CONFIG: AppConfig = {
+  ...DEFAULT_APP_CONFIG,
+  offWork: { ...DEFAULT_APP_CONFIG.offWork, enabled: false },
+};
+
+/**
  * 起一套功能编排跑 fn：插件路由由假服务应答（/broadcast 回 broadcast 并记下说的话与整个请求体，
  * /memes 回 memes 池，其余一律成功），应用配置取 config 的当前值（测试里可以改）。
  * fn 的 home 是这套编排的临时数据目录（宠物日记在 home/diary）。
@@ -260,6 +286,8 @@ async function withFeatures(
     };
     /** 占用锁已经被用户撤掉：带锁的 /anim、/broadcast 一律回 lock-lost（不带锁的照常成功） */
     lockLost?: boolean;
+    /** /whisper 的响应（降级成碎碎念时用） */
+    whisper?: Record<string, unknown>;
   },
   fn: (
     features: AppFeatures,
@@ -295,7 +323,8 @@ async function withFeatures(
         bodies.push(body);
         said.push(String(body.text));
         reply(options.broadcast ?? { ok: true });
-      } else if (path.endsWith('/memes')) reply({ ok: true, memes: options.memes ?? [] });
+      } else if (path.endsWith('/whisper')) reply(options.whisper ?? { ok: true });
+      else if (path.endsWith('/memes')) reply({ ok: true, memes: options.memes ?? [] });
       else if (path.endsWith('/anim')) {
         anims.push(body);
         reply({ ok: true });
@@ -312,7 +341,7 @@ async function withFeatures(
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const home = mkdtempSync(join(tmpdir(), 'dsh-pet-features-'));
   if (options.cultivation) writeFileSync(join(home, 'cultivation.json'), JSON.stringify(options.cultivation));
-  const config = options.config ?? DEFAULT_APP_CONFIG;
+  const config = options.config ?? TEST_APP_CONFIG;
   const deps: FeatureDeps = {
     electron,
     ai,
@@ -381,17 +410,14 @@ test('看屏幕：说出来的话记进今天的宠物日记，没说出来的�
     await features.lookAtScreen(true);
     assert.deepEqual(screenEvents(home), ['看了一眼主人的屏幕，说：「主人在写代码呀」']);
   });
-  await withFeatures(
-    { broadcast: { ok: false, reason: 'pet-not-displayed' } },
-    async (features, _said, _bodies, home) => {
-      await features.lookAtScreen(true);
-      assert.deepEqual(screenEvents(home), []);
-    },
-  );
+  await withFeatures({ broadcast: { ok: false, reason: 'generate-error' } }, async (features, _said, _bodies, home) => {
+    await features.lookAtScreen(true);
+    assert.deepEqual(screenEvents(home), []);
+  });
 });
 
-test('看屏幕：宠物被隐藏、插件拒绝说话时如实报失败', async () => {
-  await withFeatures({ broadcast: { ok: false, reason: 'pet-not-displayed' } }, async (features) => {
+test('看屏幕：插件拒绝说话时如实报失败', async () => {
+  await withFeatures({ broadcast: { ok: false, reason: 'generate-error' } }, async (features) => {
     assert.deepEqual(await features.lookAtScreen(true), { ok: false, text: '主人在写代码呀', reason: 'say-failed' });
   });
 });
@@ -459,53 +485,164 @@ test('右键菜单：耗时的动作不堵后面的点击（看屏幕还没看�
   }
 });
 
-test('碎碎念这一拍：到点看屏幕就占这一拍（这一拍以来碰过键鼠就算），刚说完话碎碎念让一让', async () => {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
-  config.screen.intervalMin = 0; // 一采到「人在」就到点
-  // 停手 90 秒：应用自己每 5 秒的检查（要求 60 秒内动过）不会看，只有碎碎念这一拍（180 秒内动过）会看
-  Object.assign(env, { idleSec: 90, whisperSec: 180 });
+test('看屏幕：模型不支持看图时降级成碎碎念（不截图）', async () => {
+  Object.assign(env, { canSeeScreen: false, visionCalls: 0, getSourcesCalls: 0 });
   try {
-    await withFeatures({ config }, async (features, said) => {
-      await until(() => features.activity()?.present === true);
-      // 每 5 秒的检查没看（用 length 断言：deepEqual 会把 said 收窄成空数组类型）
-      assert.equal(said.length, 0);
-      // 别的宠物的拍不管
-      assert.equal(features.takeWhisperTurn('someone-else'), false);
-      assert.equal(features.takeWhisperTurn('main'), true);
-      await until(() => said.includes('主人在写代码呀'));
-      // 看屏幕没到点了，但刚说完话：这一拍仍然拿走，碎碎念不顶掉刚冒出来的气泡
-      config.screen.intervalMin = 60;
-      assert.equal(features.takeWhisperTurn('main'), true);
-      assert.deepEqual(said, ['主人在写代码呀']);
-    });
+    await withFeatures(
+      { whisper: { ok: true, text: '随口说一句' } },
+      async (features, _said, _bodies, _home, { requests }) => {
+        assert.deepEqual(await features.lookAtScreen(false), { ok: true, text: '随口说一句' });
+        assert.equal(env.visionCalls, 0);
+        assert.equal(env.getSourcesCalls, 0);
+        assert.ok(
+          requests.some((request) => request.path === '/whisper'),
+          '应调插件的 /whisper 降级',
+        );
+      },
+    );
   } finally {
-    Object.assign(env, { idleSec: 0, whisperSec: 60 });
+    Object.assign(env, { canSeeScreen: true, visionCalls: 0, getSourcesCalls: 0 });
   }
 });
 
-test('碎碎念这一拍：一整拍没碰键鼠（看视频 / 发呆）不看屏幕，照常碎碎念', async () => {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
-  config.screen.intervalMin = 0;
-  Object.assign(env, { idleSec: 200, whisperSec: 180 });
+test('看屏幕：自动触发没授权屏幕录制时降级成碎碎念，不调 getSources', async () => {
+  Object.assign(env, { permission: 'denied', visionCalls: 0, getSourcesCalls: 0 });
   try {
-    await withFeatures({ config }, async (features, said) => {
-      await until(() => features.activity()?.present === true);
-      assert.equal(features.takeWhisperTurn('main'), false);
-      assert.deepEqual(said, []);
-    });
+    await withFeatures(
+      { whisper: { ok: true, text: '随口说一句' } },
+      async (features, _said, _bodies, _home, { requests }) => {
+        assert.deepEqual(await features.lookAtScreen(false), { ok: true, text: '随口说一句' });
+        assert.equal(env.getSourcesCalls, 0);
+        assert.equal(env.visionCalls, 0);
+        assert.ok(requests.some((request) => request.path === '/whisper'));
+      },
+    );
   } finally {
-    Object.assign(env, { idleSec: 0, whisperSec: 60 });
+    Object.assign(env, { permission: 'granted', visionCalls: 0, getSourcesCalls: 0 });
   }
 });
 
-test('碎碎念这一拍：看屏幕没到点、应用也没在说话时照常碎碎念', async () => {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
-  config.screen.enabled = false;
-  await withFeatures({ config }, async (features, said) => {
-    await until(() => features.activity()?.present === true);
-    assert.equal(features.takeWhisperTurn('main'), false);
-    assert.deepEqual(said, []);
+test('看屏幕：手动触发没授权时照旧提示开权限，不降级', async () => {
+  Object.assign(env, { permission: 'denied', visionCalls: 0, getSourcesCalls: 0 });
+  try {
+    await withFeatures(
+      { whisper: { ok: true, text: '随口说一句' } },
+      async (features, said, _bodies, _home, { requests }) => {
+        assert.deepEqual(await features.lookAtScreen(true), { ok: false, reason: 'no-permission' });
+        assert.match(said.join('\n'), /屏幕录制/);
+        assert.equal(env.getSourcesCalls, 1);
+        assert.equal(env.visionCalls, 0);
+        assert.equal(
+          requests.some((request) => request.path === '/whisper'),
+          false,
+        );
+      },
+    );
+  } finally {
+    Object.assign(env, { permission: 'granted', visionCalls: 0, getSourcesCalls: 0 });
+  }
+});
+
+test('看屏幕：模型没配好时自动触发安静跳过，什么都不调', async () => {
+  Object.assign(env, { ready: false, visionCalls: 0, getSourcesCalls: 0 });
+  try {
+    await withFeatures(
+      { whisper: { ok: true, text: '随口说一句' } },
+      async (features, _said, _bodies, _home, { requests }) => {
+        assert.deepEqual(await features.lookAtScreen(false), { ok: false, reason: 'not-ready' });
+        assert.equal(env.visionCalls, 0);
+        assert.equal(env.getSourcesCalls, 0);
+        assert.equal(
+          requests.some((request) => request.path === '/whisper'),
+          false,
+        );
+      },
+    );
+  } finally {
+    Object.assign(env, { ready: true, visionCalls: 0, getSourcesCalls: 0 });
+  }
+});
+
+test('看屏幕：识别出模型不支持看图的那一拍当场降级，之后不再发视觉请求', async () => {
+  Object.assign(env, {
+    canSeeScreen: true,
+    visionError: new Error(UNSUPPORTED_IMAGE_MESSAGE),
+    visionCalls: 0,
+    getSourcesCalls: 0,
   });
+  try {
+    await withFeatures(
+      { whisper: { ok: true, text: '随口说一句' } },
+      async (features, _said, _bodies, _home, { requests }) => {
+        assert.deepEqual(await features.lookAtScreen(false), { ok: true, text: '随口说一句' });
+        assert.equal(env.visionCalls, 1);
+        assert.equal(env.canSeeScreen, false, '识别出来后记住当前设置不支持看图');
+        // 下一拍不再发视觉请求，直接降级
+        assert.deepEqual(await features.lookAtScreen(false), { ok: true, text: '随口说一句' });
+        assert.equal(env.visionCalls, 1);
+        assert.equal(requests.filter((request) => request.path === '/whisper').length, 2);
+      },
+    );
+  } finally {
+    Object.assign(env, { canSeeScreen: true, visionError: null, visionCalls: 0, getSourcesCalls: 0 });
+  }
+});
+
+test('看屏幕：手动「看看我在干嘛」在模型不支持看图时也降级', async () => {
+  Object.assign(env, { canSeeScreen: false, visionCalls: 0, getSourcesCalls: 0 });
+  try {
+    await withFeatures({ whisper: { ok: true, text: '随口说一句' } }, async (features) => {
+      assert.deepEqual(await features.lookAtScreen(true), { ok: true, text: '随口说一句' });
+      assert.equal(env.visionCalls, 0);
+      assert.equal(env.getSourcesCalls, 0);
+    });
+  } finally {
+    Object.assign(env, { canSeeScreen: true, visionCalls: 0, getSourcesCalls: 0 });
+  }
+});
+
+test('看屏幕：自动触发按秒判断到点（不是按分钟）', async () => {
+  const config = structuredClone(TEST_APP_CONFIG);
+  config.screen.intervalSec = 10;
+  const realNow = Date.now;
+  const base = realNow();
+  let offset = 0;
+  Date.now = () => base + offset;
+  try {
+    await withFeatures({ config }, async (_features, said) => {
+      // 构造已过 11 秒：旧代码按 intervalMin * 60_000 算会差 600 秒，这条会超时
+      offset = 11_000;
+      // 首拍在 offset 改掉之前就取了 now；等下一拍（5 秒）按新的 now 判断
+      await until(() => said.includes('主人在写代码呀'), '自动看屏幕按秒到点', 400);
+    });
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('看屏幕：日记距上一条看屏幕记录至少 3 分钟才记', async () => {
+  const realNow = Date.now;
+  const base = realNow();
+  const screenEvents = (home: string): string[] => {
+    const path = join(home, 'diary', `${diaryDate(base)}.json`);
+    if (!existsSync(path)) return [];
+    const day = JSON.parse(readFileSync(path, 'utf8')) as DiaryDay;
+    return day.events.filter((event) => event.kind === 'screen').map((event) => event.text);
+  };
+  let offset = 0;
+  Date.now = () => base + offset;
+  try {
+    await withFeatures({}, async (features, _said, _bodies, home) => {
+      await features.lookAtScreen(true);
+      await features.lookAtScreen(true);
+      assert.equal(screenEvents(home).length, 1, '3 分钟内只记一条');
+      offset = 3 * 60_000 + 1;
+      await features.lookAtScreen(true);
+      assert.equal(screenEvents(home).length, 2, '过了 3 分钟再记一条');
+    });
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 /** 读修炼存档（后面几个修炼的测试用） */
@@ -515,7 +652,7 @@ function cultivationSave(home: string): Record<string, unknown> | null {
 }
 
 test('修炼：开关关着不建档，也没有修炼的菜单项', async () => {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
+  const config = structuredClone(TEST_APP_CONFIG);
   config.cultivation.enabled = false;
   await withFeatures({ config }, async (features, _said, _bodies, home, { menus }) => {
     await until(() => features.activity()?.present === true);
@@ -762,10 +899,10 @@ function fightCount(home: string): number {
   return record ? record.wins + record.losses : 0;
 }
 
-test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线走；打的时候碎碎念让路；快进后奖励进存档', async () => {
+test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线走；快进后奖励进存档', async () => {
   const clicks: string[] = [];
   windows.length = 0;
-  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (features, _said, bodies, home, extras) => {
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, _said, bodies, home, extras) => {
     const { menus, anims } = extras;
     await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), 'trial menu');
     clicks.push('修炼/心魔试炼');
@@ -806,9 +943,8 @@ test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线�
       'show line anim:false + duration',
       1_000,
     );
-    // 打的时候：菜单换成快进、没有「心魔试炼」，碎碎念让路
+    // 打的时候：菜单换成快进、没有「心魔试炼」
     await until(() => menus.some((labels) => labels.includes('修炼/快进')), 'fast-forward menu');
-    assert.equal(features.takeWhisperTurn('main'), true, '演出台词按时间线走，碎碎念别来抢');
     // 快进看结果
     clicks.push('修炼/快进');
     await until(() => (cultivationSave(home)?.today as { trial: number }).trial === 1, 'trial counted');
@@ -1197,7 +1333,7 @@ test('历练：收起来以后从菜单能叫回来，心魔试炼和渡劫照�
 });
 
 test('修炼关掉时没有「心魔试炼」这一项', async () => {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
+  const config = structuredClone(TEST_APP_CONFIG);
   config.cultivation.enabled = false;
   await withFeatures({ config }, async (_features, _said, _bodies, _home, { menus }) => {
     await until(() => menus.length > 0);
@@ -1259,7 +1395,7 @@ const hostFighter: Fighter = {
 
 /** 开接待那套配置（信标绑测试自己的端口、哪儿都不发） */
 function visitConfig(): AppConfig {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
+  const config = structuredClone(TEST_APP_CONFIG);
   config.visit.enabled = true;
   config.visit.hosting = true;
   return config;
@@ -1459,7 +1595,7 @@ test('切磋：随机数对不上、超时没亮、邀约没人接，各按各�
 test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数 → 自家屏幕上演全套、账记上、没被叫回家、回家收窗', async () => {
   const clicks: string[] = [];
   windows.length = 0;
-  const config = structuredClone(DEFAULT_APP_CONFIG);
+  const config = structuredClone(TEST_APP_CONFIG);
   config.visit.enabled = true;
   config.visit.visiting = true;
   // 假主人家（跟 dev/visit-peer.mjs 的 host 模式同一套）：应战用一份假名帖，随机数是固定的

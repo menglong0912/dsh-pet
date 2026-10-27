@@ -28,13 +28,7 @@ function toScreen(v) {
 function toLocal(v) {
   return v / CONFIG.scale;
 }
-// bridge 模式（DSH_PET_BRIDGE=1）：请求走自定义 scheme，经 Electron 主进程转宿主管道——
-// 绕开 DSH Desktop 2.0.3+ 的浏览器访问闸门（只放行带令牌的请求，插件自拉进程的裸 HTTP 全 403）
-const BRIDGE = params.get('bridge') === '1';
-// 工具项「打开网站」的去向（主进程按宿主形态经 query 注入，见 main.js 的 OPEN_TARGET）：
-// desktop = 宿主是 DSH 桌面应用，菜单项改叫「打开软件」并唤起桌面应用主窗口；site = 打开站点。
-const OPEN_TARGET = params.get('openTarget') === 'desktop' ? 'desktop' : 'site';
-// 独立应用（src/app）注册菜单项用的 owner：这组项是应用自己的功能，放根菜单；空 = 没有（DSH 内）
+// 独立应用（src/app）注册菜单项用的 owner：这组项是应用自己的功能，放根菜单；空 = 没有
 const APP_MENU_OWNER = params.get('appMenuOwner') || '';
 // 视口 = 全部显示器工作区的外接矩形（多显示器时即整个桌面；窗口只是宠物的一块局部画布）。
 // 它只是**坐标系原点与比例换算基准**：位置比例（customPos）、漫游 ratio 都按它算。
@@ -110,7 +104,7 @@ function applyDeskGeometry(geo) {
 }
 
 // 首帧几何走 URL query（position() 定角落时就要用）；运行期变化再经 pet:displays 推送。
-// areas/panels 缺失（手动 start-desktop / 老版本主进程）时退化为「整个视口就是一块屏」= 旧行为。
+// areas/panels 缺失（主进程未传 / 老版本）时退化为「整个视口就是一块屏」= 旧行为。
 applyDeskGeometry({
   hull: { x: VIEW_SCREEN.x, y: VIEW_SCREEN.y, width: VIEW_SCREEN.w, height: VIEW_SCREEN.h },
   areas: (() => {
@@ -142,21 +136,16 @@ applyDeskGeometry({
   topInsetRatio: CONFIG.topInsetRatio,
 });
 const ORIGIN = new URL(CONFIG.configUrl).origin;
-/** 宿主 /dsh-pet-7340 前缀：bridge 走自定义 scheme（主进程转发），否则 HTTP 直连宿主 */
-const BASE = BRIDGE ? 'dsh-pet-bridge://dsh-pet/dsh-pet-7340' : ORIGIN + '/dsh-pet-7340';
-const STATE_URL = BASE + '/state'; // 轮询统一状态 S：前端 1s 轮询的唯一数据源（余额/工作状态/通知/说话）
-const BALANCE_URL = BASE + '/balance'; // 余额刷新动作（POST，写 S；数据本身从 /state 读）
-const WHISPER_URL = BASE + '/whisper';
+/** 宿主 /dsh-pet-7340 前缀：桌面页面是 file:// 加载的，必须用绝对地址访问本机服务 */
+const BASE = ORIGIN + '/dsh-pet-7340';
+const STATE_URL = BASE + '/state'; // 轮询统一状态 S：前端 1s 轮询的唯一数据源（工作状态/通知/说话）
 // 实况上报（渲染端 → 宿主，**内部通道**）：第三方用 GET /pose 读宿主存下的这份快照
 const POSE_REPORT_URL = BASE + '/pose/report';
 // 实况上报的节流间隔（ms）。sendBounds 在走位/抛掷时是**逐帧**调用的（60Hz），必须合并。
 // **必须带 trailing edge**（到点读当前值推一次）：只做 leading 会把"走位结束时的最后一次位置"
 // 丢掉，第三方读到的永远是中途值，而且没有任何报错。
 const POSE_THROTTLE_MS = 400;
-const BUBBLE_DURATION_MS = 10 * 1000; // 余额/碎碎念气泡展示时长（与浏览器一致：定时自动消失，与动画解耦）
-// 余额气泡展开/收起换内容前的等待（ms）：与 .pet-bubble 的 opacity 过渡同为 .25s，
-// 淡出走完再换内容，否则内容会在半透明时被替换 = 看得见的硬切（与浏览器 bubble.ts 同值）
-const BALANCE_FADE_MS = 250;
+const BUBBLE_DURATION_MS = 10 * 1000; // 碎碎念气泡展示时长（与浏览器一致：定时自动消失，与动画解耦）
 // /state 长轮询的挂起时长（与浏览器端同值）：宿主在"版本没变"时最多挂这么久。
 // 1s 是前端自己定的下限——空闲时请求率与改造前一致（1 req/s），叶子一变宿主立刻返回。
 const STATE_WAIT_MS = 1000;
@@ -169,9 +158,6 @@ const rootEl = document.getElementById('root');
 const errorEl = document.getElementById('pet-error');
 let config = null; // { pets: 拍平后的成品实例列表, physics, confineToScreen }（loadConfig 填充）
 let sprites = []; // PetSprite[]（本窗口只装一只宠物）
-let balance = null; // BalanceState（本窗口单宠共用）
-let balanceTick = 0;
-let balanceNoticeKey = null; // 上次已提示的不可用原因（reason:provider）：自动轮询只在原因变化时再弹（判定在 shared，与浏览器同一份）
 let workTick = 0; // 工作状态联动 tick：容器 1s 轮询 /state 的 sections.workStatus，counter 变化才递增（各启用宠物以此触发）
 let bootTimer = null;
 let loopsStarted = false;
@@ -182,7 +168,6 @@ window.__dshPetDebug = {
   configOk: false,
   spriteCount: 0,
   lastBubbleTitle: '',
-  lastBalanceOk: null,
   menuOpen: false,
   chatOpen: false,
   bootAt: Date.now(),

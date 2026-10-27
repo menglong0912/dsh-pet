@@ -32,11 +32,8 @@ const BASE = {
       id: 'main',
       name: '主宠',
       size: 462,
-      balanceEnabled: false,
-      whisperEnabled: false,
       workStatusEnabled: false,
       fixedEnabled: false,
-      display: 'web',
       position: { corner: 'bottom-right', marginX: 40, marginY: 40 },
     },
   ],
@@ -51,7 +48,6 @@ const BASE = {
     },
     categories: [],
     events: {
-      balance: ['余额A'],
       whisper: ['碎碎念A'],
       workStatus: ['工作A', '工作B'],
     },
@@ -68,7 +64,6 @@ const BASE = {
   whisperPrompt: '你是桌面宠物',
   chatMemoryRounds: 4,
   notificationsEnabled: true,
-  eventsRefreshSec: { balance: 1800, whisper: 300 },
   workStatusTexts: [['在干活']],
 };
 
@@ -115,7 +110,6 @@ describe('readAllConfig —— events 槽位 string | string[] 校验', () => {
     cases({
       overlay: {
         animations: animationsWithEvents({
-          balance: BASE.animations.events.balance, // 既有规则：events.balance 必填非空数组（用户改 workStatus 会保留）
           whisper: BASE.animations.events.whisper,
           workStatus: [['工作思考', '开始工作'], '认真工作', '长时间工作看表', '工作被打扰', '工作结束', '摸鱼被抓'],
         }),
@@ -538,7 +532,7 @@ describe('readAllConfig —— 实例级人设 whisperPrompt（实例覆盖 / �
   });
 
   test('没写 → 结果里**没有**该键（回落条目由消费端做，合并器不填生效值）', () => {
-    // 合并器一旦把条目人设填进每只实例，/pet-display（拿合并结果回调 saveUserConfig 写盘）
+    // 合并器一旦把条目人设填进每只实例，设置页保存（拿合并结果回调 saveUserConfig 写盘）
     // 就会把"跟随条目"固化成显式覆盖，之后改条目人设这些实例不再跟着变——这条钉住它。
     const pet = petAt(readAllConfig(withBase({})));
     assert.equal('whisperPrompt' in pet, false);
@@ -603,7 +597,7 @@ describe('saveUserConfig —— 实例级人设 whisperPrompt（白名单 + 清�
     assert.equal(saveOnce({ pets: [{ ...PETS[0], whisperPrompt: 42 }] }), null);
   });
 
-  test('/pet-display 式往返：合并结果直接喂回 save，人设不丢（也不会被写成空串）', () => {
+  test('设置页保存式往返：合并结果直接喂回 save，人设不丢（也不会被写成空串）', () => {
     const merged = readAllConfig(withBase({}, { pets: [{ ...BASE.pets[0], whisperPrompt: '我是猫娘' }] }));
     const layerPets = merged.main.pets as Record<string, unknown>[];
     assert.equal(petAt(saveOnce({ pets: layerPets })).whisperPrompt, '我是猫娘');
@@ -650,43 +644,42 @@ describe('saveUserConfig —— 物理参数 physics（白名单 + 透传保留�
   });
 });
 
-describe('saveUserConfig —— 碎碎念 / 对话模型（白名单 + 透传保留）', () => {
-  const WM = { provider: 'deepseek', model: 'deepseek-chat' };
+describe('saveUserConfig —— 对话模型（白名单 + 透传保留）', () => {
   const CM = { provider: 'opencode', model: 'big-model' };
 
-  test('整段随请求体写入（设置页「AI 模型」两个下拉框）', () => {
-    const out = saveOnce({ pets: PETS, whisperModel: WM, chatModel: CM });
-    assert.deepEqual(out?.whisperModel, WM, 'whisperModel 必须按请求体写入');
+  test('整段随请求体写入（设置页「AI 模型」下拉框）', () => {
+    const out = saveOnce({ pets: PETS, chatModel: CM });
     assert.deepEqual(out?.chatModel, CM, 'chatModel 必须按请求体写入');
   });
 
   test('留空（跟随当前对话）也是合法值，照常落盘', () => {
     const empty = { provider: '', model: '' };
-    const out = saveOnce({ pets: PETS, whisperModel: empty, chatModel: empty });
-    assert.deepEqual(out?.whisperModel, empty);
+    const out = saveOnce({ pets: PETS, chatModel: empty });
     assert.deepEqual(out?.chatModel, empty);
   });
 
   test('未传时透传磁盘旧值；磁盘上也没有则不凭空造字段', () => {
-    const kept = saveOnce({ pets: PETS }, { pets: PETS, whisperModel: WM, chatModel: CM });
-    assert.deepEqual(kept?.whisperModel, WM, '未传时必须原样保留磁盘上的手改值');
+    const kept = saveOnce({ pets: PETS }, { pets: PETS, chatModel: CM });
     assert.deepEqual(kept?.chatModel, CM);
     const fresh = saveOnce({ pets: PETS }) ?? {};
-    assert.equal('whisperModel' in fresh, false, '磁盘上也没有时不得凭空写入');
-    assert.equal('chatModel' in fresh, false);
+    assert.equal('chatModel' in fresh, false, '磁盘上也没有时不得凭空写入');
   });
 
   test('请求体覆盖磁盘旧值（与四个全局开关同一语义）', () => {
-    const out = saveOnce({ pets: PETS, whisperModel: WM }, { pets: PETS, whisperModel: CM });
-    assert.deepEqual(out?.whisperModel, WM);
+    const out = saveOnce({ pets: PETS, chatModel: CM }, { pets: PETS, chatModel: { provider: 'a', model: 'b' } });
+    assert.deepEqual(out?.chatModel, CM);
   });
 
   test('落盘时归一化：两侧空白 trim，请求体多带的键不写进用户层', () => {
     const out = saveOnce({
       pets: PETS,
-      whisperModel: { provider: ' deepseek ', model: ' deepseek-chat ', reasoningEffort: 'high' },
+      chatModel: { provider: ' deepseek ', model: ' deepseek-chat ', reasoningEffort: 'high' },
     });
-    assert.deepEqual(out?.whisperModel, WM, '只保留 provider/model 两个 trim 过的字符串');
+    assert.deepEqual(
+      out?.chatModel,
+      { provider: 'deepseek', model: 'deepseek-chat' },
+      '只保留 provider/model 两个 trim 过的字符串',
+    );
   });
 
   test('非法值 → 整体拒绝（宿主回 400；与读取侧 modelSelectionValid 同一套规则）', () => {
@@ -701,7 +694,6 @@ describe('saveUserConfig —— 碎碎念 / 对话模型（白名单 + 透传保
       ['null', null],
     ];
     for (const [name, value] of bad) {
-      assert.equal(saveOnce({ pets: PETS, whisperModel: value }), null, `whisperModel ${name} 必须被拒绝`);
       assert.equal(saveOnce({ pets: PETS, chatModel: value }), null, `chatModel ${name} 必须被拒绝`);
     }
   });
@@ -786,19 +778,18 @@ describe('saveUserConfig —— 对话配图张数上限 chatImageLimit（白名
 });
 
 describe('readAllConfig —— 模型选择合并（缺失取默认 / 非法回退默认）', () => {
-  const WM = { provider: 'deepseek', model: 'deepseek-chat' };
+  const CM = { provider: 'deepseek', model: 'deepseek-chat' };
 
   test('内置默认有值 → 用户层没写时读得到（默认 = 都空 = 跟随当前对话）', () => {
-    const merged = readAllConfig(withBase({ whisperModel: WM, chatModel: WM }));
-    assert.deepEqual(merged.main.whisperModel, WM);
-    assert.deepEqual(merged.main.chatModel, WM);
+    const merged = readAllConfig(withBase({ chatModel: CM }));
+    assert.deepEqual(merged.main.chatModel, CM);
   });
 
   test('用户层写了 → 覆盖内置默认', () => {
     const merged = readAllConfig(
-      withBase({ whisperModel: WM }, { whisperModel: { provider: 'opencode', model: 'big-model' } }),
+      withBase({ chatModel: CM }, { chatModel: { provider: 'opencode', model: 'big-model' } }),
     );
-    assert.deepEqual(merged.main.whisperModel, { provider: 'opencode', model: 'big-model' });
+    assert.deepEqual(merged.main.chatModel, { provider: 'opencode', model: 'big-model' });
   });
 
   test('用户层写了非法值 → 回退内置默认（只填一半 / 非字符串 / 非对象）', () => {
@@ -810,8 +801,8 @@ describe('readAllConfig —— 模型选择合并（缺失取默认 / 非法回�
       ['deepseek', 'deepseek-chat'],
     ];
     for (const value of bad) {
-      const merged = readAllConfig(withBase({ whisperModel: WM }, { whisperModel: value }));
-      assert.deepEqual(merged.main.whisperModel, WM, `${JSON.stringify(value)} 应回退内置默认`);
+      const merged = readAllConfig(withBase({ chatModel: CM }, { chatModel: value }));
+      assert.deepEqual(merged.main.chatModel, CM, `${JSON.stringify(value)} 应回退内置默认`);
     }
   });
 });
@@ -933,8 +924,8 @@ describe('syncUserConfigFromDefault —— 同步（内置默认原文写入用�
 /**
  * 文件宠物条目的基座 —— 「全局默认 + 种类可覆盖」。
  *
- * 判据：GLOBAL_DEFAULT_KEYS 那 9 个（physics / confineToScreen / 两个配图开关 / chatImageLimit /
- * chatMemoryRounds / whisperModel / chatModel / eventsRefreshSec）是**用户级「成本 / 偏好 /
+ * 判据：GLOBAL_DEFAULT_KEYS 那 8 个（physics / confineToScreen / 两个配图开关 / chatImageLimit /
+ * chatMemoryRounds / chatModel / font）是**用户级「成本 / 偏好 /
  * 环境 / 节奏」参数**，用户层写了就对**所有条目**生效（含 pet pack）；种类文件自己写了就覆盖
  * 自己那份。其余顶层字段（人设 / 表情包 / 动画池 / 文案）的基座仍是**内置默认**——
  * 一个种类一份人设、一份池、一个表情包目录，各写一份才是 pet pack 的意义。
@@ -947,7 +938,6 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
     chatImageEnabled: true,
     chatImageLimit: 0,
     confineToScreen: false,
-    whisperModel: { provider: '', model: '' },
     chatModel: { provider: '', model: '' },
     memes: { 可爱: '卖萌' },
   };
@@ -958,8 +948,6 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
         id: 'pig1',
         name: '小猪',
         size: 300,
-        balanceEnabled: false,
-        display: 'web',
         position: { corner: 'top-left', marginX: 10, marginY: 10 },
       },
     ],
@@ -992,7 +980,7 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
     }
   }
 
-  test('用户层写了这 9 个字段 → 种类条目逐个继承（不再只吃内置默认）', () => {
+  test('用户层写了全局默认字段 → 种类条目逐个继承（不再只吃内置默认）', () => {
     const out = merged({
       overlay: {
         physics: { ...(BASE_FULL.physics as Record<string, unknown>), petCollision: true, gravity: 999 },
@@ -1001,9 +989,7 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
         chatImageEnabled: false,
         chatImageLimit: 4,
         chatMemoryRounds: 9,
-        whisperModel: { provider: 'p1', model: 'm1' },
         chatModel: { provider: 'p2', model: 'm2' },
-        eventsRefreshSec: { balance: 900, whisper: 60 },
       },
       pack: PACK,
     });
@@ -1015,9 +1001,7 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
     assert.equal(pig.chatImageEnabled, false);
     assert.equal(pig.chatImageLimit, 4, 'chatImageLimit 应继承用户层');
     assert.equal(pig.chatMemoryRounds, 9);
-    assert.deepEqual(pig.whisperModel, { provider: 'p1', model: 'm1' });
     assert.deepEqual(pig.chatModel, { provider: 'p2', model: 'm2' });
-    assert.deepEqual(pig.eventsRefreshSec, { balance: 900, whisper: 60 });
     // 对照：main 条目一直就是用户层（行为不变）
     assert.equal(rec(out.main.physics).gravity, 999);
     assert.equal(out.main.chatMemoryRounds, 9);
@@ -1093,39 +1077,138 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
     assert.equal(rec(out.pig.physics).petCollision, true, '非法覆盖 → 回退基座（= 用户层），不是内置默认');
   });
 
-  test('eventsRefreshSec 也进全局默认：用户层写了 → 种类整段继承', () => {
-    const out = merged({ overlay: { eventsRefreshSec: { balance: 900, whisper: 60 } }, pack: PACK });
-    assert.deepEqual(out.pig.eventsRefreshSec, { balance: 900, whisper: 60 });
-    assert.deepEqual(out.main.eventsRefreshSec, { balance: 900, whisper: 60 });
-  });
-
-  test('eventsRefreshSec 是整段替换：种类写了自己的，就不再逐键合并基座', () => {
-    const out = merged({
-      overlay: { eventsRefreshSec: { balance: 900, whisper: 60 } },
-      pack: { ...PACK, eventsRefreshSec: { balance: 111 } },
+  // ---- D2 旧配置兼容（任务书 §3.3）：删掉的余额字段照常加载，不告警、不整段回退 ----
+  describe('D2 已删的余额字段 —— 旧配置照常加载', () => {
+    const mainPet = (extra: Record<string, unknown>): Record<string, unknown> => ({
+      id: 'main',
+      name: '主宠',
+      size: 462,
+      workStatusEnabled: false,
+      fixedEnabled: false,
+      position: { corner: 'bottom-right', marginX: 40, marginY: 40 },
+      ...extra,
     });
-    // 旧的逐键深合并会把基座的 whisper: 60 补回来；整段替换下缺的键就是缺
-    assert.deepEqual(out.pig.eventsRefreshSec, { balance: 111 });
+    const packPet = (extra: Record<string, unknown>): Record<string, unknown> => ({
+      id: 'pig1',
+      name: '小猪',
+      size: 300,
+      position: { corner: 'top-left', marginX: 10, marginY: 10 },
+      ...extra,
+    });
+
+    test('pets[].balanceEnabled：用户层与文件宠物都忽略，加载结果与不带时一致', () => {
+      const without = merged({ overlay: { pets: [mainPet({})] }, pack: { pets: [packPet({})] } });
+      const withOld = merged({
+        overlay: { pets: [mainPet({ balanceEnabled: true })] },
+        pack: { pets: [packPet({ balanceEnabled: false })] },
+      });
+      assert.deepEqual(withOld, without);
+      const mainPets = without.main.pets as Record<string, unknown>[];
+      const pigPets = without.pig.pets as Record<string, unknown>[];
+      assert.equal('balanceEnabled' in mainPets[0], false, '成品里不得出现已删字段');
+      assert.equal('balanceEnabled' in pigPets[0], false);
+    });
+
+    test('animations.events.balance：照常通过校验，成品里丢弃，不整段退回内置默认', () => {
+      const oldAnims = {
+        ...BASE.animations,
+        events: { ...BASE.animations.events, balance: ['旧余额动画'] },
+      };
+      const without = merged({
+        overlay: { animations: BASE.animations },
+        pack: { ...PACK, animations: BASE.animations },
+      });
+      const withOld = merged({ overlay: { animations: oldAnims }, pack: { ...PACK, animations: oldAnims } });
+      assert.deepEqual(withOld, without);
+      // 用户自己的动画池原样保留（整段没有回退），只是已删的事件键被忽略
+      assert.deepEqual(rec(withOld.main.animations).events, BASE.animations.events);
+      assert.deepEqual(rec(withOld.pig.animations).events, BASE.animations.events);
+    });
+
+    test('eventsRefreshSec.balance：整个 eventsRefreshSec 是已删字段，带着它照常加载、直接忽略', () => {
+      const withOld = merged({ overlay: { eventsRefreshSec: { balance: 900, whisper: 60 } }, pack: PACK });
+      const without = merged({ overlay: {}, pack: PACK });
+      assert.deepEqual(withOld, without);
+      assert.equal('eventsRefreshSec' in withOld.main, false);
+      assert.equal('eventsRefreshSec' in withOld.pig, false);
+    });
   });
 
-  test('eventsRefreshSec 只写一半 → 缺的键不补（消费端各自兜底 1800 / 300）', () => {
-    const out = merged({ overlay: { eventsRefreshSec: { whisper: 60 } }, pack: PACK });
-    assert.deepEqual(out.pig.eventsRefreshSec, { whisper: 60 });
-    assert.equal('balance' in rec(out.pig.eventsRefreshSec), false, '不再自动补 balance');
-    assert.deepEqual(out.main.eventsRefreshSec, { whisper: 60 });
+  // ---- D9 旧配置兼容（任务书 §3.3）：删掉的碎碎念字段照常加载、不告警 ----
+  describe('D9 已删的碎碎念字段 —— 旧配置照常加载', () => {
+    const packPet: Record<string, unknown> = {
+      id: 'pig1',
+      name: '小猪',
+      size: 300,
+      position: { corner: 'top-left', marginX: 10, marginY: 10 },
+    };
+    const pack = { pets: [packPet] };
+
+    test('pets[].whisperEnabled：用户层与文件宠物都忽略，加载结果与不带时一致', () => {
+      const without = merged({ overlay: { pets: [{ ...BASE.pets[0] }] }, pack });
+      for (const value of [true, false]) {
+        const withOld = merged({ overlay: { pets: [{ ...BASE.pets[0], whisperEnabled: value }] }, pack });
+        assert.deepEqual(withOld, without, String(value));
+        const mainPets = withOld.main.pets as Record<string, unknown>[];
+        const pigPets = withOld.pig.pets as Record<string, unknown>[];
+        assert.equal('whisperEnabled' in mainPets[0], false, '成品里不得出现已删字段');
+        assert.equal('whisperEnabled' in pigPets[0], false);
+      }
+    });
+
+    test('顶层 whisperModel：用户层照常加载、直接忽略，不告警、不整份回退', () => {
+      const without = merged({ overlay: { pets: [{ ...BASE.pets[0] }] }, pack });
+      const withOld = merged({
+        overlay: { pets: [{ ...BASE.pets[0] }], whisperModel: { provider: 'p', model: 'm' } },
+        pack: { ...pack, whisperModel: { provider: 'p', model: 'm' } },
+      });
+      assert.deepEqual(withOld, without);
+      assert.equal('whisperModel' in withOld.main, false);
+      assert.equal('whisperModel' in withOld.pig, false);
+    });
+
+    test('保存时不再把旧 whisperModel / eventsRefreshSec 写回用户层', () => {
+      const existing = {
+        pets: [{ ...BASE.pets[0] }],
+        whisperModel: { provider: 'p', model: 'm' },
+        eventsRefreshSec: { whisper: 60 },
+      };
+      const out = (saveUserConfig({ pets: existing.pets }, existing) ?? {}) as Record<string, unknown>;
+      assert.equal('whisperModel' in out, false);
+      assert.equal('eventsRefreshSec' in out, false);
+      assert.deepEqual((out.pets as Record<string, unknown>[])[0].id, 'main');
+    });
   });
 
-  test('eventsRefreshSec 里不认识的键不再被静默丢弃', () => {
-    const out = merged({ overlay: { eventsRefreshSec: { balance: 900, foo: 10 } }, pack: PACK });
-    assert.deepEqual(out.pig.eventsRefreshSec, { balance: 900, foo: 10 });
-  });
+  // ---- D3 旧配置兼容（任务书 §3.3）：删掉的 display 字段照常加载、直接忽略 ----
+  describe('D3 已删的 display 字段 —— 旧配置照常加载', () => {
+    const OLD_DISPLAYS = ['web', 'desktop', 'both', 'none'] as const;
+    const packPet: Record<string, unknown> = {
+      id: 'pig1',
+      name: '小猪',
+      size: 300,
+      position: { corner: 'top-left', marginX: 10, marginY: 10 },
+    };
 
-  test('eventsRefreshSec 整段非法 → 告警 + 回退基座（种类回到内置默认）', () => {
-    for (const bad of [{ whisper: -1 }, { whisper: 'x' }, 'not-an-object', [1, 2]] as unknown[]) {
-      const out = merged({ overlay: { eventsRefreshSec: bad }, pack: PACK });
-      assert.deepEqual(out.pig.eventsRefreshSec, BASE.eventsRefreshSec, JSON.stringify(bad));
-      assert.deepEqual(out.main.eventsRefreshSec, BASE.eventsRefreshSec, JSON.stringify(bad));
+    for (const value of OLD_DISPLAYS) {
+      test(`pets[].display: '${value}'：用户层照常加载、直接忽略（结果与不写时一致）`, () => {
+        const without = merged({ overlay: { pets: [{ ...BASE.pets[0] }] }, pack: PACK });
+        const withOld = merged({ overlay: { pets: [{ ...BASE.pets[0], display: value }] }, pack: PACK });
+        assert.deepEqual(withOld, without);
+        const mainPets = withOld.main.pets as Record<string, unknown>[];
+        assert.equal('display' in rec(mainPets[0]), false, '成品里不得出现已删字段');
+      });
     }
+
+    test('文件宠物（pet/<名>-config.json）里带旧 display 也照常加载、直接忽略', () => {
+      const without = merged({ pack: { pets: [{ ...packPet }] } });
+      for (const value of OLD_DISPLAYS) {
+        const withOld = merged({ pack: { pets: [{ ...packPet, display: value }] } });
+        assert.deepEqual(withOld, without, value);
+        const pigPets = withOld.pig.pets as Record<string, unknown>[];
+        assert.equal('display' in rec(pigPets[0]), false, '成品里不得出现已删字段');
+      }
+    });
   });
 });
 

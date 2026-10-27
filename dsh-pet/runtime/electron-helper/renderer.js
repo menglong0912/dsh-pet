@@ -5,7 +5,7 @@
  * events.js → renderer.js（本文件）。本文件只做：配置加载 / 错误处理 / 启动装配 / 素材注入。
  *
  * 与浏览器 overlay 严格对齐（宠物行为/文案完全一致）：
- *   - 纯逻辑（常量/选择器/移动几何/余额折算/拍平）来自 shared-core.js
+ *   - 纯逻辑（常量/选择器/移动几何/拍平）来自 shared-core.js
  *     （= src/shared 的构建产物，window.PetShared）——与浏览器 bundle 共用同一份源码；
  *   - 配置唯一来源 = 宿主 /dsh-pet-7340/config 的**成品聚合**（host readAllConfig 合并，
  *     绝对正确、字段填满）：一步 fetch → S.flattenConfigPets 拍平，加载失败**大声报错**
@@ -18,7 +18,7 @@
  *     都跨屏（#43，宠物可被甩/拖到其它显示器）；单显示器时即主屏工作区，行为不变。
  *     外扩区透明且点击穿透（只有身体命中区可交互），不挡下层应用。
  *   - 右键级联菜单（与浏览器共用同一份组件：树+渲染+样式来自 shared-core 的 menu 模块）：
- *     右键宠物弹出，桌面端工具根项「打开网站 / 打开软件（宿主是 DSH 桌面应用时的同一项）/ 查看余额 / 回到初始位置 / 重载配置」+ 动作点播；
+ *     右键宠物弹出，桌面端工具根项「设置 / 回到初始位置 / 重载配置」+ 动作点播；
  *     菜单开启期间整窗保持可交互（悬停菜单不触发穿透翻转），关闭/离开窗口即恢复穿透。
  *   - 系统通知不是宠物行为（浏览器半侧 notify.ts 负责），桌面端不重复实现。
  */
@@ -45,8 +45,7 @@ function scheduleReboot() {
 
 /**
  * 连续启动失败次数（成功一次即清零）。
- * 首次失败多半是启动竞态：主进程 `void startTray()` / `createPetWindows()` 不等 bridge
- * 回调服务就绪（main.js 的 startBridgeCallback 未 await），渲染端首帧 fetch 会打空。
+ * 首次失败多半是启动竞态：窗口加载与渲染端首帧 fetch 可能早于本机服务就绪。
  * 这种失败 5s 重试就自愈，不该闪一条红条；持续失败才是真配置错误，照旧大声报。
  */
 let bootFailures = 0;
@@ -80,18 +79,16 @@ async function boot() {
     // 宠物根容器，只能走全局变量；气泡与提示也一并从这里继承（与浏览器端同一套变量名）。
     // 放在这里而不是 injectAssets()：字体族来自配置，必须等 /config 拉回来之后才有效。
     document.documentElement.style.setProperty('--dsh-pet-font-family', S.fontStackOf(cfg.font.family));
-    const pets = cfg.pets.filter((p) => S.isDesktopVisible(p.display));
+    const pets = cfg.pets;
     if (pets.length === 0) {
-      // **全部宠物只在网页显示是合法状态，不是配置错误**（issue #130）。
-      // 本窗口是主进程按 DSH_PET_PETS 建的：宿主流下窗口数与该列表必然一致
-      // （全 web 时宿主传 []，main.js 建 0 个窗口，本函数根本不会跑）；
-      // 只有手动 start-desktop（没有 DSH_PET_PETS）会回落出一只默认窗口而与配置脱钩。
-      // 脱钩不该报错——没有桌面宠物就表示这个窗口没活儿干：安静关掉，不弹条、不重试。
-      // 托盘是否还在看 main 条目的 trayEnabled：开着且桌面模式曾启用过，宿主持久保留 Helper
-      // （托盘因此还在）；关掉则宿主不再为它常驻，宠物全下线时 Helper 一起退出。
-      // 宿主流由 syncDesktop() 在配置变化时重建 helper，手动流则需自行重启。
+      // **配置里没有任何宠物是合法状态，不是配置错误**。
+      // 本窗口是主进程按 DSH_PET_PETS 建的：应用传下的窗口数与该列表必然一致
+      // （没有宠物时应用传 []，main.js 建 0 个窗口，本函数根本不会跑）；
+      // 只有没有 DSH_PET_PETS（主进程未传）时才会回落出一只默认窗口而与配置脱钩。
+      // 脱钩不该报错——没有宠物就表示这个窗口没活儿干：安静关掉，不弹条、不重试。
+      // 托盘是否还在看 main 条目的 trayEnabled；配置变化由应用整体重启（见 app/main.ts）。
       hideError();
-      console.info('[dsh-pet] no desktop pets; closing this helper window (tray kept only if trayEnabled)');
+      console.info('[dsh-pet] no pets; closing this helper window (tray kept only if trayEnabled)');
       window.close();
       return;
     }

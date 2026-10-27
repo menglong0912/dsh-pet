@@ -5,9 +5,8 @@
 //   首拉 → flattenCounters(s) 记基线（**不渲染**，避免刷新页面时重放旧气泡）
 //   之后 → takeChanged(s, baseline) 拿本次变化的叶子 → 逐个渲染
 //
-// 路径（'sections.balance' / 'pets.<id>.say'）只当**不透明键**用，绝不解析——
+// 路径（'sections.workStatus' / 'pets.<id>.say'）只当**不透明键**用，绝不解析——
 // 宠物 id 允许含点号，解析出来必然出错。
-import { toBalanceState, type BalanceState } from './balance';
 import { toWorkStatus, type WorkStatusSnapshot } from './work-status';
 
 /** 一个叶子：计数器 + 载荷（data 为 null = 还没有数据，消费端跳过） */
@@ -119,20 +118,6 @@ export function takeChanged(s: PollState, baseline: Record<string, number>): Sta
 }
 
 /**
- * 类型收窄：余额叶子 → `{ state, manual }`。
- * `manual` = 这次写入是**手动触发**的（`/balance` 命令、桌面「查看余额」菜单）——
- * 由 host 在写入时标记（`{...result, manual: true}`），因为只有 host 知道这次刷新是谁要的。
- * 消费端据此决定"余额不可用时要不要必弹文字说明"（decideBalanceNotice 的 explicit 参数）。
- * 形状非法 → null（消费端跳过这一拍，不抛）。
- */
-export function readBalance(leaf: StateLeaf): { state: BalanceState; manual: boolean } | null {
-  const state = toBalanceState(leaf.data);
-  if (!state) return null;
-  const manual = (leaf.data as { manual?: unknown }).manual === true;
-  return { state, manual };
-}
-
-/**
  * 说话指令（`pets.<id>.say` 的两种形态）：
  *
  * - `say`：弹一个气泡。`duration` = 显示时长（毫秒；缺省 10s，`0` = 字面意思「不显示」）；
@@ -182,7 +167,7 @@ export function readSay(leaf: StateLeaf): SayCue | null {
 
 /**
  * 类型收窄：工作状态叶子 → 快照（形状非法 → null，消费端跳过这一拍）。
- * 与余额不同，这里没有"手动"标记：工作状态永远由 DSH 事件驱动，没有用户主动要的那条路。
+ * 这里没有"手动"标记：工作状态永远由 DSH 事件驱动，没有用户主动要的那条路。
  */
 export function readWorkStatus(leaf: StateLeaf): WorkStatusSnapshot | null {
   return toWorkStatus(leaf.data);
@@ -241,7 +226,7 @@ export type LockState = { locked: true; expiresAt: number } | { locked: false };
  * 类型收窄：占用锁叶子 → `LockState`（形状非法 → null，消费端跳过这一拍）。
  *
  * **这是状态，不是指令**（与 anim / position / throw 那三个不同）：宿主写、渲染端读来决定
- * "要不要冻结自己"——随机链不掷骰、暂停自播动画、忽略**自动**来源的余额与工作状态表现。
+ * "要不要冻结自己"——随机链不掷骰、暂停自播动画、忽略**自动**来源的工作状态表现。
  * 宿主停不掉一段正在播的视频，所以"完全静止"最终是渲染端执行的。
  *
  * **宿主不会到点推一次"锁没了"**：`expiresAt` 是唯一真相，渲染端据此**自己**定时解除

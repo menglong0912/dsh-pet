@@ -5,7 +5,7 @@
  * - 只回标记不回正文 → 视为没选（否则气泡会空掉）。
  *
  * 解析函数住在 memes.ts（纯函数、无 LLM 依赖），故本测试只 import 它——
- * 避免拉起 chat.ts 的 @deepseek-ai/dsh-llm 依赖链。
+ * 避免拉起 chat.ts 的模型传输层依赖链。
  *
  * 跑法：node --experimental-strip-types --test src/host/chat.test.ts
  */
@@ -63,8 +63,17 @@ describe('extractChatImage —— 模型选图的采纳与剥离', () => {
     assert.equal(r.text, '好的\n[图:可爱]');
   });
 
-  test('标记在中间（非结尾）不认 —— 只认结尾，避免误伤正文里的方括号', () => {
-    const raw = '[图:可爱] 然后呢？';
+  test('标记写在开头也认（本地模型常把它挪到句首）：剥掉标记、正文照留', () => {
+    const r = extractChatImage('[图:死掉了] 主人，你这样一直喊冷，我都要被你冻僵啦~', POOL);
+    assert.equal(r.image, '死掉了');
+    assert.equal(r.text, '主人，你这样一直喊冷，我都要被你冻僵啦~');
+    // 开头的池外名称同样不采纳、原文不动
+    const raw = '[图:不存在的表情包] 然后呢？';
+    assert.deepEqual(extractChatImage(raw, POOL), { text: raw });
+  });
+
+  test('标记在正文中间不认 —— 只认开头和结尾，避免误伤正文里的方括号', () => {
+    const raw = '好的 [图:可爱] 然后呢？';
     const r = extractChatImage(raw, POOL);
     assert.equal(r.image, undefined);
     assert.equal(r.text, raw);

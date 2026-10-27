@@ -16,48 +16,48 @@ import assert from 'node:assert/strict';
 import { MAX_STATE_WAIT_MS, parseStateWaitQuery, PollStateStore } from './state.ts';
 
 describe('PollStateStore —— 初始形态', () => {
-  test('四个全局叶子都是 {counter:0, data:null}（0 = 从未写过，前端首拉当基线）', () => {
+  test('三个全局叶子都是 {counter:0, data:null}（0 = 从未写过，前端首拉当基线）', () => {
     const s = new PollStateStore().read();
-    assert.deepEqual(Object.keys(s.sections).sort(), ['balance', 'config', 'menu', 'notify', 'workStatus']);
+    assert.deepEqual(Object.keys(s.sections).sort(), ['menu', 'notify', 'workStatus']);
     for (const leaf of Object.values(s.sections)) assert.deepEqual(leaf, { counter: 0, data: null });
     assert.deepEqual(s.pets, {});
   });
 });
 
-describe('PollStateStore —— 配置变更信号（sections.config）', () => {
-  test('纯信号叶子：data 恒为 {}，只有 counter 是有效信息', () => {
+describe('PollStateStore —— 全局叶子写入（counter 语义）', () => {
+  test('data 原样保存，只有 counter 是有效信息', () => {
     const store = new PollStateStore();
-    store.writeSection('config', {});
-    const leaf = store.read().sections.config;
+    store.writeSection('notify', {});
+    const leaf = store.read().sections.notify;
     assert.deepEqual(leaf.data, {});
     assert.ok(leaf.counter > 0);
   });
 
   test('每次写入都推进 counter（连写两次也必须能分辨出"又变了一次"）', () => {
     const store = new PollStateStore();
-    store.writeSection('config', {});
-    const a = store.read().sections.config.counter;
-    store.writeSection('config', {});
-    const b = store.read().sections.config.counter;
+    store.writeSection('notify', {});
+    const a = store.read().sections.notify.counter;
+    store.writeSection('notify', {});
+    const b = store.read().sections.notify.counter;
     assert.ok(b > a, 'counter 必须严格递增，否则同一毫秒内的第二次改动会被消费端漏掉');
   });
 
   test('写它不影响别的全局叶子（各叶子计数器互不干扰）', () => {
     const store = new PollStateStore();
-    store.writeSection('balance', { ok: true });
-    const before = store.read().sections.balance.counter;
-    store.writeSection('config', {});
-    assert.equal(store.read().sections.balance.counter, before);
-    assert.equal(store.read().sections.notify.counter, 0, '没写过的叶子保持 0');
+    store.writeSection('menu', { ok: true });
+    const before = store.read().sections.menu.counter;
+    store.writeSection('notify', {});
+    assert.equal(store.read().sections.menu.counter, before);
+    assert.equal(store.read().sections.workStatus.counter, 0, '没写过的叶子保持 0');
   });
 });
 
 describe('PollStateStore —— 写入与读取', () => {
   test('写全局叶子：counter 变、data 原样', () => {
     const store = new PollStateStore();
-    const payload = { ok: true, provider: 'deepseek' };
-    store.writeSection('balance', payload);
-    const leaf = store.read().sections.balance;
+    const payload = { ok: true };
+    store.writeSection('menu', payload);
+    const leaf = store.read().sections.menu;
     assert.deepEqual(leaf.data, payload);
     assert.ok(leaf.counter > 0, 'counter 必须是有效时间戳');
   });
@@ -113,8 +113,8 @@ describe('PollStateStore —— 写入与读取', () => {
   test('read() 返回的 sections 是副本：外部改动不影响内部状态', () => {
     const store = new PollStateStore();
     const snapshot = store.read();
-    delete (snapshot.sections as Record<string, unknown>).balance;
-    assert.ok(store.read().sections.balance, '内部状态不该被调用方改坏');
+    delete (snapshot.sections as Record<string, unknown>).notify;
+    assert.ok(store.read().sections.notify, '内部状态不该被调用方改坏');
   });
 });
 
@@ -131,8 +131,8 @@ describe('PollStateStore —— counter 必须严格递增（前端唯一的渲�
 
   test('跨叶子也单调递增（避免同刻写入被前端按"没变化"吞掉）', () => {
     const store = new PollStateStore();
-    store.writeSection('balance', 1);
-    const a = store.read().sections.balance.counter;
+    store.writeSection('notify', 1);
+    const a = store.read().sections.notify.counter;
     store.writePet('main', 'say', 2);
     const b = store.read().pets.main.say.counter;
     store.writeSection('workStatus', 3);
@@ -143,8 +143,8 @@ describe('PollStateStore —— counter 必须严格递增（前端唯一的渲�
   test('counter 贴着墙上时间（不是从 0 开始的自增），重启后不会倒退', () => {
     const store = new PollStateStore();
     const before = Date.now();
-    store.writeSection('balance', 1);
-    const counter = store.read().sections.balance.counter;
+    store.writeSection('notify', 1);
+    const counter = store.read().sections.notify.counter;
     assert.ok(counter >= before, 'counter 应 ≥ 写入前的墙上时间（重启后前端手里的旧值只会更小）');
     assert.ok(counter - before < 1000, 'counter 不该明显超前于墙上时间');
   });
@@ -154,8 +154,8 @@ describe('PollStateStore —— 顶层 counter（整份 S 的版本号）', () =
   test('从未写过 = 0；写过之后等于最后一次写入的编号', () => {
     const store = new PollStateStore();
     assert.equal(store.read().counter, 0);
-    store.writeSection('balance', 1);
-    assert.equal(store.read().counter, store.read().sections.balance.counter);
+    store.writeSection('notify', 1);
+    assert.equal(store.read().counter, store.read().sections.notify.counter);
     store.writePet('main', 'say', { text: 'x' });
     assert.equal(store.read().counter, store.read().pets.main.say.counter, 'counter 必须跟着最新那次写入走');
   });
@@ -210,7 +210,7 @@ describe('PollStateStore.wait —— 挂起等待（长轮询）', () => {
     const c = collector();
     const cancel = store.wait({ since: store.read().counter, timeoutMs: 10_000, onWake: c.onWake });
     assert.equal(store.waiterCount(), 1);
-    store.writeSection('balance', { ok: true });
+    store.writeSection('notify', { ok: true });
     assert.deepEqual(c.seen, [0], '写叶子必须唤醒');
     assert.equal(store.waiterCount(), 0, '唤醒后必须摘掉（否则定时器与引用都留着）');
     cancel(); // 幂等：已经摘掉了，再取消不该出事
@@ -280,10 +280,10 @@ describe('PollStateStore.wait —— 挂起等待（长轮询）', () => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const store = new PollStateStore();
     const c = collector();
-    store.writeSection('balance', 1);
+    store.writeSection('notify', 1);
     store.wait({ since: store.read().counter, timeoutMs: 10_000, onWake: c.onWake });
     // 再写一次**同一个值**也算写入（counter 变），所以这里必须真的写才会醒
-    store.writeSection('balance', 1);
+    store.writeSection('notify', 1);
     assert.deepEqual(c.seen, [0], 'counter 变了就是变化，与 data 是否相同无关');
   });
 

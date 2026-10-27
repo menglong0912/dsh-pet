@@ -17,12 +17,11 @@
  *   - 内置默认配置是唯一默认值来源（「代码里的配置绝对正确」）；
  *   - 覆盖文件写了 → 用自己的值；**没写 → 静默填内置默认值**（结构性常态，不告警——
  *     设置页写的用户层本就只含 pets + notificationsEnabled；文件宠物也可以写得很短）；
- *   - **对象字段也是整段替换**（`physics` / `eventsRefreshSec` / `whisperModel` … 都适用）：
- *     写了就整段用自己的，缺的子键**不会**从内置默认补回来——消费端各自兜底
- *     （如余额周期读不到就按 1800、碎碎念按 300）；
+ *   - **对象字段也是整段替换**（`physics` / `chatModel` … 都适用）：
+ *     写了就整段用自己的，缺的子键**不会**从内置默认补回来；
  *   - **显式写了但非法**（类型/结构/白名单外）→ 告警 + 填内置默认值
  *     （同一 文件+字段 进程内只告警一次，避免每请求刷屏；保证返回绝不出现残缺/非法值）；
- *   - **例外：全局默认**（GLOBAL_DEFAULT_KEYS 那 10 个「用户级成本/偏好/环境/节奏」字段）——
+ *   - **例外：全局默认**（GLOBAL_DEFAULT_KEYS 那 8 个「用户级成本/偏好/环境/节奏」字段）——
  *     文件宠物条目的基座取**用户层**（main-config.jsonc）而不是内置默认，即"设置页改一次，
  *     所有宠物都生效"；种类文件仍可在自己顶层覆盖（写了就用自己那份）；
  *   - 身份字段例外（无默认可填）：id 必须存在、全局唯一（缺失/重复/非法/冲突 →
@@ -40,11 +39,6 @@ import { dirname, join } from 'node:path';
 /** 位置角落白名单 */
 const CORNERS = ['top-left', 'top-right', 'bottom-left', 'bottom-right'] as const;
 const CORNER_SET: ReadonlySet<string> = new Set(CORNERS);
-
-/** display 白名单（导出：宿主路由 POST /pet-display 写单只宠物的显示位置时复用同一份枚举，
- *  读写两侧必须同一份规则，不在路由里另写一个 Set） */
-const PET_DISPLAYS = ['web', 'desktop', 'both', 'none'] as const;
-export const PET_DISPLAY_SET: ReadonlySet<string> = new Set(PET_DISPLAYS);
 
 /** font.family 白名单（预设 id）——**必须与 src/shared/fonts.ts 的 FONT_PRESETS 保持一致**：
  *  host 不能 import src/shared（见文件头注释的 DSH 单文件加载约束），这里是那份清单的自包含副本，
@@ -74,12 +68,9 @@ export const ID_FORBIDDEN = /[\\/:\x00-\x1f]/;
  *
  * 判据：这几个是**用户级「成本 / 偏好 / 环境 / 节奏」参数**，不是「这个种类长什么样」——
  *   - `chatMemoryRounds`：带多少历史进上下文 = token 成本
- *   - `whisperModel` / `chatModel`：碎碎念 / 对话用哪个模型 = 成本与能力偏好
+ *   - `chatModel`：对话用哪个模型 = 成本与能力偏好
  *   - `whisperImageEnabled` / `chatImageEnabled`：要不要把表情包清单附进请求 = token 成本
  *   - `chatImageLimit`：对话那张清单**最多几张**——同属 token 成本（清单每条消息都附）
- *   - `eventsRefreshSec`：多久调一次模型 / 拉一次余额 = 成本与节奏。注意它内部两个键的**消费端**
- *     不同：`.whisper` 按宠物所属条目读（种类可覆盖）；`.balance` 只读 main 条目
- *     （余额数据一份 + host 只有一个定时器，架构上给不了每种类一个周期）
  *   - `physics`：拖拽抛掷手感；`petCollision` 更是**跨宠物**行为（相撞按动量守恒弹开），
  *     按种类分在语义上站不住：两只不同种类的宠物相撞时用谁的系数？
  *   - `confineToScreen`：多屏是用户环境 / 使用习惯，不是宠物属性
@@ -92,7 +83,7 @@ export const ID_FORBIDDEN = /[\\/:\x00-\x1f]/;
  *
  * 例外：**人设有实例级覆盖**。`pets[].whisperPrompt`（可选）写了就取代所属条目顶层那一份，
  * 没写则回落条目——回落本身由消费端做（./persona 的 petPersona），合并不填生效值（见 petPersonaField 注释）。
- * 其余实例级字段仍是固定白名单（id/name/size/4 个开关/display/position + whisperPrompt）。
+ * 其余实例级字段仍是固定白名单（id/name/size/4 个开关/position + whisperPrompt）。
  */
 const GLOBAL_DEFAULT_KEYS = [
   'physics',
@@ -102,10 +93,11 @@ const GLOBAL_DEFAULT_KEYS = [
   'chatImageEnabled',
   'chatImageLimit',
   'chatMemoryRounds',
-  'whisperModel',
   'chatModel',
-  'eventsRefreshSec',
 ] as const;
+
+/** D9 删掉的顶层字段：旧 main-config.jsonc 里还会带着，读取时忽略、保存时不再写回 */
+const RETIRED_KEYS: ReadonlySet<string> = new Set(['whisperModel', 'eventsRefreshSec']);
 
 /** 已告警过的 文件:字段（进程内去重：同一问题只告警一次，避免每请求刷屏；重启重置） */
 const warnedKeys = new Set<string>();
@@ -252,25 +244,7 @@ function scanPetFiles(petDir: string): PetFileEntry[] {
 }
 
 /**
- * 按条目 key（= 文件名前缀 = 素材根）定位**文件宠物**的实际文件与磁盘原对象。
- *
- * 用途：写路径（POST /pet-display）改某只文件宠物的 display 时，既要写回**它自己的**配置文件，
- * 也要拿该文件的 existing 去做「透传保留」——否则文件里用户手改的 whisperPrompt / animations /
- * memes 等非白名单字段会被 saveUserConfig 的白名单重建整份抹掉（与 main 层 readUserConfig
- * 同一套语义，见其注释里的老 bug 说明）。
- *
- * 文件名可能是 `<前缀>-config.json` 或 `.jsonc`（与 scanPetFiles 同一套规则，不在这里重复写死
- * 扩展名——写错扩展名就会新建一个空配置，用户那只宠物反而"没被改到"）。前缀不存在 → undefined。
- */
-export function readPetConfigEntry(
-  paths: ConfigPaths,
-  entry: string,
-): { path: string; raw: Record<string, unknown> | undefined } | undefined {
-  const hit = scanPetFiles(paths.petDir).find((f) => f.prefix === entry);
-  return hit ? { path: hit.path, raw: readJsonc(hit.path) } : undefined;
-}
-
-/** animations 段完整性校验（与旧 assertAnimationsHost 同一套规则；不 throw，非法返回 false） */
+ * animations 段完整性校验（与旧 assertAnimationsHost 同一套规则；不 throw，非法返回 false） */
 function animationsValid(a: unknown): boolean {
   if (!a || typeof a !== 'object') return false;
   const anims = a as Record<string, unknown>;
@@ -308,8 +282,7 @@ function animationsValid(a: unknown): boolean {
       }
     }
   }
-  const balance = evEntries.balance;
-  return Array.isArray(balance) && balance.length > 0;
+  return true;
 }
 
 /** animationWeights 段校验（idle/turn/move 三个非负数字） */
@@ -359,7 +332,7 @@ function fontValid(value: unknown): boolean {
   return typeof f.followPet === 'boolean';
 }
 
-/** whisperModel / chatModel 段校验：{ provider, model } 两个字符串，
+/** chatModel 段校验：{ provider, model } 两个字符串，
  *  **要么都留空（= 跟随当前对话的模型）要么都非空**——只填一半（选了服务商没选模型，或反之）
  *  会拼出"用 A 家的模型名去问 B 家"这种必然失败的组合，按非法处理（告警 + 取默认）。 */
 function modelSelectionValid(value: unknown): boolean {
@@ -410,13 +383,10 @@ function topFieldValid(key: string, value: unknown): boolean {
       return animationsValid(value);
     case 'animationWeights':
       return weightsValid(value);
-    case 'eventsRefreshSec':
-      return eventsRefreshSecValid(value);
     case 'physics':
       return physicsValid(value);
     case 'font':
       return fontValid(value);
-    case 'whisperModel':
     case 'chatModel':
       return modelSelectionValid(value);
     case 'workStatusTexts':
@@ -427,25 +397,9 @@ function topFieldValid(key: string, value: unknown): boolean {
 }
 
 /**
- * eventsRefreshSec 段校验：事件名 → 间隔秒（正的有限数字）。
- *
- * 只校验「写下的每个值都合法」，**不**要求键集合与内置默认一致——这个字段和别的顶层字段
- * 一样是**整段替换**：缺的键就是缺（消费端各自兜底 1800 / 300），多写的键原样保留
- * （不再像旧的逐键深合并那样静默丢弃不认识的键）。空对象合法（等于全走消费端兜底）。
- */
-function eventsRefreshSecValid(value: unknown): boolean {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  for (const v of Object.values(value as Record<string, unknown>)) {
-    const n = Number(v);
-    if (!Number.isFinite(n) || n <= 0) return false;
-  }
-  return true;
-}
-
-/**
  * 文件宠物条目的合并基座：内置默认 + 白名单字段改用**用户层**的值。
  *
- * 为什么：那 9 个字段是用户级成本/偏好/环境/节奏参数，不是种类属性——用户在设置页改一次，
+ * 为什么：那 8 个字段是用户级成本/偏好/环境/节奏参数，不是种类属性——用户在设置页改一次，
  * 期望所有宠物（含 pet pack）都生效。没有这一步，文件宠物只能拿到内置默认值，
  * 于是"设置页写着全局、实际只影响主宠物"（见 GLOBAL_DEFAULT_KEYS 的判据）。
  *
@@ -467,6 +421,25 @@ function packBase(
   return out ?? base;
 }
 
+/**
+ * 已删除的余额配置键（D2）：旧配置里还会带着它们，**先照常通过校验**，但不进入成品——
+ * 读出来的结果与「没写这些键」完全一致，动作菜单里也不会再冒出一个 balance 事件分类。
+ * 只在读取侧丢弃，绝不改写磁盘上的用户文件。
+ */
+function dropRemovedBalanceKeys(key: string, value: unknown): unknown {
+  if (key === 'animations') {
+    if (!value || typeof value !== 'object') return value;
+    const anims = value as Record<string, unknown>;
+    const events = anims.events;
+    if (!events || typeof events !== 'object' || Array.isArray(events)) return value;
+    if (!('balance' in (events as Record<string, unknown>))) return value;
+    const nextEvents = { ...(events as Record<string, unknown>) };
+    delete nextEvents.balance;
+    return { ...anims, events: nextEvents };
+  }
+  return value;
+}
+
 /** 一个覆盖文件 → 完整条目：顶层逐字段合并（没写/非法 → 内置默认 + 告警），pets 逐实例 */
 function mergeEntry(
   base: Record<string, unknown>,
@@ -485,15 +458,15 @@ function mergeEntry(
     // 结构性常态：覆盖层（尤其是设置页写的用户层）本来就不写顶层字段 → 缺失静默取默认，不告警；
     // 只有「显式写了但非法」才告警（真异常，默认值兜底）
     if (own === undefined) {
-      out[key] = base[key];
+      out[key] = dropRemovedBalanceKeys(key, base[key]);
       continue;
     }
     if (!topFieldValid(key, own)) {
       warnOnce(`${label}:${key}`, `「${label}」的 ${key} 非法，已取默认值`);
-      out[key] = base[key];
+      out[key] = dropRemovedBalanceKeys(key, base[key]);
       continue;
     }
-    out[key] = own;
+    out[key] = dropRemovedBalanceKeys(key, own);
   }
   return out;
 }
@@ -585,11 +558,8 @@ function mergePet(
     id,
     name,
     size: petNumber(p.size, base.size, 1, label, 'size', id),
-    balanceEnabled: petBool(p.balanceEnabled, base.balanceEnabled, label, 'balanceEnabled', id),
-    whisperEnabled: petBool(p.whisperEnabled, base.whisperEnabled, label, 'whisperEnabled', id),
     workStatusEnabled: petBool(p.workStatusEnabled, base.workStatusEnabled, label, 'workStatusEnabled', id),
     fixedEnabled: petBool(p.fixedEnabled, base.fixedEnabled, label, 'fixedEnabled', id),
-    display: petEnum(p.display, PET_DISPLAY_SET, base.display, label, 'display', id),
     position: {
       corner: petEnum(ownPos.corner, CORNER_SET, basePos.corner, label, 'position.corner', id),
       marginX: petNumber(ownPos.marginX, basePos.marginX, -Infinity, label, 'position.marginX', id),
@@ -599,7 +569,7 @@ function mergePet(
     // （回落由消费端做：./persona 的 petPersona 取不到实例级就取条目顶层）；非字符串 → 告警 + 忽略。
     //
     // **这里刻意不填"生效值"**：合并器的契约是"拍平用户写了什么"，而人设的默认值是**所属条目那一份**，
-    // 不是某个常量。一旦在这里把条目人设填进每只实例，/pet-display（拿合并结果 → saveUserConfig 写回）
+    // 不是某个常量。一旦在这里把条目人设填进每只实例，设置页保存（拿合并结果 → saveUserConfig 写回）
     // 就会把"跟随条目"固化成每只实例的显式覆盖——之后用户改条目人设，这些实例不再跟着变。
     ...petPersonaField(p.whisperPrompt, label, id),
   };
@@ -681,10 +651,10 @@ export function findPetInstance(
 /**
  * 保存用户层（PUT /config）：更新 main-config.jsonc，接受可编辑字段（pets + 全局开关：
  * notificationsEnabled / whisperImageEnabled / chatImageEnabled / confineToScreen / trayEnabled + physics
- * + whisperModel / chatModel + chatMemoryRounds + chatImageLimit）。
- * pets 内除 id/name/size/四个开关/display/position 外，还接可选的 `whisperPrompt`（实例级人设；
+ * + chatModel + chatMemoryRounds + chatImageLimit）。
+ * pets 内除 id/name/size/三个开关/position 外，还接可选的 `whisperPrompt`（实例级人设；
  * 空串 = 删除覆盖，回落条目）。
- * 编辑语义：**非白名单顶层字段（whisperPrompt / eventsRefreshSec / memes 等）从
+ * 编辑语义：**非白名单顶层字段（whisperPrompt / memes 等）从
  * `existing`（当前磁盘上的用户文件原对象）原样透传保留**——
  * 用户手动编辑的精调配置不会被设置页保存抹掉（旧实现是纯白名单重建，会整体覆盖丢失）。
  * 白名单字段同理只在请求体**真的传了**时才算白名单：没传就走透传，不会被抹成默认值。
@@ -712,18 +682,13 @@ export function saveUserConfig(
       console.warn(`dsh-pet: pet「${id}」缺少 name，已按默认 ${id}（宠物 id）处理`);
       name = id;
     }
-    const balanceEnabled = pp.balanceEnabled;
-    if (typeof balanceEnabled !== 'boolean') return null;
-    const whisperEnabled = pp.whisperEnabled;
-    if (whisperEnabled !== undefined && typeof whisperEnabled !== 'boolean') return null;
     const workStatusEnabled = pp.workStatusEnabled;
     if (workStatusEnabled !== undefined && typeof workStatusEnabled !== 'boolean') return null;
     // 宠物固定（随机链不再抽「转向 / 移动」两档）：与上面两个开关同语义——可选，
     // 传了必须是布尔，没传则走下面的读取侧默认值（内置默认 false = 保持原行为）。
     const fixedEnabled = pp.fixedEnabled;
     if (fixedEnabled !== undefined && typeof fixedEnabled !== 'boolean') return null;
-    const display = String(pp.display ?? '');
-    if (!PET_DISPLAY_SET.has(display)) return null;
+    // 已删的 display 字段（旧客端可能还带）：不校验、不写回，直接忽略。
     const pos = pp.position && typeof pp.position === 'object' ? (pp.position as Record<string, unknown>) : {};
     const corner = String(pos.corner ?? '');
     if (!CORNER_SET.has(corner)) return null;
@@ -741,11 +706,8 @@ export function saveUserConfig(
       id,
       name,
       size,
-      balanceEnabled,
-      whisperEnabled,
       workStatusEnabled,
       fixedEnabled,
-      display,
       position: { corner, marginX, marginY },
     };
     if (persona) pet.whisperPrompt = persona;
@@ -772,11 +734,9 @@ export function saveUserConfig(
   // 校验直接复用读取侧的 fontValid（family 白名单 / size 4~200 / followPet 布尔），读写同一份规则。
   const fo = o.font;
   if (fo !== undefined && !fontValid(fo)) return null;
-  // whisperModel / chatModel（碎碎念 / 对话各自的服务商 + 模型；设置页两个下拉框写的就是它们）：
+  // chatModel（对话用的服务商 + 模型；设置页下拉框写的就是它）：
   // 与 physics 同一套语义——传了就整段校验后进白名单，没传则走下面的透传保留。
   // 落盘时归一化成 { provider, model } 两个 trim 过的字符串（请求体多带的键不写进用户层）。
-  const wm = o.whisperModel;
-  if (wm !== undefined && !modelSelectionValid(wm)) return null;
   const cm = o.chatModel;
   if (cm !== undefined && !modelSelectionValid(cm)) return null;
   // chatMemoryRounds（对话历史条数；设置页「AI 模型与对话上下文」区的数字输入框写的就是它）：
@@ -792,7 +752,7 @@ export function saveUserConfig(
     provider: String(v.provider).trim(),
     model: String(v.model).trim(),
   });
-  // 白名单可编辑字段：pets 来自请求体，其余（四个全局开关 / physics / 两个模型 /
+  // 白名单可编辑字段：pets 来自请求体，其余（全局开关 / physics / chatModel /
   // 对话历史条数）同样只在请求体**真的传了**时才写（未传则走下面的透传保留，不凭空造值）
   const outConfig: { pets: unknown[]; [key: string]: unknown } = { pets: out };
   if (ne !== undefined) outConfig.notificationsEnabled = ne;
@@ -802,7 +762,6 @@ export function saveUserConfig(
   if (te !== undefined) outConfig.trayEnabled = te;
   if (ph !== undefined) outConfig.physics = ph;
   if (fo !== undefined) outConfig.font = fo;
-  if (wm !== undefined) outConfig.whisperModel = cleanModel(wm as Record<string, unknown>);
   if (cm !== undefined) outConfig.chatModel = cleanModel(cm as Record<string, unknown>);
   // 数值归一化落盘：请求体传 "9" 也存成 9（与读取侧 topFieldValid 的 Number() 口径一致）
   if (cmr !== undefined) outConfig.chatMemoryRounds = Number(cmr);
@@ -819,13 +778,14 @@ export function saveUserConfig(
   if (te !== undefined) bodyOwned.add('trayEnabled');
   if (ph !== undefined) bodyOwned.add('physics');
   if (fo !== undefined) bodyOwned.add('font');
-  if (wm !== undefined) bodyOwned.add('whisperModel');
   if (cm !== undefined) bodyOwned.add('chatModel');
   if (cmr !== undefined) bodyOwned.add('chatMemoryRounds');
   if (cil !== undefined) bodyOwned.add('chatImageLimit');
   if (existing && typeof existing === 'object') {
     for (const key of Object.keys(existing)) {
       if (bodyOwned.has(key)) continue; // 白名单字段由请求体决定
+      // D9 删掉的旧字段：磁盘上还有也不再写回（读取侧本来就会忽略）
+      if (RETIRED_KEYS.has(key)) continue;
       // 只透传可精调的顶层字段，其余（如 memes/unknown/占位）一并保留，不丢弃用户内容
       outConfig[key] = existing[key];
     }

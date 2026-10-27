@@ -8,7 +8,7 @@
  * 经典 script 无此问题——shared-core.js 先于 renderer.js 加载，renderer 读全局。
  *
  * 用法：node scripts/build-desktop-core.mjs（npm run build:desktop-core）
- * 由 prepare.js（发布链）与本地开发 bundle 后调用。
+ * 由本地开发 / 打包前的构建步骤调用。
  */
 import { rolldown } from 'rolldown';
 import { join, resolve } from 'node:path';

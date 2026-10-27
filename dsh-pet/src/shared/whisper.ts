@@ -10,7 +10,7 @@ export type WhisperState =
   | { ok: true; text: string; image?: string; ts: number }
   | { ok: false; reason: 'provider-missing' | 'generate-error'; message?: string };
 
-/** 碎碎念气泡行数据：一句话（role:'label' 单行，复用余额气泡的通用行渲染） */
+/** 碎碎念气泡行数据：一句话（role:'label' 单行，复用气泡的通用行渲染） */
 export type WhisperBubbleRow = { role: 'label'; text: string };
 
 /** 碎碎念文本 → 气泡行（两端共用同一份行数据；纯函数，不碰 DOM/React） */
@@ -35,9 +35,8 @@ export function whisperBubbleView(state: WhisperState): WhisperBubbleRow[] {
  *
  * base 语义 = 各端的「已含 /dsh-pet-7340 前缀的宿主基址」（**与视频的 assetBase 一致**）：
  *   - 浏览器：缺省 `/dsh-pet-7340`（页面就在宿主 origin 上，相对路径即可）；
- *   - 桌面：传 `BASE`（`http://127.0.0.1:<port>/dsh-pet-7340` 或 bridge 的
- *     `dsh-pet-bridge://dsh-pet/dsh-pet-7340`）——桌面页面是 file:// 加载的，
- *     相对路径会被解析成 file:///… 而必然失败；且 bridge 模式必须走自定义 scheme。
+ *   - 桌面：传 `BASE`（`http://127.0.0.1:<port>/dsh-pet-7340`）——桌面页面是 file:// 加载的，
+ *     相对路径会被解析成 file:///… 而必然失败。
  *
  * 注意：base 已含 `/dsh-pet-7340`，函数内**不得**再拼一次（否则出现
  * `…/dsh-pet-7340/dsh-pet-7340/…` 而 404——桌面端图裂的成因）。

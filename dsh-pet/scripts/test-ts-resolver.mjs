@@ -8,8 +8,8 @@
  * 与其为了跑测试给所有源文件加 `.ts` 后缀（需要全局打开 allowImportingTsExtensions，
  * 且会牵动 tsdown / rolldown 两条构建链），不如只在测试进程里补这一层解析。
  *
- * 目录模块（`./balance` → `./balance/index.ts`）一并支持：打包器的 Bundler 解析支持目录索引，
- * src/shared 里按职责拆目录后（见 src/shared/balance/），测试进程也得跟上同一套解析。
+ * 目录模块（`./<目录>` → `./<目录>/index.ts`）一并支持：打包器的 Bundler 解析支持目录索引，
+ * src/ 里按职责拆成目录时，测试进程也得跟上同一套解析。
  */
 export async function resolve(specifier, context, nextResolve) {
   if (specifier.startsWith('./') || specifier.startsWith('../')) {

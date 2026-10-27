@@ -6,9 +6,6 @@ export interface StandaloneAiPublicSettings {
   baseUrl: string;
   model: string;
   enabled: boolean;
-  automaticWhispers: boolean;
-  whisperIntervalSec: number;
-  maxTokens: number;
   timeoutMs: number;
   /** OpenAI 兼容协议下请求体带 chat_template_kwargs.enable_thinking=false（llama.cpp / vLLM 部署的 Qwen 等） */
   disableThinking: boolean;
@@ -21,9 +18,6 @@ export const DEFAULT_AI_SETTINGS: Readonly<StandaloneAiSettings> = Object.freeze
   baseUrl: '',
   model: '',
   enabled: false,
-  automaticWhispers: false,
-  whisperIntervalSec: 300,
-  maxTokens: 1024,
   timeoutMs: 30_000,
   disableThinking: false,
   apiKey: '',
@@ -60,9 +54,6 @@ const fields = {
     .max(200)
     .refine((s) => !containsControlChar(s)),
   enabled: z.boolean(),
-  automaticWhispers: z.boolean(),
-  whisperIntervalSec: z.number().int().min(60).max(86400),
-  maxTokens: z.number().int().min(128).max(4096),
   timeoutMs: z.number().int().min(1000).max(60_000),
   // 可选而非 default(false)：partial() 也会补默认值，那样每次补丁保存都会把它冲回 false。
   // 旧版设置文件没有这个字段，由 validateSettings 合并 previous 时补齐。
@@ -74,6 +65,26 @@ const fields = {
 };
 const persistedSchema = z.object(fields).strict();
 const patchSchema = persistedSchema.partial().extend({ clearApiKey: z.boolean().optional() }).strict();
+
+/**
+ * D9 删掉的旧字段：automaticWhispers / whisperIntervalSec / maxTokens。
+ * 旧 standalone-ai.json 里还会带着它们，读取时照常接受但直接丢弃（不告警、不参与校验、不再写回）。
+ */
+const LEGACY_KEYS = ['automaticWhispers', 'whisperIntervalSec', 'maxTokens'] as const;
+const loadSchema = z
+  .object({
+    ...fields,
+    automaticWhispers: z.unknown().optional(),
+    whisperIntervalSec: z.unknown().optional(),
+    maxTokens: z.unknown().optional(),
+  })
+  .strict();
+
+function stripLegacy(value: Record<string, unknown>): Record<string, unknown> {
+  const rest = { ...value };
+  for (const key of LEGACY_KEYS) delete rest[key];
+  return rest;
+}
 
 export function validateSettings(input: unknown, previous: Readonly<StandaloneAiSettings>): StandaloneAiSettings {
   try {
@@ -105,7 +116,9 @@ export function createAiConfig(home: string): AiConfigStore {
   try {
     const loaded = readAiSettings(home);
     if (loaded !== undefined)
-      settings = Object.freeze(validateSettings(persistedSchema.parse(loaded), DEFAULT_AI_SETTINGS));
+      settings = Object.freeze(
+        validateSettings(stripLegacy(loadSchema.parse(loaded) as Record<string, unknown>), DEFAULT_AI_SETTINGS),
+      );
   } catch {
     throw new Error('Cannot securely load standalone AI settings.');
   }

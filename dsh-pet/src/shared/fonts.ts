@@ -105,7 +105,7 @@ export const BUBBLE_METRICS = {
   tail: 0.3736,
 } as const;
 
-/** 气泡最大高度（px）：文本最多两行（余额气泡的「主行 + 次要行」），可带一张配图。
+/** 气泡最大高度（px）：文本最多两行（气泡的「主行 + 次要行」），可带一张配图。
  *  桌面端用它定窗口上边距（见 bubbleTopMarginPx）；浏览器端没有窗口限制，不需要。 */
 export function bubbleMaxHeightPx(font: FontConfig | undefined, size: number): number {
   const f = resolveFontPx(font, size).bubble;
