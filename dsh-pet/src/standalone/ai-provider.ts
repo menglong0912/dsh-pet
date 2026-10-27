@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { StandaloneLogger } from './context';
+import type { StandaloneLogger } from './logger';
 import { createAiConfig } from './ai-config';
 import type { StandaloneAiPublicSettings } from './ai-config';
 import { isAuthenticationFailure, isRateLimitFailure, isUnsupportedImageFailure, sdkTextStream } from './ai-transport';

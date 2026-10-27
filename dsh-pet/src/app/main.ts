@@ -3,7 +3,7 @@
  *
  * 它把三件事装进**同一个 Electron 进程**（不再 spawn 第二个 electron.exe）：
  *   1. 本机 HTTP 服务：插件宿主半边注册的路由 + 独立模式那套「配置页 / 状态页」；
- *   2. 插件宿主半边：`apply()` 跑在 `src/standalone/context.ts` 造的最小伪 ctx 上；
+ *   2. 插件宿主半边：`createPetHost()` 返回的 `/dsh-pet-7340` 路由直接挂在这个服务上；
  *   3. 桌面窗口：直接 `require` 现成的 `runtime/electron-helper/main.js`，窗口、托盘、拖拽、碰撞、
  *      DPI 补偿全部沿用桌面模式那一套，没有第二份实现。
  *
@@ -31,10 +31,10 @@ import { fileURLToPath } from 'node:url';
 
 import { flattenPetList, readAllConfig } from '../host/config';
 import { dshHomeDir } from '../host/paths';
-import { apply } from '../host/index';
+import { createPetHost, ROUTE_PREFIX } from '../host/index';
 import { createStandaloneAi } from '../standalone/ai-provider';
 import { packageVersion } from './version';
-import { createStandaloneContext, createStandaloneLogger, type RegisteredRoute } from '../standalone/context';
+import { createStandaloneLogger } from '../standalone/logger';
 import { configPathsFor } from '../standalone/options';
 import { createRequestSecurity, rejectRequest } from '../standalone/request-security';
 import type { RequestSecurity } from '../standalone/request-security';
@@ -98,26 +98,41 @@ async function boot(): Promise<void> {
   // 显式设了 DSH_HOME 时尊重它。必须赶在下面任何 dshHomeDir() 之前。
   if (!process.env.DSH_HOME) process.env.DSH_HOME = join(app.getPath('appData'), 'dsh-pet');
   const logger = createStandaloneLogger();
-  const routes: RegisteredRoute[] = [];
   let port = 0;
 
-  // 与 CLI 同一套安全模型：令牌只经「配置页地址的 #token=」递到浏览器，不进日志
+  // 令牌只经「配置页地址的 #token=」递到浏览器，不进日志
   const security = createRequestSecurity();
   const ai = createStandaloneAi(dshHomeDir(), logger);
-  const context = createStandaloneContext({
-    port: () => port,
-    logger,
-    routes,
-    ai,
-    authenticatedUrl: security.authenticatedUrl,
-  });
 
   // 扩展功能（src/app/features.ts）要等 app ready 才能用 powerMonitor / desktopCapturer，之前 /app/* 回 503
   let features: AppFeatures | null = null;
   // 应用功能开关：功能编排按 mtime 读它，设置页「陪伴与提醒」一节写它
   const appConfigPath = join(dshHomeDir(), 'dsh-pet', 'app-config.json');
   const appConfig = createAppConfig(appConfigPath, log);
-  const server = await startRouter(routes, {
+
+  // 托盘勾选 / 右键关闭桌面显示 / 设置页保存都会走宿主的 syncDesktop：
+  // 窗口与托盘就在本进程、只在启动时建一次，所以它们依据的配置变了就整个应用重启
+  const launchedLayout = desktopLayout();
+  let relaunching = false;
+  const petHost = createPetHost({
+    logger,
+    ai,
+    // 拼人设时追加「主人此刻」一行（宿主 petSystemPrompt 读这个钩子）
+    appContext: () => features?.activityContext() ?? '',
+    desktopChanged: () => {
+      const layout = desktopLayout();
+      if (relaunching || layout === null || layout === launchedLayout) return;
+      relaunching = true;
+      log('桌面宠物或托盘配置变了，重启应用');
+      // 稍等再退：触发这次变更的请求（如设置页保存）还要把响应发回去
+      setTimeout(() => {
+        app.relaunch();
+        app.quit();
+      }, 500);
+    },
+  });
+
+  const server = await startRouter(petHost.handler, {
     security,
     ai,
     appRoutes: createAppRoutes(() => features, log),
@@ -139,29 +154,10 @@ async function boot(): Promise<void> {
   process.env.DSH_PET_SITE_URL = security.authenticatedUrl(origin);
   if (!process.env.DSH_PET_SCALE) process.env.DSH_PET_SCALE = '1';
 
-  // 插件拼人设时追加「主人此刻」一行（src/host/index.ts 的 petSystemPrompt 读这个钩子）
-  context.ctx.dshPetAppContext = () => features?.activityContext() ?? '';
-  apply(context.ctx);
-  log(`apply() 完成：routes=${routes.length} 失败=${context.failures.length}`);
+  log('宿主已就绪');
 
   // helper 读它决定建几个窗口；读不到时它会回落到单个默认窗口，首帧再由渲染端自校正
   process.env.DSH_PET_PETS = JSON.stringify(desktopPets());
-
-  // 托盘勾选 / 右键关闭桌面显示 / 设置页保存都会走插件的 syncDesktop：
-  // 窗口与托盘就在本进程、只在启动时建一次，所以它们依据的配置变了就整个应用重启
-  const launchedLayout = desktopLayout();
-  let relaunching = false;
-  context.ctx.dshPetAppDesktopChanged = () => {
-    const layout = desktopLayout();
-    if (relaunching || layout === null || layout === launchedLayout) return;
-    relaunching = true;
-    log('桌面宠物或托盘配置变了，重启应用');
-    // 稍等再退：触发这次变更的请求（如设置页保存）还要把响应发回去
-    setTimeout(() => {
-      app.relaunch();
-      app.quit();
-    }, 500);
-  };
 
   // 同一个进程里跑 helper：建窗、托盘、IPC、碰撞全在它内部完成（CJS，需要 require）
   // 渲染端日志必须转出来：打包后的应用没有控制台，渲染端报错只会表现成「窗口透明」。
@@ -195,7 +191,7 @@ async function boot(): Promise<void> {
     features?.dispose();
     removeDiscovery(dshHomeDir(), process.pid);
     void ai.dispose();
-    void context.dispose().catch(() => undefined);
+    void petHost.dispose().catch(() => undefined);
     void server.close().catch(() => undefined);
   });
 }
@@ -248,15 +244,15 @@ interface RouterDeps {
 }
 
 /**
- * 本机 HTTP 面：插件路由 + 独立模式那套「状态 / 配置页」。
+ * 本机 HTTP 面：宿主路由 + 应用自己的「状态 / 配置页」。
  *
- * 为什么不能直接把 `listenStandaloneServer` 搬来用：它的 `authorize()` 要求请求带 Host 校验
- * 与同源 Origin，而桌面窗口是 `file://` 页面（Origin 为 `null`、Sec-Fetch-Site 为 cross-site），
- * 会被它整组拒掉。所以这里按**两类请求分开**处理：配置页走完整的安全模型，插件路由只做
- * 「拒绝网页来源」这一条（否则本机任意网页都能调 /whisper、/chat 花掉模型额度）。
+ * 桌面窗口是 `file://` 页面（Origin 为 `null`、Sec-Fetch-Site 为 cross-site），配置页那套
+ * 「Host 校验 + 同源 Origin」会把它整组拒掉，所以这里按**两类请求分开**处理：
+ * 配置页走完整的安全模型，宿主路由只做「拒绝网页来源」这一条
+ * （否则本机任意网页都能调 /whisper、/chat 花掉模型额度）。
  */
 function startRouter(
-  routes: RegisteredRoute[],
+  petHandler: (req: IncomingMessage, res: ServerResponse) => Promise<void>,
   deps: RouterDeps,
 ): Promise<{ port: number; close: () => Promise<void> }> {
   const settings = settingsHandler(deps.ai);
@@ -329,12 +325,7 @@ function startRouter(
     if (deps.appRoutes(req, res, url.pathname)) return;
 
     // ---- 插件路由（桌面窗口）----
-    const route = routes.find((candidate) =>
-      candidate.kind === 'exact'
-        ? url.pathname === candidate.path
-        : url.pathname === candidate.path || url.pathname.startsWith(`${candidate.path}/`),
-    );
-    if (!route) {
+    if (url.pathname !== ROUTE_PREFIX && !url.pathname.startsWith(`${ROUTE_PREFIX}/`)) {
       res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
       res.end('not found');
       return;
@@ -347,7 +338,7 @@ function startRouter(
     }
     // 窗口是 file:// 页面，属于跨源请求：插件 handler 不写 CORS，这里统一补
     res.setHeader('access-control-allow-origin', '*');
-    Promise.resolve(route.handler(req, res)).catch((error: unknown) => {
+    petHandler(req, res).catch((error: unknown) => {
       log(`路由失败 ${url.pathname}: ${error instanceof Error ? error.message : String(error)}`);
       if (!res.headersSent) res.writeHead(500);
       res.end();

@@ -19,7 +19,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Writable } from 'node:stream';
 
-import { apply } from './index.ts';
+import { createPetHost } from './index.ts';
+import type { PetHost, PetHostAi } from './index.ts';
 
 /** 用户根之外的诱饵内容：任何响应体出现它都说明越根读盘成功 */
 const SECRET = 'TOP-SECRET-BYTES';
@@ -85,40 +86,35 @@ before(() => {
   savedHome = process.env.DSH_HOME;
   process.env.DSH_HOME = home;
 
-  let handler: ((req: unknown, res: unknown) => Promise<void>) | undefined;
-  const noop = (): void => {};
-  apply({
-    // 与 DSH 一致：effect 的返回值是**释放函数**。这里收下来在 after() 里调用——
-    // 插件现在有常驻定时器（碎碎念周期），不释放的话测试进程会一直等它（跑完不退出）。
-    effect: (fn: () => unknown) => {
-      try {
-        const dispose = fn();
-        if (typeof dispose === 'function') disposers.push(dispose as () => void);
-        return dispose;
-      } catch {
-        /* 源码形态下内置配置不可达，refreshDesktop 会抛给调用方——这里吞掉，不影响路由注册 */
-      }
+  const harness: { host?: PetHost } = {};
+  // 模型清单路由的数据源（独立应用只有设置页配的那一个模型）：一个正常服务商 +
+  // 一个列不出模型的服务商（验证单点失败不拖垮整张清单）
+  const ai: PetHostAi = {
+    currentSelection: () => ({ provider: 'no-such-provider', model: 'x' }),
+    listProviders: () => [
+      { id: 'deepseek', name: 'DeepSeek' },
+      { id: 'broken', name: 'Broken' },
+    ],
+    listModels: async (provider: string) => {
+      if (provider === 'broken') throw new Error('adapter does not list models');
+      return [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }];
     },
-    on: () => noop,
-    webServer: { register: (spec: { handler: typeof handler }) => ((handler = spec.handler), noop) },
-    commands: { register: () => noop },
-    logger: { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} },
-    agentDefaultModel: { currentSelection: () => ({ provider: 'no-such-provider', model: 'x' }) },
-    credentials: { resolve: async () => undefined },
-    // 模型清单路由的数据源（与 DSH 模型选择器同源的宿主 llm 服务）：一个正常服务商 +
-    // 一个列不出模型的服务商（验证单点失败不拖垮整张清单）
-    llm: {
-      listProviders: () => [
-        { id: 'deepseek', name: 'DeepSeek' },
-        { id: 'broken', name: 'Broken' },
-      ],
-      listModels: async (provider: string) => {
-        if (provider === 'broken') throw new Error('adapter does not list models');
-        return [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }];
+    resolveModelInfo: async () => undefined,
+    // 未配置模型时不会走到 stream；给一个形状正确的空流即可
+    stream: () => ({
+      [Symbol.asyncIterator]() {
+        return { next: async () => ({ done: true as const, value: undefined }) };
       },
-    },
+    }),
+  };
+  harness.host = createPetHost({
+    logger: { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} },
+    ai,
   });
-  assert.ok(handler, 'apply() 应注册 /dsh-pet-7340 prefix handler'); // 注册失败则整份测试无意义
+  disposers.push(() => {
+    void harness.host?.dispose();
+  });
+  assert.ok(harness.host, 'createPetHost() 应返回 /dsh-pet-7340 的处理函数'); // 创建失败则整份测试无意义
 
   call = (url: string, method = 'GET', body?: string) =>
     new Promise<Result>((done) => {
@@ -126,7 +122,7 @@ before(() => {
       res.on('finish', () => done({ status: res.status, body: Buffer.concat(res.chunks).toString('utf8') }));
       // 请求桩：'end' 必须回调，否则 host 对 PUT/POST 的 readBody 永远等不到结束事件，
       // 调用方直接挂死。带 body 时先发 'data' 再发 'end'（readBody 两个事件都等）。
-      void handler?.(
+      void harness.host?.handler(
         {
           method,
           url,
@@ -135,14 +131,14 @@ before(() => {
             if (event === 'end') queueMicrotask(() => cb());
             return undefined;
           },
-        },
-        res,
+        } as unknown as Parameters<PetHost['handler']>[0],
+        res as unknown as Parameters<PetHost['handler']>[1],
       );
     });
 });
 
 after(() => {
-  // 先释放插件注册的 effect（清掉碎碎念周期定时器），否则测试跑完进程不退出
+  // 先释放宿主（清掉工作状态补写定时器与挂起等待），否则测试跑完进程不退出
   for (const dispose of disposers.splice(0)) {
     try {
       dispose();

@@ -1,28 +1,27 @@
 /**
- * 碎碎念生成（host 半侧）：用 DSH 的 LLM 统一抽象层（ctx.llm）按当前对话的 provider/model
- * 生成一句话。不自己拼各服务商端点、不碰凭证——ctx.llm 已接管适配器路由/模型解析/凭据，
- * 天然与对话页完全一致。
+ * 碎碎念生成（host 半侧）：用独立应用的模型服务（StandaloneAiService）按设置页配置的
+ * provider/model 生成一句话。不自己拼服务商端点、不碰密钥——AI 服务已接管传输、限流与错误归一。
  *
  * 设计：
- * - provider/model：用 agentDefaultModel.currentSelection()（当前对话的模型，与对话同源）——
+ * - provider/model：用模型服务的 currentSelection()（设置页配的那一个）——
  * - system = 用户配置的 whisperPrompt（人设），user = 一个极简的"说句话"请求；
  * - 配图（可选）：开启 whisperImageEnabled 时，由调用方从表情包池随机抽一张传入，
  *   把该图描述注入 user 指令，让这句话配合画面说——随机而非让模型选：
  *   碎碎念本身没有上下文可选（人设固定、无用户输入），交模型"选"只能盲选且多了幻觉风险；
  * - reasoningEffort: 'off' —— 仅当模型声明支持 reasoning effort（含 "off"）时传，
  *   关闭深度思考：碎碎念只求随口一句，不开推理（省时省 token）。无 reasoning 元数据的
- *   模型（如 reasoningEfforts: false）显式传 off 会被 dsh-llm 判为 UNSUPPORTED_REASONING_EFFORT
- *   并折叠成空流（表现为"模型未返回文本"），因此这类模型省略该字段（语义等价于不传）；
+ *   模型（如 reasoningEfforts: false）显式传 off 会被判为不支持的 reasoning effort
+ *   并表现为"模型未返回文本"，因此这类模型省略该字段（语义等价于不传）；
  * - sessionId: PET_CALL_IDENTITY —— 调用身份（见 llm-call.ts）；
- * - 无正文时读 BlockAssembler.finish 报真实失败原因（dsh-llm 把适配器抛错折进终止块）；
+ * - 无正文时读 BlockAssembler.finish 报真实失败原因；
  * - 流式收集 + BlockAssembler 拼装文本；生成失败显式返回结构化原因，不伪造文案；
  * - 短超时（LLM 冷启动/慢响应时快速放弃，不留挂起请求）。
  */
 
-import { BlockAssembler, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
+import { BlockAssembler, createUserMessage, ReasoningEffortId } from './llm-messages';
 import { PET_CALL_IDENTITY, noTextReason } from './llm-call';
 import { supportsReasoningOff } from './llm-reasoning';
-import { modelCandidates, type ModelRef } from './model-selection';
+import { modelCandidates, type ModelRef, type ModelService } from './model-selection';
 
 /** 生成失败原因（与 shared/whisper.ts 的 WhisperState 失败分支同构） */
 export type WhisperGenerateResult =
@@ -52,32 +51,30 @@ function userTextWithMeme(meme: { name: string; desc: string }): string {
 }
 
 /**
- * 用指定（或当前对话的）provider/model 生成一句碎碎念。
- * @param ctx 宿主上下文（注入 agentDefaultModel / llm）
+ * 用当前配置的 provider/model 生成一句碎碎念。
+ * @param ai 独立应用的模型服务
  * @param system 人设提示词（whisperPrompt）
  * @param meme 配图（开启配图时传入；缺省 = 纯文本碎碎念）。生成成功时原样带回，
  *             客户端据此展示图片（host 不判断模型是否真的贴合）
  * @returns 生成的文本（+ 配图），或结构化失败（provider 缺失 / 生成错误）
  */
 export async function generateWhisper(
-  ctx: { agentDefaultModel: { currentSelection(): { provider: string; model: string } }; llm?: unknown },
+  ai: ModelService,
   system: string,
   meme?: { name: string; desc: string },
 ): Promise<WhisperGenerateResult> {
-  // 候选链：只有当前对话的模型（旧版行为逐字不变）
-  const candidates = modelCandidates(ctx);
+  // 候选链：只有设置页配的那一个模型
+  const candidates = modelCandidates(ai);
   if (candidates.length === 0) {
     return { ok: false, reason: 'provider-missing', message: '当前对话未配置模型' };
   }
-  // ctx.llm 是核心服务但保持防御：缺失时显式失败（静默跳过由上层决定）
-  const llm = (ctx as { llm?: { stream(o: unknown): AsyncIterable<unknown> } }).llm;
-  if (!llm || typeof llm.stream !== 'function') {
+  if (typeof ai.stream !== 'function') {
     return { ok: false, reason: 'generate-error', message: 'LLM 服务不可用' };
   }
-  // 候选链只有当前对话的模型；仍保持循环形态，未来若再加候选来源不用改这里
+  // 候选链只有当前模型；仍保持循环形态，未来若再加候选来源不用改这里
   let last: WhisperGenerateResult = { ok: false, reason: 'generate-error', message: noTextReason(undefined) };
   for (const sel of candidates) {
-    const result = await generateWith(ctx, llm, sel, system, meme);
+    const result = await generateWith(ai, sel, system, meme);
     if (result.ok) return result;
     last = result;
   }
@@ -86,8 +83,7 @@ export async function generateWhisper(
 
 /** 用**一个**确定的 provider/model 跑一次生成（候选链的一环；失败原样返回结构化原因，不吞） */
 async function generateWith(
-  ctx: { llm?: unknown },
-  llm: { stream(o: unknown): AsyncIterable<unknown> },
+  ai: ModelService,
   sel: ModelRef,
   system: string,
   meme?: { name: string; desc: string },
@@ -95,8 +91,8 @@ async function generateWith(
   const deadline = AbortSignal.timeout(TIMEOUT_MS);
   // 仅当模型声明支持 reasoning effort（含 "off"）时才传，否则省略：
   // 无 reasoning 元数据的模型（如 reasoningEfforts: false）显式传 off 会被
-  // dsh-llm 判为 UNSUPPORTED_REASONING_EFFORT 并折叠成空流（表现为"模型未返回文本"）。
-  const supportsOff = await supportsReasoningOff(ctx, sel.provider, sel.model);
+  // 会被判为不支持的 reasoning effort 并表现为"模型未返回文本"。
+  const supportsOff = await supportsReasoningOff(ai, sel.provider, sel.model);
   const options = {
     provider: sel.provider,
     model: sel.model,
@@ -110,7 +106,7 @@ async function generateWith(
     ],
     system,
     // 不显式限 maxTokens：推理模型会把思考计入预算，显式小上限只会截断正文报"模型未返回文本"；
-    // 不传由 dsh-llm 按适配器 defaultMaxTokens（默认 32768）兜底，碎碎念短指令输出仍短。
+    // 不传由传输层的固定上限（ai-transport.ts 的 MAX_OUTPUT_TOKENS）兜底，碎碎念短指令输出仍短。
     temperature: 1,
     // 统一关闭深度思考：碎碎念不需要推理，只求随口一句（仅模型声明支持时传）
     ...(supportsOff ? { reasoningEffort: ReasoningEffortId('off') } : {}),
@@ -119,7 +115,7 @@ async function generateWith(
 
   const assembler = new BlockAssembler();
   try {
-    for await (const chunk of llm.stream(options)) {
+    for await (const chunk of ai.stream(options)) {
       assembler.push(chunk as Parameters<BlockAssembler['push']>[0]);
     }
   } catch (e) {
