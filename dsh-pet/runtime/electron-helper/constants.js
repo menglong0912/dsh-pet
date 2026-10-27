@@ -31,8 +31,8 @@ function toLocal(v) {
 // bridge 模式（DSH_PET_BRIDGE=1）：请求走自定义 scheme，经 Electron 主进程转宿主管道——
 // 绕开 DSH Desktop 2.0.3+ 的浏览器访问闸门（只放行带令牌的请求，插件自拉进程的裸 HTTP 全 403）
 const BRIDGE = params.get('bridge') === '1';
-// 工具项「打开网站」的去向（主进程按宿主形态经 query 注入，见 main.js 的 OPEN_TARGET）：
-// desktop = 宿主是 DSH 桌面应用，菜单项改叫「打开软件」并唤起桌面应用主窗口；site = 打开站点。
+// 工具项「设置」的去向（主进程按宿主形态经 query 注入，见 main.js 的 OPEN_TARGET）：
+// desktop = 宿主是 DSH 桌面应用，唤起桌面应用主窗口；site = 打开站点。
 const OPEN_TARGET = params.get('openTarget') === 'desktop' ? 'desktop' : 'site';
 // 独立应用（src/app）注册菜单项用的 owner：这组项是应用自己的功能，放根菜单；空 = 没有（DSH 内）
 const APP_MENU_OWNER = params.get('appMenuOwner') || '';

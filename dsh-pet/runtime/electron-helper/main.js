@@ -271,7 +271,7 @@ function petScale() {
 /** bridge 模式：DSH_PET_BRIDGE=1（宿主注入）。开启时注册 dsh-pet-bridge scheme + 管道转发 */
 const BRIDGE = process.env.DSH_PET_BRIDGE === '1';
 
-/** 「打开网站」这一项的去向（宿主按自身形态注入）：
+/** 右键「设置」这一项的去向（宿主按自身形态注入）：
  *  'desktop' = 宿主是 DSH 桌面应用 → 唤起桌面应用主窗口；
  *  'site'    = dsh web / 独立模式 / 手写 start-desktop（无该变量）→ 原行为：默认浏览器打开站点。 */
 const OPEN_TARGET = process.env.DSH_PET_OPEN_TARGET === 'desktop' ? 'desktop' : 'site';
@@ -547,7 +547,7 @@ function createPetWindows() {
         query: {
           configUrl,
           bridge: BRIDGE ? '1' : '0',
-          // 工具项「打开网站」的文案按宿主形态自动变（见 sprite.js）：desktop=唤起桌面应用 / site=打开站点
+          // 工具项「设置」的去向按宿主形态自动变（见 sprite.js）：desktop=唤起桌面应用 / site=打开站点
           openTarget: OPEN_TARGET,
           // 独立应用自己注册菜单项用的 owner（见 sprite.js：这组项放根菜单，不收进「更多」）
           appMenuOwner: process.env.DSH_PET_APP_MENU_OWNER || '',
@@ -910,7 +910,7 @@ app.whenReady().then(() => {
     inputRegions.set(win.id, { dragging: input.dragging === true, rects });
   });
 
-  // 右键菜单「打开网站」：交给**系统默认浏览器**打开（等效于网页里 Ctrl+点击链接新标签页），
+  // 右键菜单「设置」：交给**系统默认浏览器**打开（等效于网页里 Ctrl+点击链接新标签页），
   // 不建专属窗口——宠物窗口机制是透明小窗，不该承载常规网页浏览。URL 由渲染端从
   // configUrl 推导 = DSH webServer 端口，端口变化自动跟随
   const openSite = (url) => {

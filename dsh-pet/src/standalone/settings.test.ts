@@ -40,18 +40,147 @@ test('public settings are an allowlist even if backend accidentally includes cre
   assert.deepEqual(actual, { protocol: 'anthropic', hasKey: true, model: 'x', enabled: false });
   assert.equal(JSON.stringify(actual).includes('never expose'), false);
 });
-test('settings shell is accessible, self contained, and never saves browser secrets', () => {
+test('settings shell is accessible, paged, self contained, and never saves browser secrets', () => {
   assert.match(settingsPage, /lang="zh-CN"/);
   assert.match(settingsPage, /type="password"/);
   assert.match(settingsPage, /aria-live="polite"/);
   assert.match(settingsPage, /screenIntervalSec/);
   assert.match(settingsPage, /截图会发给/);
   assert.match(settingsPage, /min="10"/);
+  assert.match(settingsPage, /<title>桌宠设置<\/title>/);
+  assert.match(settingsPage, /<h1>桌宠设置<\/h1>/);
   assert.match(settingsScript, /history\.replaceState/);
   assert.match(settingsScript, /X-DSH-Pet-Token/);
-  assert.doesNotMatch(settingsScript, /localStorage|sessionStorage|document\.cookie|innerHTML/);
+  assert.doesNotMatch(settingsScript, /sessionStorage|document\.cookie|innerHTML/);
   assert.doesNotMatch(settingsPage, /https?:\/\/(?!example)/);
   assert.match(settingsStyle, /focus-visible/);
+  // 导航项与 fieldset 一一对应，各占一页
+  const navPages = [...settingsPage.matchAll(/<button[^>]*class="page-tab"[^>]*data-page="([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+  const sectionPages = [...settingsPage.matchAll(/<fieldset[^>]*data-page="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(navPages, sectionPages);
+  assert.deepEqual(navPages, ['model', 'pet', 'app', 'visit', 'neighbors', 'cultivation']);
+  // 保存按钮和结果提示都在固定的保存栏里
+  const footer = settingsPage.match(/<footer[\s\S]*?<\/footer>/)?.[0] ?? '';
+  assert.match(footer, /id="save"/);
+  assert.match(footer, /id="status"/);
+  assert.match(settingsStyle, /footer\{[^}]*position:sticky[^}]*bottom:0/);
+  // 没有内联脚本和样式（CSP 不放宽）
+  assert.doesNotMatch(settingsPage, /<script(?![^>]*\bsrc=)/i);
+  assert.doesNotMatch(settingsPage, /<style[\s>]/i);
+  assert.doesNotMatch(settingsPage, /\sstyle="/i);
+  // 必填项落在别的页时先切页；页码记在 localStorage，读不到也不影响使用
+  assert.match(settingsScript, /addEventListener\('invalid'/);
+  assert.match(settingsScript, /try \{ return localStorage\.getItem\(PAGE_KEY\)/);
+  assert.match(settingsScript, /try \{ localStorage\.setItem\(PAGE_KEY, name\)/);
+});
+
+test('settings browser script restores the last page, switches on invalid, and remembers tab clicks', async () => {
+  const { runInNewContext } = await import('node:vm');
+  type Element = {
+    value: string;
+    checked: boolean;
+    disabled: boolean;
+    hidden: boolean;
+    textContent: string;
+    dataset: Record<string, string>;
+    listeners: Record<string, (event?: unknown) => void>;
+    addEventListener: (name: string, fn: (event?: unknown) => void) => void;
+    reportValidity: () => boolean;
+    setCustomValidity: () => void;
+  };
+  const initiallyHidden = new Set([
+    'pet-settings',
+    'app-settings',
+    'visit-settings',
+    'neighbors-settings',
+    'cultivation-settings',
+    'nav-pet',
+    'nav-app',
+    'nav-visit',
+    'nav-neighbors',
+    'nav-cultivation',
+  ]);
+  const elements = new Map<string, Element>();
+  const element = (id: string): Element => {
+    if (!elements.has(id))
+      elements.set(id, {
+        value: '',
+        checked: false,
+        disabled: false,
+        hidden: initiallyHidden.has(id),
+        textContent: '',
+        dataset: {},
+        listeners: {},
+        addEventListener(name, fn) {
+          this.listeners[name] = fn;
+        },
+        reportValidity: () => true,
+        setCustomValidity: () => undefined,
+      });
+    return elements.get(id)!;
+  };
+  const stored = new Map<string, string>([['dsh-pet-settings-page', 'visit']]);
+  const app = {
+    greetAfterAwayMin: 10,
+    screen: { enabled: true, intervalSec: 900 },
+    sitting: { enabled: true, afterMin: 50, repeatMin: 20 },
+    water: { enabled: true, everyMin: 60 },
+    offWork: { enabled: true, time: '18:00', weekdaysOnly: true, leadMin: 10 },
+    visit: {
+      enabled: true,
+      hosting: true,
+      visiting: true,
+      chat: true,
+      nickname: '',
+      stayMin: 10,
+      autoAdmitFriends: false,
+      notes: true,
+      peers: [],
+    },
+    cultivation: { enabled: true },
+  };
+  runInNewContext(settingsScript, {
+    URLSearchParams,
+    location: { hash: '#token=process-capability', pathname: '/standalone-ai/' },
+    history: { replaceState: () => undefined },
+    localStorage: {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => stored.set(key, value),
+    },
+    document: { getElementById: element },
+    fetch: async (url: string) => {
+      if (url === '/standalone-ai/app-settings') return { ok: true, json: async () => app };
+      if (url === '/standalone-ai/pet-settings')
+        return {
+          ok: true,
+          json: async () => ({
+            config: {
+              main: { whisperPrompt: '', chatMemoryRounds: 5, pets: [{ id: 'main', name: '吃白饭的', size: 500 }] },
+            },
+            file: '/data/dsh-pet/main-config.jsonc',
+          }),
+        };
+      if (url === '/standalone-ai/settings') return { ok: true, json: async () => ({ hasKey: false }) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  // 记住的「串门」页在数据读回来、这一节可用后再切过去；不可用的「邻居」「修炼」导航项隐藏
+  assert.equal(element('visit-settings').dataset.active, 'true');
+  assert.equal(element('model-settings').dataset.active, undefined);
+  assert.equal(element('nav-visit').hidden, false);
+  assert.equal(element('nav-neighbors').hidden, true);
+  assert.equal(element('nav-cultivation').hidden, true);
+  // 必填项在「宠物」页、当前在「串门」页：invalid 捕获阶段先切到宠物页
+  element('settings').listeners.invalid({ target: { closest: () => ({ id: 'pet-settings' }) } });
+  assert.equal(element('pet-settings').dataset.active, 'true');
+  assert.equal(element('visit-settings').dataset.active, undefined);
+  // 点导航切回模型页，并把页码写进 localStorage
+  element('nav-model').listeners.click();
+  assert.equal(element('model-settings').dataset.active, 'true');
+  assert.equal(stored.get('dsh-pet-settings-page'), 'model');
 });
 
 test('settings browser script strips fragment, keeps key write-only and explicitly clears without AI requests', async () => {

@@ -1,12 +1,22 @@
 /** Local-only settings shell; external same-origin assets keep CSP free of unsafe-inline. */
 export const settingsPage = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>桌宠 AI 设置</title><link rel="stylesheet" href="/standalone-ai/settings.css">
+<title>桌宠设置</title><link rel="stylesheet" href="/standalone-ai/settings.css">
 <script src="/standalone-ai/settings.js" defer></script></head><body>
 <main><header><span class="fish" aria-hidden="true">🐾</span><p class="local">独立桌宠 / 本机设置</p>
-<h1>桌宠 AI 设置</h1><p class="intro">配置你的大模型 API 接口，开启桌面聊天与看屏幕吐槽。<br>所有设置仅保存在本机，支持即时测试连接。</p></header>
+<h1>桌宠设置</h1><p class="intro">配置本机的模型接口、桌宠行为与串门，所有设置只保存在本机。</p></header>
 <form id="settings" aria-describedby="privacy">
-<fieldset><legend>模型连接</legend>
+<div class="settings-layout">
+<nav id="settings-nav" class="page-nav" aria-label="设置分类">
+<button type="button" class="page-tab" id="nav-model" data-page="model" data-current="true">模型</button>
+<button type="button" class="page-tab" id="nav-pet" data-page="pet" hidden>宠物</button>
+<button type="button" class="page-tab" id="nav-app" data-page="app" hidden>看屏幕与提醒</button>
+<button type="button" class="page-tab" id="nav-visit" data-page="visit" hidden>串门</button>
+<button type="button" class="page-tab" id="nav-neighbors" data-page="neighbors" hidden>邻居</button>
+<button type="button" class="page-tab" id="nav-cultivation" data-page="cultivation" hidden>修炼</button>
+</nav>
+<div class="pages">
+<fieldset id="model-settings" data-page="model" data-active="true"><legend>模型连接</legend>
 <label for="protocol">接口协议</label><select id="protocol" name="protocol"><option value="openai-compatible">OpenAI 兼容</option><option value="anthropic">Anthropic</option></select>
 <label for="baseUrl">接口地址（Base URL）</label><input id="baseUrl" name="baseUrl" type="url" placeholder="https://example.com/v1" maxlength="2048" spellcheck="false" aria-describedby="endpoint-note"><p class="hint" id="endpoint-note">填写服务商提供的基础接口地址（支持 HTTP 与 HTTPS，通常以 /v1 结尾）。不要把密钥放进地址。</p>
 <label for="model">模型名称</label><input id="model" name="model" type="text" maxlength="200" placeholder="填写服务商的模型 ID，例如 deepseek-chat" spellcheck="false">
@@ -15,11 +25,12 @@ export const settingsPage = `<!doctype html>
 <p id="key-note" class="hint">密钥只写入本机配置，不会回显。留空不会删除旧密钥。</p>
 <label class="check clear"><input id="clearApiKey" type="checkbox">清除已保存的密钥，并关闭 AI</label>
 <label class="check"><input id="disableThinking" type="checkbox" aria-describedby="thinking-note">关闭模型思考</label>
-<p id="thinking-note" class="hint">仅 OpenAI 兼容协议生效：请求带上 chat_template_kwargs.enable_thinking=false，适用于 llama.cpp / vLLM 部署的 Qwen 等思考模型（否则思考会占满输出上限、回复为空）。官方 OpenAI 接口不认这个参数，不要勾选。</p>
+<p id="thinking-note" class="hint">仅 OpenAI 兼容协议生效，适用于 llama.cpp / vLLM 部署的 Qwen 等思考模型；官方 OpenAI 接口不认这个参数，不要勾选。</p>
+<details class="more"><summary>说明</summary><p>请求会带上 chat_template_kwargs.enable_thinking=false；开着思考时，思考过程会占满输出上限、回复为空。</p></details>
 <label class="check enabled"><input id="enabled" type="checkbox">启用 AI 对话</label>
 <div class="test-row"><button id="test-btn" type="button">测试连接</button><span id="test-result" class="test-result" role="status" aria-live="polite"></span></div>
 </fieldset>
-<fieldset id="pet-settings" hidden><legend>宠物</legend>
+<fieldset id="pet-settings" data-page="pet" hidden><legend>宠物</legend>
 <div class="pair"><div><label for="petName">名字</label><input id="petName" type="text" maxlength="24" required spellcheck="false"></div>
 <div><label for="petSize">大小（宽度 px）</label><input id="petSize" type="number" min="100" max="1500" step="1" value="500" required></div></div>
 <p class="hint">改名字或大小后桌宠会重启一下，之后请从右键重新打开设置。</p>
@@ -35,9 +46,10 @@ export const settingsPage = `<!doctype html>
 <p id="memory-note" class="hint">一问一答算一轮，带进每次对话；越多越费 token，0 = 不记。</p>
 <p class="hint">多只宠物时这里改的是 main 宠物（没有就取第一只）。物理手感、字体、表情包、贴哪个角等更多选项在 <code id="petConfigFile"></code> 里，改完右键「重载配置」。</p>
 </fieldset>
-<fieldset id="app-settings" hidden><legend>陪伴与提醒</legend>
+<fieldset id="app-settings" data-page="app" hidden><legend>陪伴与提醒</legend>
 <label class="check"><input id="screenEnabled" type="checkbox" aria-describedby="screen-note">定时看屏幕吐槽</label>
-<p id="screen-note" class="hint">截图会发给上面配置的模型接口：填本机地址就只留在本机，填云端地址会把屏幕内容上传给服务商，请确认模型支持图片输入。模型不支持看图时，会改成按人设随口说一句（不截图）；自动触发时没授权「屏幕录制」也这样降级。离开电脑或一分钟没碰键鼠时不看。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
+<p id="screen-note" class="hint">截图会发给上面配置的模型接口；模型不支持看图，或自动触发时没授权「屏幕录制」，会改成按人设随口说一句（不截图）。</p>
+<details class="more"><summary>说明</summary><p>填本机地址就只留在本机，填云端地址会把屏幕内容上传给服务商，请确认模型支持图片输入。离开电脑或一分钟没碰键鼠时不看。右键「看看我在干嘛」随时手动看，不受此开关限制。</p></details>
 <label for="screenIntervalSec">看屏幕间隔（秒）</label><input id="screenIntervalSec" type="number" min="10" max="86400" step="1" value="900">
 <label class="check"><input id="sittingEnabled" type="checkbox" aria-describedby="sitting-note">久坐提醒</label>
 <div class="pair"><div><label for="sittingAfterMin">连续坐多久提醒（分钟）</label><input id="sittingAfterMin" type="number" min="5" max="600" step="1" value="50"></div>
@@ -53,9 +65,10 @@ export const settingsPage = `<!doctype html>
 <p id="offwork-note" class="hint">每天在下班前这么多分钟提醒一次，填 0 就是到点提醒；那会儿不在电脑前就等回来再说。</p>
 <label for="greetAfterAwayMin">离开多久、回来时打招呼（分钟）</label><input id="greetAfterAwayMin" type="number" min="1" max="1440" step="1" value="10">
 </fieldset>
-<fieldset id="visit-settings" hidden><legend>局域网串门</legend>
+<fieldset id="visit-settings" data-page="visit" hidden><legend>局域网串门</legend>
 <label class="check"><input id="visitEnabled" type="checkbox" aria-describedby="visit-note">开启局域网串门</label>
-<p id="visit-note" class="hint">总开关：关着时不发信标、不开端口，局域网里什么都不做。开启后，同一局域网里开了串门的 dsh-pet 能互相看到，同一网络里的人也能认出这台电脑；网络上只传昵称、宠物名和两只宠物说的话，截图、在用的应用、Claude 进度都不会发出去。首次开启时 macOS 会询问是否允许访问本地网络。</p>
+<p id="visit-note" class="hint">总开关：关着时不发信标、不开端口，局域网里什么都不做。</p>
+<details class="more"><summary>说明</summary><p>开启后，同一局域网里开了串门的 dsh-pet 能互相看到，同一网络里的人也能认出这台电脑；网络上只传昵称、宠物名和两只宠物说的话，截图、在用的应用、Claude 进度都不会发出去。首次开启时 macOS 会询问是否允许访问本地网络。</p></details>
 <div class="sub">
 <label class="check"><input id="visitHosting" type="checkbox" aria-describedby="hosting-note">允许别人来我家做客</label>
 <p id="hosting-note" class="hint">关掉后别人在局域网里看不到你；开着时每次进门也要你在右键菜单里点「让它进来」。</p>
@@ -70,33 +83,37 @@ export const settingsPage = `<!doctype html>
 <div class="pair"><div><label for="visitNickname">邻居看到的昵称</label><input id="visitNickname" type="text" maxlength="12" placeholder="留空用电脑登录名" spellcheck="false"></div>
 <div><label for="visitStayMin">出门做客待多久（分钟）</label><input id="visitStayMin" type="number" min="1" max="60" step="1" value="10"></div></div>
 <label for="visitPeers">别的网段里的邻居（对方电脑的 IP，一行一个）</label><textarea id="visitPeers" rows="3" spellcheck="false" placeholder="192.168.11.23" aria-describedby="visit-peers-note"></textarea>
-<p id="visit-peers-note" class="hint">在不同网段（比如公司里另一层楼，或有线和 Wi-Fi 分在两个网段）时广播过不去，彼此看不到。填上对方电脑的 IP（在对方的「系统设置 → 网络」里能看到），这台电脑就会把信标直接发过去，对方会回发，所以一边填就够；要被看到的一方得开着「允许别人来我家做客」。对方的 IP 变了要重填。只能填局域网地址（10.x、172.16–31.x、192.168.x，Tailscale 的 100.x 也行）。两边之间的防火墙要放行 UDP 47340 和接待端口；只 ping 得通不算数。</p>
+<p id="visit-peers-note" class="hint">不在同一网段时，填上对方电脑的 IP，这台电脑就会把信标直接发过去；对方会回发，所以一边填就够。</p>
+<details class="more"><summary>说明</summary><p>在不同网段（比如公司里另一层楼，或有线和 Wi-Fi 分在两个网段）时广播过不去，彼此看不到。对方的 IP 在「系统设置 → 网络」里能看到。要被看到的一方得开着「允许别人来我家做客」。对方的 IP 变了要重填。只能填局域网地址（10.x、172.16–31.x、192.168.x，Tailscale 的 100.x 也行）。两边之间的防火墙要放行 UDP 47340 和接待端口；只 ping 得通不算数。</p></details>
 </div>
 </fieldset>
-<fieldset id="neighbors-settings" hidden><legend>邻居</legend>
+<fieldset id="neighbors-settings" data-page="neighbors" hidden><legend>邻居</legend>
 <p class="hint">来玩过的邻居记在本机（最多 50 位，超过丢最久没见的）。这一节的操作点了立即生效，不用按保存。记录只存本机，不出网。</p>
 <div id="neighbor-list"></div>
 <div class="pair"><div><button id="neighborsClear" type="button">全部忘掉</button></div>
 <div><button id="identityReset" type="button">重置我的串门身份</button></div></div>
-<p class="hint" id="identity-note">本机的串门身份是 <code id="identityId"></code>…。重置后大家都不认得这台电脑了，要重新串门、重新标熟人；串门进行中不能重置。局域网里有人做中间人时防不住冒充，别把这个身份当唯一凭据。</p>
+<p class="hint" id="identity-note">本机的串门身份是 <code id="identityId"></code>…，记录只存本机，不出网。</p>
+<details class="more"><summary>说明</summary><p>重置后大家都不认得这台电脑了，要重新串门、重新标熟人；串门进行中不能重置。局域网里有人做中间人时防不住冒充，别把这个身份当唯一凭据。</p></details>
 </fieldset>
-<fieldset id="cultivation-settings" hidden><legend>修炼</legend>
+<fieldset id="cultivation-settings" data-page="cultivation" hidden><legend>修炼</legend>
 <label class="check"><input id="cultivationEnabled" type="checkbox" aria-describedby="cultivation-note">开启修炼</label>
 <p id="cultivation-note" class="hint">开着时，桌宠在电脑前就攒修为，右键「修炼」里能看境界、渡劫、心魔试炼，串门时还能和邻居切磋；修为、法宝与战绩都只存本机。关掉后不再攒，已攒的不丢，重新打开接着修。</p>
 <div id="cultivation-view" hidden></div>
 </fieldset>
-<footer><p id="privacy">所有配置与密钥仅保存在当前机器。<br>关闭 AI 后，桌宠仍可正常显示、移动与互动。</p><button id="save" type="submit" disabled>保存到本机</button></footer>
-<p id="status" role="status" aria-live="polite">正在读取本机设置…</p>
+</div>
+</div>
+<footer><p id="privacy">所有配置与密钥仅保存在当前机器。<br>关闭 AI 后，桌宠仍可正常显示、移动与互动。</p><div class="save-row"><p id="status" role="status" aria-live="polite">正在读取本机设置…</p><button id="save" type="submit" disabled>保存到本机</button></div></footer>
 </form><noscript>需要启用 JavaScript 才能保存设置。请从桌宠菜单打开本页。</noscript></main></body></html>`;
 
 export const settingsStyle = `
 :root{color-scheme:light;--ink:#203b4b;--muted:#526a78;--blue:#12618b;--line:#cbdce5;--paper:#fff;--water:#edf5fa}
 *{box-sizing:border-box}body{margin:0;background:var(--water);color:var(--ink);font:16px/1.6 "Microsoft YaHei UI","PingFang SC",sans-serif}
-main{max-width:720px;margin:48px auto;padding:0 24px 32px}header{padding:0 12px 28px}.fish{display:block;font:700 29px/1.3 Georgia,serif;color:var(--blue);letter-spacing:2px;margin-bottom:24px}.local{font-size:13px;color:var(--muted);margin:0 0 10px}h1{font-size:32px;line-height:1.3;letter-spacing:-1px;margin:0 0 16px;font-weight:700}.intro{margin:0;color:var(--muted)}
-form{background:var(--paper);border:1px solid var(--line);border-radius:16px 16px 6px 6px;padding:28px 32px 20px}fieldset{padding:0 0 28px;margin:0 0 24px;border:0;border-bottom:1px solid var(--line);min-width:0}legend{font-size:19px;font-weight:700;margin-bottom:18px;padding:0}label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}input:not([type=checkbox]),select,textarea{display:block;width:100%;min-height:44px;border:1px solid #a5bdcb;border-radius:6px;background:#fff;color:var(--ink);padding:9px 12px;font:inherit;font-size:15px}input::placeholder,textarea::placeholder{color:#6a7e8b}textarea{resize:vertical;line-height:1.6}code{font-size:12px;word-break:break-all}input[type=checkbox]{accent-color:var(--blue);width:18px;height:18px;flex-shrink:0;margin:0}.check{display:flex;align-items:center;gap:10px;min-height:32px;cursor:pointer}.enabled{margin-top:24px}.clear{font-weight:400;color:var(--muted);font-size:13px}.hint{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}.key-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}.key-heading label{margin:0 0 6px}.key-heading .hint{margin:0 0 6px}.notice{font-size:13px;color:#704b13;background:#fff7e7;border-left:3px solid #c18e36;margin:12px 0 16px;padding:12px 14px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}.sub{margin:10px 0 0 8px;padding-left:20px;border-left:2px solid var(--line)}footer{display:flex;align-items:center;justify-content:space-between;gap:18px}footer p{font-size:12px;color:var(--muted);margin:0}button{border:0;border-radius:7px;min-height:44px;padding:10px 20px;background:var(--blue);color:#fff;font:600 15px/1.5 inherit;white-space:nowrap;cursor:pointer}button:hover{background:#0b4e73}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #3a94c4;outline-offset:3px}#status{font-size:13px;min-height:24px;margin:18px 0 0;color:var(--blue)}#status[data-error=true]{color:#a13b30}
+main{max-width:1080px;margin:48px auto;padding:0 24px 32px}header{padding:0 12px 28px}.fish{display:block;font:700 29px/1.3 Georgia,serif;color:var(--blue);letter-spacing:2px;margin-bottom:24px}.local{font-size:13px;color:var(--muted);margin:0 0 10px}h1{font-size:32px;line-height:1.3;letter-spacing:-1px;margin:0 0 16px;font-weight:700}.intro{margin:0;color:var(--muted)}
+form{background:var(--paper);border:1px solid var(--line);border-radius:16px 16px 6px 6px;padding:28px 32px 20px}.settings-layout{display:grid;grid-template-columns:168px minmax(0,1fr);gap:32px;align-items:start}.pages{min-width:0}.page-nav{display:flex;flex-direction:column;gap:4px;position:sticky;top:24px;padding-right:16px;border-right:1px solid var(--line)}.page-tab{display:block;width:100%;min-height:0;padding:10px 12px;border:0;border-radius:8px;background:transparent;color:var(--muted);font:600 14px/1.4 inherit;text-align:left;white-space:normal;cursor:pointer}.page-tab:hover{background:var(--water);color:var(--ink)}.page-tab[data-current=true]{background:var(--water);color:var(--blue)}.page-tab[hidden]{display:none}fieldset[data-page]{display:none}fieldset[data-page][data-active=true]:not([hidden]){display:block}details.more{margin:6px 0 0}details.more summary{width:fit-content;font-size:12px;color:var(--blue);cursor:pointer}details.more p{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}fieldset{padding:0 0 28px;margin:0 0 24px;border:0;border-bottom:1px solid var(--line);min-width:0}legend{font-size:19px;font-weight:700;margin-bottom:18px;padding:0}label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}input:not([type=checkbox]),select,textarea{display:block;width:100%;min-height:44px;border:1px solid #a5bdcb;border-radius:6px;background:#fff;color:var(--ink);padding:9px 12px;font:inherit;font-size:15px}input::placeholder,textarea::placeholder{color:#6a7e8b}textarea{resize:vertical;line-height:1.6}code{font-size:12px;word-break:break-all}input[type=checkbox]{accent-color:var(--blue);width:18px;height:18px;flex-shrink:0;margin:0}.check{display:flex;align-items:center;gap:10px;min-height:32px;cursor:pointer}.enabled{margin-top:24px}.clear{font-weight:400;color:var(--muted);font-size:13px}.hint{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}.key-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}.key-heading label{margin:0 0 6px}.key-heading .hint{margin:0 0 6px}.notice{font-size:13px;color:#704b13;background:#fff7e7;border-left:3px solid #c18e36;margin:12px 0 16px;padding:12px 14px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}.sub{margin:10px 0 0 8px;padding-left:20px;border-left:2px solid var(--line)}footer{position:sticky;bottom:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;margin:8px -32px -20px;padding:16px 32px;background:var(--paper);border-top:1px solid var(--line);border-radius:0 0 6px 6px}footer p{font-size:12px;color:var(--muted);margin:0}.save-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-left:auto}#status{max-width:360px}button{border:0;border-radius:7px;min-height:44px;padding:10px 20px;background:var(--blue);color:#fff;font:600 15px/1.5 inherit;white-space:nowrap;cursor:pointer}button:hover{background:#0b4e73}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #3a94c4;outline-offset:3px}#status{font-size:13px;min-height:20px;margin:0;color:var(--blue)}#status[data-error=true]{color:#a13b30}
 .test-row{display:flex;align-items:center;gap:14px;margin:20px 0 6px;flex-wrap:wrap}#test-btn{background:#fff;color:var(--blue);border:1.5px solid var(--blue);min-height:38px;padding:6px 18px;font-size:14px;border-radius:6px;cursor:pointer;font-weight:600}#test-btn:hover{background:#edf5fa}#test-btn:disabled{opacity:.6;cursor:wait}.test-result{font-size:13px;line-height:1.5;min-height:22px;flex:1 1 200px}.test-success{color:#1a7f37;font-weight:600}.test-error{color:#cf222e}.reply-preview{display:block;color:var(--muted);font-weight:normal;font-size:12px;margin-top:4px;word-break:break-all}
 #neighbor-list:empty::after{content:'还没有记下过邻居，开着串门和别人来往过就会出现在这里。';display:block;font-size:12px;color:var(--muted);margin-top:8px}.neighbor-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 0;border-bottom:1px dashed var(--line)}.neighbor-row>span{flex:1;min-width:200px;font-size:14px}.neighbor-row .check{margin:0;font-weight:400;font-size:13px}.neighbor-row button{background:#fff;color:var(--blue);border:1px solid var(--blue);min-height:34px;padding:4px 14px;font-size:13px}.neighbor-row button:hover{background:#edf5fa}
-@media(max-width:560px){main{margin:24px auto;padding:0 14px 24px}header{padding:0 8px 24px}h1{font-size:28px}form{padding:24px 20px 16px}.pair{grid-template-columns:1fr;gap:0}footer{align-items:stretch;flex-direction:column}button{width:100%}.fish{margin-bottom:18px}}
+@media(max-width:720px){.settings-layout{grid-template-columns:1fr;gap:18px}.page-nav{position:static;flex-direction:row;flex-wrap:wrap;padding:0 0 12px;border-right:0;border-bottom:1px solid var(--line)}.page-tab{width:auto;flex:0 1 auto}}
+@media(max-width:560px){main{margin:24px auto;padding:0 14px 24px}header{padding:0 8px 24px}h1{font-size:28px}form{padding:24px 20px 16px}.pair{grid-template-columns:1fr;gap:0}footer{align-items:stretch;flex-direction:column;margin:8px -20px -16px;padding:14px 20px}.save-row{align-items:stretch;flex-direction:column;margin-left:0}button{width:100%}.fish{margin-bottom:18px}}
 `;
 
 export const settingsScript = `
@@ -110,6 +127,67 @@ export const settingsScript = `
   const save = get('save');
   const testBtn = get('test-btn');
   const testResult = get('test-result');
+  // 每个 fieldset 是一页，导航项与之一一对应；hidden 只表示「这一节不可用」，切页另用 data-active
+  const PAGE_KEY = 'dsh-pet-settings-page';
+  const PAGES = [
+    { name: 'model', section: 'model-settings', tab: 'nav-model' },
+    { name: 'pet', section: 'pet-settings', tab: 'nav-pet' },
+    { name: 'app', section: 'app-settings', tab: 'nav-app' },
+    { name: 'visit', section: 'visit-settings', tab: 'nav-visit' },
+    { name: 'neighbors', section: 'neighbors-settings', tab: 'nav-neighbors' },
+    { name: 'cultivation', section: 'cultivation-settings', tab: 'nav-cultivation' },
+  ];
+  const pageOf = name => PAGES.find(page => page.name === name);
+  function readPage() {
+    try { return localStorage.getItem(PAGE_KEY) || ''; } catch (error) { return ''; } // 隐私模式 / 禁用存储
+  }
+  function rememberPage(name) {
+    try { localStorage.setItem(PAGE_KEY, name); } catch (error) { /* 记不住页码不影响保存 */ }
+  }
+  let preferredPage = readPage();
+  let currentPage = '';
+  function showPage(name) {
+    const page = pageOf(name);
+    if (!page || get(page.section).hidden) return false;
+    for (const item of PAGES) {
+      const section = get(item.section);
+      const tab = get(item.tab);
+      if (item === page) {
+        section.dataset.active = 'true';
+        tab.dataset.current = 'true';
+      } else {
+        delete section.dataset.active;
+        delete tab.dataset.current;
+      }
+      if (tab.setAttribute) tab.setAttribute('aria-current', item === page ? 'page' : 'false');
+    }
+    currentPage = name;
+    return true;
+  }
+  function syncPages() {
+    for (const page of PAGES) get(page.tab).hidden = get(page.section).hidden;
+    const wanted = preferredPage && pageOf(preferredPage) && !get(pageOf(preferredPage).section).hidden ? preferredPage : '';
+    if (wanted) { showPage(wanted); return; }
+    if (currentPage && !get(pageOf(currentPage).section).hidden) return;
+    const first = PAGES.find(page => !get(page.section).hidden);
+    if (first) showPage(first.name);
+  }
+  for (const page of PAGES) {
+    get(page.tab).addEventListener('click', () => {
+      preferredPage = page.name;
+      showPage(page.name);
+      rememberPage(page.name);
+    });
+  }
+  // 必填项在别的页时，浏览器的 invalid 会在对不上焦点时静默拦下提交：捕获阶段先切到那一页
+  form.addEventListener('invalid', event => {
+    const target = event && event.target;
+    const section = target && target.closest ? target.closest('fieldset[data-page]') : null;
+    if (!section) return;
+    const page = PAGES.find(item => item.section === section.id);
+    if (page) showPage(page.name);
+  }, true);
+  syncPages();
   function message(text, error = false) { status.textContent = text; status.dataset.error = String(error); }
   async function request(method, body) {
     const response = await fetch('/standalone-ai/settings', {
@@ -261,6 +339,7 @@ export const settingsScript = `
     }
     // 开着开关才有状态可看；刚关着时视图是 null，这一节只留开关
     get('cultivation-settings').hidden = false;
+    syncPages();
     const view = await response.json();
     if (view) renderCultivation(view);
   }
@@ -440,12 +519,12 @@ export const settingsScript = `
   if (!token) { message('请从桌宠菜单或本机启动器打开设置，以获得本次运行的访问凭据。', true); return; }
   request('GET').then(data => { populate(data); save.disabled = false; message('设置只在本机保存。'); })
     .catch(error => message(error.message, true));
-  appRequest('GET').then(data => { if (data) { populateApp(data); for (const section of appSections) section.hidden = false; appAvailable = true; } })
+  appRequest('GET').then(data => { if (data) { populateApp(data); for (const section of appSections) section.hidden = false; appAvailable = true; syncPages(); } })
     .catch(error => message(error.message, true));
-  neighborsRequest('GET').then(data => { if (data) { renderNeighbors(data); get('neighbors-settings').hidden = false; } })
+  neighborsRequest('GET').then(data => { if (data) { renderNeighbors(data); get('neighbors-settings').hidden = false; syncPages(); } })
     .catch(error => message(error.message, true));
   loadCultivation().catch(error => message(error.message, true));
-  petRequest('GET').then(data => { if (data && populatePet(data)) get('pet-settings').hidden = false; })
+  petRequest('GET').then(data => { if (data && populatePet(data)) { get('pet-settings').hidden = false; syncPages(); } })
     .catch(error => message(error.message, true));
 })();
 `;

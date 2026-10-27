@@ -1614,7 +1614,7 @@ class PetSprite {
   onClick(e) {
     const d = this.dragState;
     if (d.active || d.dragging || this.justDragged) return;
-    // Ctrl（macOS 为 Cmd）+ 左键 = 呼出 DSH：与右键菜单「打开网站 / 打开软件」同一动作
+    // Ctrl（macOS 为 Cmd）+ 左键 = 呼出 DSH：与右键菜单「设置」同一动作
     //（open-site），只是它的快捷键——不播点击动画、也不参与积分，避免"摸一下宠物"变成"开窗口"。
     if (isOpenShortcut(e)) {
       this.stopThrow();
@@ -1671,11 +1671,11 @@ class PetSprite {
     e.preventDefault();
     this.stopThrow(); // 菜单弹出前停住飞行中的宠物
     this.stopMove(); // 菜单悬停期间宠物不漫游
-    // 桌面专属工具根项（打开网站 / 对话 / 回到初始位置 / 重载配置）+ 共享菜单树（动作→分类→具体动画）
-    // 首项文案随宿主形态变（OPEN_TARGET）：宿主是 DSH 桌面应用时点是"唤起桌面应用窗口"，仍叫「打开网站」会误导
+    // 桌面专属工具根项（设置 / 对话 / 回到初始位置 / 重载配置）+ 共享菜单树（动作→分类→具体动画）
+    // 首项统一叫「设置」：点了打开本机设置页；两个宿主形态共用这一个文案，去向仍由 OPEN_TARGET 决定（见 main.js）
     const tools = [
       {
-        label: OPEN_TARGET === 'desktop' ? '打开软件' : '打开网站',
+        label: OPEN_TARGET === 'desktop' ? '设置' : '设置',
         action: 'open-site',
         hint: OPEN_SHORTCUT_HINT,
       },
