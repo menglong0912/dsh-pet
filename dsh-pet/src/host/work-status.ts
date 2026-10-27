@@ -186,7 +186,7 @@ export function pickDisplayed(entries: Iterable<SessionWorkEntry>): SessionWorkE
  * 展示时 state 与 task 取自**同一个** best 会话，因此也不会再出现"A 会话的状态配 B 会话的文案"。
  */
 export class WorkStatusStore {
-  // 类字段一律 `declare` + 构造器赋值（与 HelperProcess 同一约定）：带初始化器的类字段在 target
+  // 类字段一律 `declare` + 构造器赋值（与 PollStateStore 同一约定）：带初始化器的类字段在 target
   // es2020 下要被降级，rolldown 会为此产出
   // `import _defineProperty from "@oxc-project/runtime/helpers/defineProperty"`——该包不在本包
   // dependencies 里，漏打会 ERR_MODULE_NOT_FOUND。构建目标已提到 es2022，保留这个写法。

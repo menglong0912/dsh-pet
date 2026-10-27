@@ -1,27 +1,25 @@
 /**
  * dsh-pet 宿主半侧（host half）—— 宠物插件的"后端"部分
  *
- * 职责：提供 `/dsh-pet-7340/` 前缀的**业务能力**（handlePetRoute 纯函数，路由与桌面管道共用）。
+ * 职责：提供 `/dsh-pet-7340/` 前缀的**业务能力**（handlePetRoute 纯函数）。
  * 全部配置（内置默认 + 用户主配置 + 文件宠物）由 ./config 的 readAllConfig 统一读取合并，
  * 本文件只消费它的返回值（绝对正确、零校验），不再接触任何配置文件。
  *
- * 两个入口消费同一份 handlePetRoute：
- *   - HTTP 路由：注册在 DSH WebServer 上（浏览器 overlay / 设置页 / 斜杠命令用）
- *   - 桌面 Helper 管道：helper-process.ts 的 bridgeHandler（DSH_PET_BRIDGE=1 时经
- *     dsh-pet-bridge:// scheme + stdout JSON 行 + 本地回调，**不走 HTTP**——
- *     DSH Desktop 2.0.3+ 的浏览器访问闸门会拦插件子进程的裸 HTTP 请求）
- * 两端行为严格一致（硬契约：浏览器/桌面功能/文案/配置完全对齐）。
+ * 消费同一份 handlePetRoute 的两个入口：
+ *   - HTTP 路由：注册在宿主 WebServer 上（桌面窗口 / 设置页 / 斜杠命令用）
+ *   - 独立应用：src/app/main.ts 在同一个进程里直接调用（不再 spawn helper、也没有 bridge 管道）
+ * 两端行为严格一致（硬契约：桌面功能/文案/配置完全对齐）。
  *
  * 路由：
  *   /dsh-pet-7340/config             → 合并后的**成品配置**（{ main:{...}, test1:{...}, ... }，
- *                                每条目字段已填满；浏览器/桌面/设置页的唯一配置入口）
+ *                                每条目字段已填满；桌面/设置页的唯一配置入口）
  *                                GET 读取成品；PUT 保存用户层（白名单重建 main-config.jsonc）、
  *                                POST 同步用户层（把内置默认 config.jsonc **原文**整份写入，
  *                                含注释与全部高级字段；合并结果与「没有用户层」等价）——
  *                                两个写接口的**响应体都是保存后的成品聚合**，设置页即时生效
  *                                直接拍平这份响应，客户端不再有第二份"补吹条目级字段"的实现
- *   /dsh-pet-7340/reload              → 桌面端「重载配置」（右键菜单，POST）：重启桌面 Helper，全部桌面
- *                                宠物窗口按最新配置重建（改配置文件后不必回设置页点保存）；与保存走
+ *   /dsh-pet-7340/reload              → 桌面端「重载配置」（右键菜单，POST）：通知应用按最新配置
+ *                                整体重启（改配置文件后不必回设置页点保存）；与保存走
  *                                **同一条**重启路径（syncDesktop），宠物数量/size 变化同样生效
  *   /dsh-pet-7340/config/meta         → 配置文件与素材目录路径 + 全部存储位置清单
  *                                       （设置页「高级配置」「卸载与存储」展示用）
@@ -144,19 +142,11 @@ import {
 import { profileNameFrom, storageEntries } from './storage-paths';
 import { parseStateWaitQuery, PollStateStore } from './state';
 import { composeSystemPrompt, petPersona } from './persona';
-import {
-  HelperProcess,
-  defaultElectronExe,
-  dshHomeDir,
-  electronLandingDir,
-  ensureElectronDownload,
-  hasGraphicalDisplay,
-  resolveElectronPath,
-} from './helper-process';
+import { electronLandingDir } from './paths';
 
 /** 插件名（宿主上下文里注册用） */
 export const name = 'pet';
-/** 需要注入的服务：webServer（路由）+ agentDefaultModel（当前对话模型）+ llm（对话模型调用）+ commands（斜杠命令）+ connection（桌面 Helper「打开网站」用的已鉴权站点 URL） */
+/** 需要注入的服务：webServer（路由）+ agentDefaultModel（当前对话模型）+ llm（对话模型调用）+ commands（斜杠命令）+ connection（已鉴权的本机设置页 URL） */
 export const inject = ['webServer', 'agentDefaultModel', 'llm', 'commands', 'connection'];
 
 /** 本包目录：宿主构建产物位于 lib/，其上一级即包根。 */
@@ -170,15 +160,6 @@ const PACKAGE_MEMES_DIR = join(PACKAGE_ROOT_ASSETS, 'memes');
 
 /** 路由前缀 */
 const ROUTE_PREFIX = '/dsh-pet-7340';
-
-/**
- * 宿主是不是 **DSH 桌面应用**（Electron 宿主）。
- *
- * 判据只用 `process.versions.electron`：桌面应用以 `ELECTRON_RUN_AS_NODE=1` 跑宿主（见 dsh.cmd），
- * 该字段照样在；而 `dsh web` / 独立模式都是纯 Node 进程，取不到它。据此把「打开网站」自动分派：
- * 桌面宿主 → 唤起桌面应用窗口（helper 走 `dsh://open`），其余 → 浏览器打开站点。
- */
-const isDesktopHost = (): boolean => Boolean(process.versions.electron);
 
 /** 不同扩展名对应的 Content-Type 映射 */
 const MIME: Record<string, string> = {
@@ -265,7 +246,7 @@ function sendText(res: ServerResponse, status: number, body: string): void {
   res.end(body);
 }
 
-/** 单次业务路由的应答（WebServer 注册与桌面 Helper 管道共用的同一契约；消费方各自落盘） */
+/** 单次业务路由的应答（HTTP 路由与独立应用同进程调用共用的同一契约；消费方各自落盘） */
 type RouteResult =
   | { kind: 'json'; status: number; obj: unknown; headers?: Record<string, string> }
   | { kind: 'text'; status: number; body: string }
@@ -404,37 +385,6 @@ export function apply(ctx: any): void {
     publishedState = snap.state;
     publishedWorkAt = Date.now();
     state.writeSection('workStatus', { state: snap.state, task: snap.task });
-  };
-  /** Electron 下载日志的收尾槽位保留时长（ms）：够看清「就绪 / 失败」，又不让这条日志一直盖住
-   *  随后真实的工作状态（终态档在渲染端本来也会 10s 自动收起气泡）。 */
-  const DOWNLOAD_SLOT_CLEAR_MS = 12 * 1000;
-  let downloadSlotTimer: ReturnType<typeof setTimeout> | null = null;
-  /**
-   * 写一条 Electron 下载日志进工作状态（前端当普通工作状态消费，**不改 /state 的 JSON 形状**）：
-   * 桌面版用户没有控制台，这是他们唯一能看到「后台在下什么」的地方。
-   *
-   * 借外部写入槽 `api`（与 `POST /work-status` 同一个槽位）：不新增 section、不新增槽位常量。
-   * 三个必须照做的细节：
-   *   1. **先 setState 再 setTask**——`setTask` 在条目不存在时直接返回 false，文本会被吞掉；
-   *   2. `seq` 必须递增——`setState` 在「同档位且 seq 不更新」时短路，而下载大部分时间都停在
-   *      `working` 一档，不推进 seq 就什么都不会发生；
-   *   3. 文案按 TASK_TEXT_MAX 截断（与 currentTaskFromTodo 同口径），否则气泡会被撑爆。
-   * `terminal` = 这次是收尾（就绪 / 失败）：留一小会儿再清槽，让用户看得见。
-   */
-  const reportDownload = (text: string, state: HostWorkStatusState, terminal = false): void => {
-    const points = Array.from(text);
-    const task = points.length > TASK_TEXT_MAX ? `${points.slice(0, TASK_TEXT_MAX).join('')}…` : text;
-    externalWorkSeq += 1;
-    workStatus.setState(EXTERNAL_WORK_SESSION, state, externalWorkSeq);
-    workStatus.setTask(EXTERNAL_WORK_SESSION, task);
-    publishWorkStatus();
-    if (!terminal) return;
-    if (downloadSlotTimer !== null) clearTimeout(downloadSlotTimer);
-    downloadSlotTimer = setTimeout(() => {
-      downloadSlotTimer = null;
-      if (workStatus.clear(EXTERNAL_WORK_SESSION)) publishWorkStatus();
-    }, DOWNLOAD_SLOT_CLEAR_MS);
-    downloadSlotTimer.unref?.(); // 别把这个定时器钉进宿主的事件循环（退出时不该等它）
   };
   // 占用锁（issue #122 第 4 项「独立动作/气泡占用」）：**内存态**一把锁 + TTL，第三方联动期间
   // 独占这只宠物——除持锁者外谁都动不了它（随机链、碎碎念、工作状态一概让路）。
@@ -818,259 +768,19 @@ export function apply(ctx: any): void {
     return n || String(pet.id ?? '');
   };
 
-  let hasDesktopPet = false;
   /**
-   * 桌面模式是否**曾经**成功启动过（粘性，仅本插件生命周期内有效）。
-   * 把「没有宠物就不启动」放宽成「从来没有过宠物才不启动」：配置被清空、宠物被删光之后，
-   * Helper 仍会带着空宠物列表重启并常驻——只为了把托盘（开机自启 / 退出）留着，
-   * Helper 一退它就没了。
-   * 但它只在托盘还开着时才值得：`trayEnabled` 为 false 时没人需要那个图标，常驻就只是空进程
-   * （0 窗口 / 0 托盘 / 0 Dock），于是判据收紧成 `desktopModeEverActive && trayOn`。
-   * 从未启动过（全新安装、配置里一只宠物都没有）不受影响：照旧不探测、不下载、不拉起 Electron。
-   */
-  let desktopModeEverActive = false;
-  /**
-   * 系统托盘是否开启（main 条目的 trayEnabled，缺失按开）。与 hasDesktopPet 同一次读盘取得——
-   * 它们在同一个判据里一起用，分两次读只会多解析一遍配置。
-   */
-  let trayOn = true;
-  const refreshDesktop = (): void => {
-    hasDesktopPet = false;
-    try {
-      const merged = readAllConfig(configPaths);
-      const pets = flattenPetList(merged);
-      hasDesktopPet = pets.length > 0;
-      trayOn = merged.main?.trayEnabled !== false;
-      // 托盘开关只在这一行里可见：加了它之后「为什么没有托盘/为什么留着空进程」都靠这里看。
-      ctx.logger?.info?.(`[dsh-pet] 桌面判定：pets=${pets.length} → hasDesktopPet=${hasDesktopPet} tray=${trayOn}`);
-    } catch (e) {
-      ctx.logger?.warn?.(`[dsh-pet] 宠物配置非法，桌面模式已跳过：${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-  refreshDesktop();
-
-  /** 宠物列表（[{id,size}]）：全部宠物都显示在桌面上，透传 Helper 决定创建几个局部窗口（每宠物一个）。 */
-  const desktopPetList = (): Array<{ id: string; size: number }> => {
-    try {
-      return effectivePetList().map((p) => ({ id: String(p.id), size: Number(p.size) }));
-    } catch {
-      return [];
-    }
-  };
-
-  let helper: HelperProcess | undefined;
-  let startRetryTimer: NodeJS.Timeout | undefined;
-  let electronEnsure: Promise<void> | undefined;
-  let disposed = false;
-  /** 「无图形环境」提示只在进程生命周期内打一次，避免守护循环刷屏 */
-  let displayWarned = false;
-  /** 「没有宠物 → 跳过」的 info 只打一次：空配置每次启动都会走这条短路，不该刷屏 */
-  let noDesktopSkipped = false;
-  /** webServer 端口等待次数：只用于日志节流，不改变重试行为 */
-  let portWaitAttempts = 0;
-  /**
-   * 宿主即应用（`src/app/main.ts`）：本进程**自己就是** Electron 主进程，窗口由它直接建。
+   * 宠物配置（数量 / size / 托盘开关等）变更后：交给独立应用整体重启。
    *
-   * 这时两条旧路径都必须短路，而且缺一不可：
-   *   - `launchHelper` —— 否则会 spawn 第二个 electron.exe（同一个 exe 自我复制，用户看到两只宠物）；
-   *   - `startHelper`  —— 否则即使拦下 spawn，仍会走 `ensureElectronDownload()`，在用户机器上白下
-   *     一整套 Electron（实测 347 MB），双击启动变成一次大下载。
-   *
-   * 用环境变量而不是 ctx 服务：`apply()` 的 ctx 契约已经够大，不想为一个布尔再撑一次。
-   */
-  const inProcessHost = process.env.DSH_PET_IN_PROCESS === '1';
-
-  /** 用已确认存在的 Electron 路径拉起桌面 Helper（每只桌面宠物一个局部小窗口）。 */
-  const launchHelper = (electronPath: string | undefined): void => {
-    if (inProcessHost) return; // 应用模式：窗口由本进程建，绝不 spawn
-    if (helper || disposed) return;
-    // 配置里没有宠物时：只有「桌面模式曾启用过**且**托盘还开着」才值得为托盘常驻，否则不启动
-    if (!hasDesktopPet && !(desktopModeEverActive && trayOn)) return;
-    const port = typeof ctx.webServer?.port === 'number' ? ctx.webServer.port : 0;
-    if (!port || port <= 0) {
-      // webServer 可能尚未完成监听（OS 分配端口时 port 短暂为 0）：延迟重试。
-      // 诊断日志（issue #168）：这条重试以前完全静默——端口长期不就绪时，桌面宠物
-      // 「连尝试都没有」且没有任何线索。这里只加可见性，重试节奏与次数保持原样。
-      portWaitAttempts += 1;
-      if (portWaitAttempts === 1) {
-        ctx.logger?.info?.(`[dsh-pet] webServer 端口尚未就绪（port=${String(port)}），每 500ms 重试拉起桌面 Helper`);
-      } else if (portWaitAttempts % 20 === 0) {
-        ctx.logger?.warn?.(
-          `[dsh-pet] 已等待 webServer 端口 ${(portWaitAttempts * 500) / 1000}s 仍未就绪` +
-            `（port=${String(port)}），桌面 Helper 尚未拉起`,
-        );
-      }
-      if (!startRetryTimer) {
-        startRetryTimer = setTimeout(() => {
-          startRetryTimer = undefined;
-          launchHelper(electronPath);
-        }, 500);
-        startRetryTimer.unref?.();
-      }
-      return;
-    }
-    portWaitAttempts = 0;
-    const origin = `http://127.0.0.1:${port}`;
-    // 右键「打开网站」交出去的是裸 origin：DSH 只在 `GET /` 接受本进程的启动令牌，换发绑定 authority 的
-    // 签名 Cookie，其余请求一律 401 —— 默认浏览器没有该 authority 的 Cookie 时必然打不开（#87）。
-    // 令牌等价登录态：只经子进程环境变量递到 helper 内存，不落盘、不进日志；authority 必须保持
-    // 127.0.0.1（与 localhost 算两套 Cookie），故这里传 origin 而不是另拼地址。
-    const siteUrl = ctx.connection.authenticatedUrl(origin);
-    // 桌面渲染端也从同一份 handlePetRoute 拿成品配置（每只宠物一个局部小窗口；经管道，不走 HTTP——
-    // DSH Desktop 2.0.3+ 会拦插件自拉进程的裸 HTTP 请求，浏览器访问闸门只放行带令牌的请求）
-    const configUrl = `${origin}${ROUTE_PREFIX}/config`;
-    helper = new HelperProcess(
-      {
-        electronPath,
-        env: {
-          DSH_PET_CONFIG_URL: configUrl,
-          // 已鉴权站点 URL（含本进程启动令牌）：只供 helper 的「打开网站」使用，任何日志都不许出现它
-          DSH_PET_SITE_URL: siteUrl,
-          // 宿主形态决定工具项「打开网站」的去向（同名菜单项，两端两种语义）：
-          //   desktop = 宿主是 DSH 桌面应用 → 唤起桌面应用主窗口（helper 走 dsh://open，见 main.js）
-          //   site    = dsh web / 独立模式 → 系统默认浏览器打开站点（原行为，别破坏）
-          DSH_PET_OPEN_TARGET: isDesktopHost() ? 'desktop' : 'site',
-          DSH_PET_SCALE: '1',
-          // 打开 bridge 协议：main.js 注册 dsh-pet-bridge scheme，把渲染端请求经管道转给宿主
-          DSH_PET_BRIDGE: '1',
-          // 每只桌面宠物一个局部小窗口：透传宠物列表（[{id,size}]）
-          DSH_PET_PETS: JSON.stringify(desktopPetList()),
-        },
-        // bridge 协议处理器 = HTTP 路由同一份 handlePetRoute（业务逻辑唯一，两端天然一致）；
-        // 素材过文件路径（main.js 自行读盘），json/text 过 body
-        bridgeHandler: async (req) => {
-          const result = await handlePetRoute(req.url ?? '/', req.method ?? 'GET', req.body);
-          if (result.kind === 'file') {
-            // file 分支恒 200（404/400 已由 text 分支表达）
-            return { id: req.id, status: 200, contentType: result.contentType, file: result.file };
-          }
-          if (result.kind === 'text') {
-            return { id: req.id, status: result.status, contentType: 'text/plain; charset=utf-8', body: result.body };
-          }
-          if (result.kind === 'none') {
-            // 无需应答：管道侧不传 abort signal，正常到不了这里；保底给个空 204
-            return { id: req.id, status: 204, contentType: 'text/plain; charset=utf-8', body: '' };
-          }
-          return {
-            id: req.id,
-            status: result.status,
-            contentType: 'application/json; charset=utf-8',
-            body: JSON.stringify(result.obj),
-          };
-        },
-      },
-      ctx.logger ?? console,
-    );
-    try {
-      helper.start();
-      desktopModeEverActive = true; // 此后即使桌面宠物清零也保留 Helper：托盘常驻，可随时切回来
-      ctx.logger?.info?.(`dsh-pet desktop helper started (config: ${configUrl})`);
-    } catch (e) {
-      ctx.logger?.warn?.(`dsh-pet desktop helper start failed: ${e instanceof Error ? e.message : String(e)}`);
-      helper = undefined;
-    }
-  };
-
-  /** 拉起桌面 Helper：先探测本机 Electron；缺失时进程内异步下载
-   *  （不 spawn 子进程，CLI node 与 DSH Desktop 均适用），下载完成后自动拉起。 */
-  const startHelper = (): void => {
-    if (inProcessHost) return; // 应用模式：不探测、不下载 Electron
-    if (helper || electronEnsure || disposed) return;
-    if (!hasDesktopPet && !(desktopModeEverActive && trayOn)) {
-      // 诊断日志（issue #168）：这条短路以前完全静默，是「桌面模式凭空消失：无进程、无目录、
-      // 无提示」的直接成因。用 info 而非 warn——配置里没有宠物是正常状态；只打一次避免刷屏。
-      // 托盘关掉后这里也会命中：没人需要那个图标，空常驻没有意义（见 desktopModeEverActive 注释）。
-      if (!noDesktopSkipped) {
-        noDesktopSkipped = true;
-        ctx.logger?.info?.(`[dsh-pet] 配置里没有宠物且无需保留托盘（tray=${trayOn}），已跳过桌面 Helper 启动`);
-      }
-      return;
-    }
-    // 无图形显示环境（Linux 服务器 / 容器）：直接放弃，不探测、不下载、不拉起。
-    // 否则 Electron 会「拉起即崩」，被守护循环反复重启并刷满 core dump。
-    if (!hasGraphicalDisplay()) {
-      if (!displayWarned) {
-        displayWarned = true;
-        ctx.logger?.warn?.(
-          '[dsh-pet] 未检测到图形显示环境（DISPLAY/WAYLAND_DISPLAY 均为空），已跳过桌面宠物。' +
-            '浏览器内宠物不受影响；如需在服务器上启用桌面模式，请配置 Xvfb 后设置 DSH_PET_DESKTOP_FORCE=1。',
-        );
-      }
-      return;
-    }
-    const found = resolveElectronPath();
-    if (found) {
-      launchHelper(found);
-      return;
-    }
-    // 诊断日志（issue #168）：只报「没找到」不够用——最常见的情形是「文件明明存在」，
-    // 但不在实际查询的路径上（DSH_HOME 不一致）。把真正查的路径一起打出来。
-    ctx.logger?.warn?.(
-      `[dsh-pet] 未找到 Electron 可执行文件：DSH_HOME=${dshHomeDir()}，查找路径=${defaultElectronExe()}` +
-        `，DSH_PET_ELECTRON_PATH=${process.env.DSH_PET_ELECTRON_PATH ?? '(未设置)'}`,
-    );
-    ctx.logger?.warn?.(`[dsh-pet] 开始下载 Electron 到 ${defaultElectronExe()} ...`);
-    electronEnsure = ensureElectronDownload({
-      // 下载全过程写进工作状态气泡（用户没有控制台，只能靠它看进度与失败原因）
-      onLog: ({ text, level, done }) =>
-        reportDownload(text, level === 'warn' ? 'error' : done ? 'success' : 'working', done),
-    })
-      .then((path) => {
-        if (path) {
-          launchHelper(path);
-        } else {
-          ctx.logger?.warn?.(
-            '[dsh-pet] Electron download failed; desktop pet unavailable. Set DSH_PET_ELECTRON_PATH and restart, or retry later.',
-          );
-        }
-      })
-      .finally(() => {
-        electronEnsure = undefined;
-      });
-  };
-
-  /** 停止桌面 Helper（保留配置，可再次拉起）。宿主退出/插件卸载路径：不等它退干净（见 stopAndWait）。 */
-  const stopHelper = (reason = 'settings-change'): void => {
-    if (startRetryTimer) {
-      clearTimeout(startRetryTimer);
-      startRetryTimer = undefined;
-    }
-    helper?.stop(reason);
-    helper = undefined;
-  };
-
-  /** 停止并**等旧 helper 真正退出**：配置变更触发的"停旧起新"专用（issue #64）。 */
-  const stopHelperAndWait = async (reason: string): Promise<void> => {
-    if (startRetryTimer) {
-      clearTimeout(startRetryTimer);
-      startRetryTimer = undefined;
-    }
-    const old = helper;
-    helper = undefined;
-    await old?.stopAndWait(reason);
-  };
-
-  /**
-   * 宠物配置（数量 / size 等）变更后：重解析桌面宠物，**等旧 helper 退出**再拉起新的。
-   *
-   * 为什么要等（issue #64）：Electron 收到 SIGTERM 后关窗是异步的（几百 ms 起），"发完 kill 就 spawn
-   * 新进程"会让旧窗口（旧大小）与新窗口（新大小）短暂共存——用户看到的就是"改完大小冒出来第二只宠物"。
-   * 为什么要串行：连续保存会触发多次重启，两次重启交错同样会同时拉起两个 helper，所以用队列串起来。
-   * 队列自身绝不留下 rejected 状态，否则后续保存再也不会重启 helper。
+   * 没有 Helper 可重启：窗口与托盘是应用启动时建的，由 src/app/main.ts 挂在 ctx 上的钩子
+   * 决定是否整体重启。连续保存会触发多次，所以用队列串起来；队列自身绝不留下 rejected 状态，
+   * 否则后续保存再也不会触发重启。
    */
   let desktopSyncQueue: Promise<void> = Promise.resolve();
   const syncDesktop = (): Promise<void> => {
     desktopSyncQueue = desktopSyncQueue
-      .then(async () => {
-        refreshDesktop();
-        // 独立应用（宿主即应用）没有 Helper 可重启：窗口与托盘是启动时建的，交给应用挂在 ctx 上的钩子
-        // 决定是否整体重启（src/app/main.ts）；DSH 内没有这个钩子
-        if (inProcessHost) return (ctx as { dshPetAppDesktopChanged?: () => void }).dshPetAppDesktopChanged?.();
-        await stopHelperAndWait('desktop-config-change');
-        startHelper();
-      })
+      .then(() => (ctx as { dshPetAppDesktopChanged?: () => void }).dshPetAppDesktopChanged?.())
       .catch((e: unknown) => {
-        ctx.logger?.warn?.(`[dsh-pet] 重启桌面 Helper 失败：${e instanceof Error ? e.message : String(e)}`);
+        ctx.logger?.warn?.(`[dsh-pet] 应用桌面配置变更处理失败：${e instanceof Error ? e.message : String(e)}`);
       });
     return desktopSyncQueue;
   };
@@ -1084,11 +794,11 @@ export function apply(ctx: any): void {
   /** 用户动画根：按扩展名取子目录（main-animation/webm 或 main-animation/mov）。 */
   const userRootFor = (ext: string): string => join(thumbUserRoot, animSubdirFor(ext));
 
-  /** 单次业务路由(WebServer 注册 → HTTP 落盘 / 桌面 Helper 管道 → scheme 应答,共用同一份实现):
+  /** 单次业务路由(WebServer 注册 → HTTP 落盘 / 应用内直接调用,共用同一份实现):
    *  输入只需 rawUrl(/dsh-pet-7340/... + 查询) + method + body 文本;返回 RouteResult(JSON/文本/文件),
-   *  消费方各自落盘——业务逻辑只有一份,两端天然一致(硬契约:浏览器/桌面行为严格对齐)。
+   *  消费方各自落盘——业务逻辑只有一份,两端天然一致(硬契约:桌面/设置页行为严格对齐)。
    *  signal（可选）：调用方断开时**中止挂起等待**（只有 /playback 的 wait 分支会用到）。
-   *  管道侧不传——桌面渲染端不查 /playback；HTTP 侧由注册处按 res 的 close 触发。 */
+   *  HTTP 侧由注册处按 res 的 close 触发。 */
   const handlePetRoute = async (
     rawUrl: string,
     method: string,
@@ -1148,7 +858,7 @@ export function apply(ctx: any): void {
           }
           await mkdir(userRoot, { recursive: true });
           await writeFile(userConfigPath, JSON.stringify(clean, null, 2), 'utf8');
-          void syncDesktop(); // 宠物数量/size 等可能变化：重解析桌面宠物并重启 Helper（异步，不阻塞保存响应）
+          void syncDesktop(); // 宠物数量/size 等可能变化：通知应用整体重启（异步，不阻塞保存响应）
           // 响应体 = 保存后的**成品聚合**（与 GET /config 同一份，字段已填满）：
           // 设置页把它直接交给容器的 flattenConfigPets 拍平渲染——客户端的条目级字段
           // （动画池/权重/物理参数/工作状态文案）只有这一处填充，不再有第二份补吹实现。
@@ -1167,17 +877,16 @@ export function apply(ctx: any): void {
           // 默认文件缺失 / 用户目录不可写：显式 500，绝不静默留下半个配置文件
           return { kind: 'json', status: 500, obj: { error: e instanceof Error ? e.message : String(e) } };
         }
-        void syncDesktop(); // 配置变了：重解析桌面宠物并重启 Helper（异步，不阻塞响应）
+        void syncDesktop(); // 配置变了：通知应用整体重启（异步，不阻塞响应）
         return { kind: 'json', status: 200, obj: readAllConfig(configPaths) };
       }
       return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
     }
 
-    // 桌面端「重载配置」（右键菜单 → POST /reload）：重启桌面 Helper，全部桌面宠物窗口按最新配置重建。
-    // 与保存走**同一条**重启路径（syncDesktop：串行队列 + 等旧进程真正退出再起新的），
-    // 所以宠物数量 / size 的变化同样生效——渲染端就地重拉配置做不到这几项
-    // （每只宠物一个窗口，是宿主启动时按 DSH_PET_PETS 建的）。
-    // 注意：发起者就是**即将被重启的那个 helper**，本响应不保证送达，因此不 await 重启、立刻回 200。
+    // 桌面端「重载配置」（右键菜单 → POST /reload）：通知应用按最新配置整体重启。
+    // 与保存走**同一条**重启路径（syncDesktop），所以宠物数量 / size 的变化同样生效——
+    // 渲染端就地重拉配置做不到这几项（每只宠物一个窗口，是应用启动时按 DSH_PET_PETS 建的）。
+    // 注意：响应发出后应用才重启，这里不 await 重启、立刻回 200。
     if (rest === 'reload') {
       if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
       void syncDesktop();
@@ -1216,7 +925,7 @@ export function apply(ctx: any): void {
     // 业务失败一律 200 + { ok:false, reason, message }（与 /anim、/lock 等同口径）；
     // 400 只留给「JSON 坏了」，405 只留给方法错。
     // 注册表在进程内存（./menu），快照写进 S 的 sections.menu：两端右键菜单据此拼「更多」，
-    // 因此注册后**不用重启桌面 Helper**，下一拍 /state 就到了（长轮询下几乎是立即）。
+    // 因此注册后**不用重启应用**，下一拍 /state 就到了（长轮询下几乎是立即）。
     if (rest === 'menu/item') {
       if (method === 'DELETE') {
         const result = menuRegistry.clear(url.searchParams.get('owner') ?? '');
@@ -2350,28 +2059,18 @@ export function apply(ctx: any): void {
   // agent/error 生成通知帧入队，浏览器轮询 /notify 拉取弹 toast（DSH 0.1.5 删除了浏览器侧
   // api.events.mux/host 事件流，通知与宠物一样改走 host 通道，两端行为一致）。
 
-  // 随插件生命周期清理：桌面 Helper 回收（异步下载完成后不再拉起）+ **结束所有挂起的等待**
+  // 随插件生命周期清理：**结束所有挂起的等待**
   // （回执的与 /state 长轮询的都不结束的话，插件重载会留下一批悬挂的响应，各自要等到超时才收尾）
   ctx.effect(() => () => {
-    disposed = true;
     // 工作状态的补写定时器：卸载后它到点已经没有意义（叶子连同长轮询一起收尾），清掉免得挂着
     if (workFlushTimer !== null) {
       clearTimeout(workFlushTimer);
       workFlushTimer = null;
-    }
-    // 下载日志的「清槽」定时器：同上，卸载后它到点已经没有意义
-    if (downloadSlotTimer !== null) {
-      clearTimeout(downloadSlotTimer);
-      downloadSlotTimer = null;
     }
     // 占用锁：卸载时把锁全撤掉并写一次叶子——不写的话渲染端要等 TTL 到点才解除静止
     // （写叶子必须在 state.cancelAll() **之前**：那之后挂起的等待者已经收尾了）。
     lock.releaseAll();
     playback.cancelAll();
     state.cancelAll();
-    stopHelper('dsh-host-stop');
   });
-
-  // 路由就绪后拉起桌面 Helper（Electron 缺失时仅告警，不影响 DSH 与浏览器 overlay）
-  startHelper();
 }

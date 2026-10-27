@@ -5,7 +5,7 @@
  *
  *   1) 直接吃真实写入方给的路径（零重复，不存在漂移）：
  *      - 用户数据    ← 调用方传 index.ts 的 userRoot（拼 'dsh-pet' 的地方只有那一处）
- *      - Electron    ← 调用方传 helper-process.ts 的 electronLandingDir()（下载方的唯一定义）
+ *      - Electron    ← 调用方传 paths.ts 的 electronLandingDir()（路径的唯一定义，旧版下载目录）
  *
  *   2) 系统规则，本模块按平台镜像一份（写入方不是本仓库的代码，无法调用）：
  *      - 桌面端 userData  ← Electron 的 app.getPath('userData')
@@ -46,7 +46,7 @@ export interface StoragePathInput {
    * 本模块不自己拼 'dsh-pet'（拼一遍就多一处会漂移的硬编码）。
    */
   userDataRoot: string;
-  /** Electron 运行时落地目录 —— 传 helper-process.ts 的 electronLandingDir()（下载方的唯一定义） */
+  /** Electron 运行时落地目录 —— 传 paths.ts 的 electronLandingDir()（旧版下载目录，路径唯一定义） */
   electronDir: string;
   /** 用户主目录（系统级基准目录的兜底） */
   home: string;

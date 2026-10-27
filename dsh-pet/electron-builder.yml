@@ -1,8 +1,8 @@
 # electron-builder 配置 —— 把「单进程桌宠」打成双击可运行的 Windows 应用。
 #
 # 关键取舍：
-#   1. 不带 node_modules：`lib/app.js` 已把 zod 打进来，其余外部只有 `electron` 与两个
-#      永不执行的动态 import（@electron/get、@electron-internal/extract-zip，见 tsdown.config.mjs）。
+#   1. 不带 node_modules：`lib/app.js` 已把 zod / openai / @anthropic-ai/sdk 打进来，
+#      其余外部只有 `electron`（见 tsdown.config.mjs 与 dist.mjs 的 assertSelfContained）。
 #   2. electronDist 指向 node_modules/electron/dist（pnpm install 时下载好的那份），由 scripts/dist.mjs 注入，
 #      避免每次打包都从 GitHub 重新下一套 110 MB —— 这台机器 github.com 不通。
 #   3. asar 打开：素材（webm 51 MB）留在包内由主进程 fs 读取；没有原生模块需要 unpack。

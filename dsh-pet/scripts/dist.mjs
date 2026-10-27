@@ -135,12 +135,12 @@ function resignMacDesignatedRequirement() {
 }
 
 /**
- * 产物不带 node_modules，所以 lib/app.js 静态引用的裸包只能是 Electron 自带的那几个。
+ * 产物不带 node_modules，所以 lib/app.js 静态引用的裸包只能是 Electron 自带的那一个。
  * 漏打包的依赖在仓库里跑看不出来（解析会向上找到仓库的 node_modules），装到别处才崩——在这里拦住。
  */
 function assertSelfContained() {
   const code = readFileSync(join(root, 'lib', 'app.js'), 'utf8');
-  const allowed = /^(?:electron|@electron\/.+|@electron-internal\/.+|node:.+)$/;
+  const allowed = /^(?:electron|node:.+)$/;
   const specifiers = [...code.matchAll(/^import\s[^;]*?from\s+["']([^"'./][^"']*)["']/gm)].map((m) => m[1]);
   const missing = [...new Set(specifiers.filter((s) => !allowed.test(s)))];
   if (missing.length) {

@@ -2,7 +2,7 @@
  * 独立模式的伪 Cordis 上下文 —— 让插件的**宿主半边**在 DSH 之外跑起来。
  *
  * 为什么不重写一份路由表：宿主半边（`src/host/index.ts` 的 `apply`）已经把路由表、
- * 配置聚合、状态仓、桌面 Helper 与 bridge 管道全写好了，它对外只要求一个 Cordis `ctx`。
+ * 配置聚合与状态仓全写好了，它对外只要求一个 Cordis `ctx`。
  * 仓库自己的 `src/host/routes.test.ts` 早就用同一个手法（最小 ctx + `apply`）在 DSH 之外
  * 跑这份路由；独立模式把那套手法产品化：DSH 的服务换成"明确降级"的替身，
  * `apply` 注册的 prefix handler 接到一个真正的 `node:http` 服务器上（见 `./server`）。

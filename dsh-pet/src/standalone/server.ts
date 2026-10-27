@@ -1,4 +1,4 @@
-/** Standalone loopback HTTP boundary. Desktop bridge requests never pass through this listener. */
+/** Standalone loopback HTTP boundary. Desktop UI requests never pass through this listener. */
 import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';

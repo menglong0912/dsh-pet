@@ -7,11 +7,9 @@
  *   3. 路径安全与"配置不可达"的口径经**真实 HTTP** 仍然成立（独立服务不重写 URL、不吞异常）。
  *
  * 覆盖范围的限制与 `routes.test.ts` 相同：源码形态下包根解析成 `<pkg>/src`，
- * 包内 `assets/config.jsonc` 不可达 → `readAllConfig` 必抛。因此这里不断言"成品配置"，
- * 那条路径由构建产物（`lib/standalone.js`）的端到端验证覆盖（见 README 的独立运行一节）。
+ * 包内 `assets/config.jsonc` 不可达 → `readAllConfig` 必抛。因此这里不断言"成品配置"。
  *
- * 顺序上先监听、再 `apply` —— 与 CLI 完全一致：插件的 `launchHelper` 依赖
- * `ctx.webServer.port > 0`，端口为 0 时它只会 500ms 重试一次、永不拉起桌面窗口。
+ * 顺序上先监听、再 `apply`：`ctx.webServer.port` 在注册路由时就要能读到真端口。
  */
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,7 +17,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { packageRoot } from '../host/helper-process.ts';
+import { packageRoot } from '../host/paths.ts';
 import { apply } from '../host/index.ts';
 import { createStandaloneContext, type RegisteredRoute, type StandaloneLogger } from './context.ts';
 import { configPathsFor } from './options.ts';
@@ -33,15 +31,11 @@ let base = '';
 let server: StandaloneServer | undefined;
 let context: ReturnType<typeof createStandaloneContext> | undefined;
 let savedHome: string | undefined;
-let savedElectron: string | undefined;
 
 before(async () => {
   home = mkdtempSync(join(tmpdir(), 'dsh-pet-standalone-'));
   savedHome = process.env.DSH_HOME;
-  savedElectron = process.env.DSH_PET_ELECTRON_PATH;
   process.env.DSH_HOME = home;
-  // 指向一个真实存在的可执行文件：万一走到拉起分支也不会真的下载 Electron
-  process.env.DSH_PET_ELECTRON_PATH = process.execPath;
 
   const routes: RegisteredRoute[] = [];
   const portRef = { value: 0 };
@@ -50,10 +44,10 @@ before(async () => {
     routes,
     logger: silent,
     port: 0,
-    // 与 CLI 同一个运维信息形状（这条断言顺带钉住 CLI 用的字段名）
+    // 运维信息形状（这条断言顺带钉住服务自己的字段名）
     status: () => ({ name: 'dsh-pet-standalone', plugin: { root: packageRoot } }),
   });
-  // 顺序与 CLI 完全一致：先监听拿到端口，再 apply —— 插件的 launchHelper 依赖 port > 0
+  // 先监听拿到端口，再 apply
   portRef.value = listening.port;
   apply(created.ctx);
   context = created;
@@ -62,14 +56,12 @@ before(async () => {
 });
 
 after(async () => {
-  // 释放 effect（停 Helper、清两条自续期轮询定时器）——不释放的话 node:test 跑完不退出
+  // 释放 effect（清两条自续期轮询定时器）——不释放的话 node:test 跑完不退出
   await context?.dispose().catch(() => {});
   await context?.dispose().catch(() => {}); // 幂等：重复释放不得抛错
   await server?.close().catch(() => {});
   if (savedHome === undefined) delete process.env.DSH_HOME;
   else process.env.DSH_HOME = savedHome;
-  if (savedElectron === undefined) delete process.env.DSH_PET_ELECTRON_PATH;
-  else process.env.DSH_PET_ELECTRON_PATH = savedElectron;
   rmSync(home, { recursive: true, force: true });
 });
 

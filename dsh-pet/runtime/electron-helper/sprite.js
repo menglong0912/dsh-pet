@@ -565,7 +565,7 @@ class PetSprite {
     const el = target;
     if (!el) return;
     // 素材地址两条路（POST /anim 的 url 参数）：url 形态直接用第三方给的**完整地址**——宿主已把
-    // scheme 卡在 http/https，这里**不经 bridge、也不拼 BASE**（地址本身就与本页 origin 无关）；
+    // scheme 卡在 http/https，这里**不拼 BASE**（地址本身就与本页 origin 无关）；
     // name 形态照旧按「素材根 + 名字」拼（名字即文件名）。
     el.src = url || this.assetBase + encodeURIComponent(next) + (S.ANIMATION_EXT || '.webm');
     el.playbackRate = playRate;
@@ -1222,7 +1222,7 @@ class PetSprite {
     if (e.button !== 0) return;
     // 占用锁（issue #122 第 4 项）：用户**点了或拖了**这只宠物 = 用户接管，立刻撤掉第三方占用。
     // 这是唯一一处"渲染端 → 宿主"的锁上报——宿主看不见鼠标，而锁在它手里
-    // （/lock/release 的 force 形态；桌面端走 bridge，与播放回执 reportPlayback 同一条路）。
+    // （/lock/release 的 force 形态；桌面端走本机 HTTP，与播放回执 reportPlayback 同一条路）。
     // 先本地解冻再上报：叶子回来还有一次往返，等它会让宠物"点了半天才动"；此刻 frozen 为真说明
     // 确实有锁，所以这次 force 释放必然成功，乐观是安全的。
     if (this.frozen) {
@@ -1672,10 +1672,10 @@ class PetSprite {
     this.stopThrow(); // 菜单弹出前停住飞行中的宠物
     this.stopMove(); // 菜单悬停期间宠物不漫游
     // 桌面专属工具根项（设置 / 对话 / 回到初始位置 / 重载配置）+ 共享菜单树（动作→分类→具体动画）
-    // 首项统一叫「设置」：点了打开本机设置页；两个宿主形态共用这一个文案，去向仍由 OPEN_TARGET 决定（见 main.js）
+    // 首项叫「设置」：点了打开本机设置页
     const tools = [
       {
-        label: OPEN_TARGET === 'desktop' ? '设置' : '设置',
+        label: '设置',
         action: 'open-site',
         hint: OPEN_SHORTCUT_HINT,
       },

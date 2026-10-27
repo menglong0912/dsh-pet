@@ -10,7 +10,7 @@
  * visit 扮演客人：往真 app 敲门进门（不给 --port 时，从 app.log 最后一条「串门：接待开了，端口 N」里读端口），
  *       进门后每 5 秒报一次平安，收到的事（它家宠物说话、摸一下、一起玩、请吃零食）都打印出来。
  *
- * 用法（参照 dev/mock-server.mjs；strip-types 与 test-register 的说明见 scripts/test-ts-resolver.mjs）：
+ * 用法（strip-types 与 test-register 的说明见 scripts/test-ts-resolver.mjs）：
  *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--identity <路径>|none]
  *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs listen
  *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]

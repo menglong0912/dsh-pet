@@ -1,4 +1,5 @@
-// Run after npm run build: DSH_PET_ELECTRON=/path/to/Electron npm run test:ui
+// Run after npm run build: 用 pnpm install 装好的 node_modules/electron/dist；
+// 需要时可用 DSH_PET_ELECTRON=/path/to/Electron 覆盖。
 // Uses an isolated mock host: no DSH credentials, conversations or user config are read/written.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,12 +10,13 @@ import { join, basename } from 'node:path';
 import { _electron } from 'playwright';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const executablePath = process.env.DSH_PET_ELECTRON;
+const bundledElectron = join(root, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron');
+const executablePath = process.env.DSH_PET_ELECTRON || bundledElectron;
 
 test(
   'macOS desktop: native geometry, HiDPI menu and click-through recovery',
   {
-    skip: process.platform !== 'darwin' || !executablePath,
+    skip: process.platform !== 'darwin' || !existsSync(executablePath),
     timeout: 30000,
   },
   async (t) => {
@@ -53,7 +55,6 @@ test(
     try {
       const env = {
         ...process.env,
-        DSH_PET_BRIDGE: '0',
         DSH_PET_SMOKE: '0',
         DSH_PET_CONFIG_URL: `http://127.0.0.1:${server.address().port}/dsh-pet-7340/config`,
         DSH_PET_PETS: JSON.stringify([{ id: 'main', size: 150 }]),

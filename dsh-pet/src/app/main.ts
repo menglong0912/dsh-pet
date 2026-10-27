@@ -7,21 +7,20 @@
  *   3. 桌面窗口：直接 `require` 现成的 `runtime/electron-helper/main.js`，窗口、托盘、拖拽、碰撞、
  *      DPI 补偿全部沿用桌面模式那一套，没有第二份实现。
  *
- * HTTP 面与 `dsh-pet-standalone`（CLI）保持一致，因为右键「打开 AI 设置」打开的就是这些地址：
+ * HTTP 面（右键「设置」打开的就是这些地址）：
  *   GET  /                      落地页（版本、配置路径、宠物清单）
  *   GET  /health                JSON 状态
- *   GET  /standalone-ai/        AI 配置页（HTML，与 CLI 同一份 settingsPage）
+ *   GET  /standalone-ai/        AI 配置页（HTML）
  *   GET/POST /standalone-ai/settings   读写配置（需 X-DSH-Pet-Token，令牌在地址的 #token= 里）
  *   POST /standalone-ai/test    连通性测试
  *   *    /dsh-pet-7340/...      插件路由（桌面窗口用，因此额外放行 CORS）
  *
- * 与 CLI 的一处差异：插件路由要服务 `file://` 页面，浏览器请求不带令牌，所以这一组只按
- * Origin 判定（允许空 / null，拒绝网页来源），不套令牌；配置页那组仍然严格校验令牌与 Host。
+ * 插件路由要服务 `file://` 页面，浏览器请求不带令牌，所以这一组只按 Origin 判定
+ * （允许空 / null，拒绝网页来源），不套令牌；配置页那组仍然严格校验令牌与 Host。
  *
- * 环境变量（应用自身用，不影响 DSH 内运行）：
- *   DSH_PET_IN_PROCESS=1  交给宿主半边：不 spawn helper、不下载 Electron（见 src/host/index.ts）
- *   DSH_PET_APP_MODE=1    交给 helper：托盘加「退出」、userData 独立
- *   DSH_PET_SITE_URL      交给 helper：右键「打开网站」用它（这里指向带令牌的配置页）
+ * 环境变量（应用自身用）：
+ *   DSH_PET_CONFIG_URL    交给 helper：本机服务 origin（渲染端 HTTP 直连用）
+ *   DSH_PET_SITE_URL      交给 helper：右键「设置」用它（这里指向带令牌的配置页）
  */
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -31,10 +30,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { flattenPetList, readAllConfig } from '../host/config';
-import { dshHomeDir } from '../host/helper-process';
+import { dshHomeDir } from '../host/paths';
 import { apply } from '../host/index';
 import { createStandaloneAi } from '../standalone/ai-provider';
-import { packageVersion } from '../standalone/check';
+import { packageVersion } from './version';
 import { createStandaloneContext, createStandaloneLogger, type RegisteredRoute } from '../standalone/context';
 import { configPathsFor } from '../standalone/options';
 import { createRequestSecurity, rejectRequest } from '../standalone/request-security';
@@ -72,7 +71,7 @@ interface ElectronApp {
 }
 const { app } = createRequire(import.meta.url)('electron') as { app: ElectronApp };
 
-/** lib/app.js → 包根（与 helper-process.ts 的 packageRoot 同一口径：模块所在目录的上一级） */
+/** lib/app.js → 包根（模块所在目录的上一级） */
 const here = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(here, '..');
 const helperMain = join(packageRoot, 'runtime', 'electron-helper', 'main.js');
@@ -134,16 +133,9 @@ async function boot(): Promise<void> {
   const origin = `http://127.0.0.1:${port}`;
   log(`本机服务 ${origin}`);
 
-  // 先把「我自己就是应用」告诉插件，再 apply：apply 内部据此短路 spawn 与下载
-  process.env.DSH_PET_IN_PROCESS = '1';
-  process.env.DSH_PET_APP_MODE = '1';
-  process.env.DSH_PET_OPEN_TARGET = 'site';
-  // 应用自己的菜单项（看屏幕 / 日记 / 串门）放根菜单，不按第三方收进「更多」
   process.env.DSH_PET_APP_MENU_OWNER = MENU_OWNER;
-  // 不注入宿主 PID：helper 的「宿主没了就退出」只对双进程有意义，同进程里设了会自己杀自己
-  delete process.env.DSH_PET_HOST_PID;
   process.env.DSH_PET_CONFIG_URL = `${origin}/dsh-pet-7340/config`;
-  // 右键「打开网站」用它：带令牌的配置页（与 CLI 行为一致）。裸 origin 在应用里没有页面可看。
+  // 右键「设置」用它：带令牌的配置页。裸 origin 在应用里没有页面可看。
   process.env.DSH_PET_SITE_URL = security.authenticatedUrl(origin);
   if (!process.env.DSH_PET_SCALE) process.env.DSH_PET_SCALE = '1';
 
@@ -155,8 +147,8 @@ async function boot(): Promise<void> {
   // helper 读它决定建几个窗口；读不到时它会回落到单个默认窗口，首帧再由渲染端自校正
   process.env.DSH_PET_PETS = JSON.stringify(desktopPets());
 
-  // 托盘勾选 / 右键关闭桌面显示 / 设置页保存都会走插件的 syncDesktop：DSH 里它重启 helper，
-  // 这里 helper 就在本进程、窗口与托盘只在启动时建一次，所以它们依据的配置变了就整个应用重启
+  // 托盘勾选 / 右键关闭桌面显示 / 设置页保存都会走插件的 syncDesktop：
+  // 窗口与托盘就在本进程、只在启动时建一次，所以它们依据的配置变了就整个应用重启
   const launchedLayout = desktopLayout();
   let relaunching = false;
   context.ctx.dshPetAppDesktopChanged = () => {

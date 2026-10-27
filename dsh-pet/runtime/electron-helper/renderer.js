@@ -45,8 +45,7 @@ function scheduleReboot() {
 
 /**
  * 连续启动失败次数（成功一次即清零）。
- * 首次失败多半是启动竞态：主进程 `void startTray()` / `createPetWindows()` 不等 bridge
- * 回调服务就绪（main.js 的 startBridgeCallback 未 await），渲染端首帧 fetch 会打空。
+ * 首次失败多半是启动竞态：窗口加载与渲染端首帧 fetch 可能早于本机服务就绪。
  * 这种失败 5s 重试就自愈，不该闪一条红条；持续失败才是真配置错误，照旧大声报。
  */
 let bootFailures = 0;
@@ -83,13 +82,11 @@ async function boot() {
     const pets = cfg.pets;
     if (pets.length === 0) {
       // **配置里没有任何宠物是合法状态，不是配置错误**。
-      // 本窗口是主进程按 DSH_PET_PETS 建的：宿主流下窗口数与该列表必然一致
-      // （没有宠物时宿主传 []，main.js 建 0 个窗口，本函数根本不会跑）；
-      // 只有手动 start-desktop（没有 DSH_PET_PETS）会回落出一只默认窗口而与配置脱钩。
+      // 本窗口是主进程按 DSH_PET_PETS 建的：应用传下的窗口数与该列表必然一致
+      // （没有宠物时应用传 []，main.js 建 0 个窗口，本函数根本不会跑）；
+      // 只有没有 DSH_PET_PETS（主进程未传）时才会回落出一只默认窗口而与配置脱钩。
       // 脱钩不该报错——没有宠物就表示这个窗口没活儿干：安静关掉，不弹条、不重试。
-      // 托盘是否还在看 main 条目的 trayEnabled：开着且桌面模式曾启用过，宿主持久保留 Helper
-      // （托盘因此还在）；关掉则宿主不再为它常驻。
-      // 宿主流由 syncDesktop() 在配置变化时重建 helper，手动流则需自行重启。
+      // 托盘是否还在看 main 条目的 trayEnabled；配置变化由应用整体重启（见 app/main.ts）。
       hideError();
       console.info('[dsh-pet] no pets; closing this helper window (tray kept only if trayEnabled)');
       window.close();

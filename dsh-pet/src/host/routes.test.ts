@@ -40,7 +40,6 @@ let dir = '';
 let call: (url: string, method?: string, body?: string) => Promise<Result> = () =>
   Promise.reject(new Error('未初始化'));
 let savedHome: string | undefined;
-let savedElectron: string | undefined;
 /** apply() 注册的全部 effect 释放函数（after 里调用：否则常驻定时器会让测试进程不退出） */
 const disposers: Array<() => void> = [];
 
@@ -84,10 +83,7 @@ before(() => {
   writeFileSync(join(dir, 'outside-memes', 'leak.png'), SECRET);
 
   savedHome = process.env.DSH_HOME;
-  savedElectron = process.env.DSH_PET_ELECTRON_PATH;
   process.env.DSH_HOME = home;
-  // 命中一个已存在的文件：桌面 Helper 无论走哪条分支都不会真的下载/拉起
-  process.env.DSH_PET_ELECTRON_PATH = process.execPath;
 
   let handler: ((req: unknown, res: unknown) => Promise<void>) | undefined;
   const noop = (): void => {};
@@ -156,8 +152,6 @@ after(() => {
   }
   if (savedHome === undefined) delete process.env.DSH_HOME;
   else process.env.DSH_HOME = savedHome;
-  if (savedElectron === undefined) delete process.env.DSH_PET_ELECTRON_PATH;
-  else process.env.DSH_PET_ELECTRON_PATH = savedElectron;
   rmSync(dir, { recursive: true, force: true });
 });
 

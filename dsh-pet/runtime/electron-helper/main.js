@@ -17,18 +17,13 @@
  * 进/出宠物身体命中区时经 pet:set-interactive 翻转可交互——透明像素不挡下层应用，
  * 与浏览器 overlay（仅 .dsh-pet-hit 可交互）严格对齐。
  *
- * 数据通道（bridge 模式，DSH_PET_BRIDGE=1 由宿主注入）：
- * 渲染端不再直连宿主 WebServer（DSH Desktop 2.0.3+ 的浏览器访问闸门会拦无令牌裸 HTTP）——
- * 本进程注册自定义 scheme `dsh-pet-bridge://`，protocol.handle 收到渲染端请求后
- * 经 stdin/stdout JSON 行协议转发宿主（helper-process.ts 的 BridgeHandler），
- * 宿主用与 HTTP 路由同一份 handlePetRoute 应答；素材应答带文件绝对路径，本进程读盘返回。
- * 无 DSH_PET_BRIDGE（手动 start-desktop / 开发流）时保持旧路径：渲染端直接 HTTP 访问宿主。
+ * 数据通道：渲染端直接用 HTTP 访问本机服务（`DSH_PET_CONFIG_URL` 的 origin），
+ * 与设置页走同一份宿主路由（`src/host/index.ts` 的 handlePetRoute）。
  *
- * 进程存亡（issue #56）：本进程的 stdout/stderr 是宿主给的管道，宿主一退出读端就消失（下一次写
- * 就是 EPIPE，而 Electron 默认处理器只会弹框且不退出）。故有「宿主存活」一节：管道守卫 +
- * 宿主 PID 探测，宿主没了就自己退——见那里的注释。
+ * 进程存亡：本文件只由独立应用 `src/app/main.ts` 在**同一个进程**里 require，
+ * 没有独立的 helper 进程，也不再靠宿主 PID / stdin 管道判断存活。
  *
- * 启动模式（issue #63）：若被以「纯 Node 模式」拉起（宿主透传了 ELECTRON_RUN_AS_NODE），内置
+ * 启动模式（issue #63）：若被以「纯 Node 模式」拉起（继承了 ELECTRON_RUN_AS_NODE），内置
  * electron 模块不会注册，下面的 require 会失败——报一句能定位原因的话再退出，别只留 MODULE_NOT_FOUND。
  */
 let electronApi;
@@ -38,18 +33,17 @@ try {
   process.stderr.write(
     '[dsh-pet helper] 启动失败：本进程被以「纯 Node 模式」拉起（ELECTRON_RUN_AS_NODE=' +
       JSON.stringify(process.env.ELECTRON_RUN_AS_NODE ?? null) +
-      '）。该变量必须在 spawn 前删除（见 src/host/helper-process.ts 的 helperSpawnEnv），' +
+      '）。该变量必须在启动前删除（见 scripts/start-app.mjs），' +
       '运行期再删无效，设成空串会让 Electron 直接 abort。原始错误：' +
       (error instanceof Error ? error.message.split('\n')[0] : String(error)) +
       '\n',
   );
   process.exit(3);
 }
-const { app, BrowserWindow, ipcMain, screen, shell, protocol, Tray, Menu, nativeImage } = electronApi;
+const { app, BrowserWindow, ipcMain, screen, shell, Tray, Menu, nativeImage } = electronApi;
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { readFileSync, writeFileSync } = require('node:fs');
-const fsPromises = require('node:fs/promises');
 // 点击穿透兜底通道的纯判定（不依赖 Electron 的 forward 鼠标钩子；见文件头注释）
 const { decideWindowIgnore, pointerZone } = require('./pointer-target.js');
 // 置顶看门狗：WS_EX_TOPMOST 只是样式位，不等于窗口真的在置顶带（见 topmost-watchdog.js 头部）
@@ -59,8 +53,6 @@ const {
   shouldReassertTopmost,
   topmostLevel,
 } = require('./topmost-watchdog.js');
-// 宿主存活判定（issue #56：宿主退出 → 管道断开 → 自己退，绝不弹框、绝不留僵尸）
-const { HOST_POLL_MS, hostIsGone, isBrokenPipeError, parseHostPid } = require('./host-liveness.js');
 // 全局 DPI 线性化的纯判定与换算（含平台例外：macOS 的 DIP 已是「点」，无需补偿；见该文件头）
 const { shouldLinearize, resolveForcedScale, resolvePetScale } = require('./dpi-linearization.js');
 // 托盘的平台差异（模板图 / 左键是否自动弹菜单 / Dock）：规则住在模块里，main.js 只接线
@@ -70,64 +62,19 @@ const { buildDeskGeometry } = require('./desktop-geometry.js');
 // 允许无用户手势直接播放（动画素材）
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
-// 显式定名：Helper 是被 `electron.exe <main.js>` 直接拉起的，Electron 取不到 app 名会回落成
-// "Electron"，userData 便落到 %APPDATA%\Electron —— 那是所有这么跑的 Electron 脚本的公共目录，
-// 我们的 DPI 缓存与 Chromium profile 都会和别人混在一起。必须赶在任何 getPath('userData') 之前设。
-// 应用模式：本文件被 `src/app/main.ts` 直接 import 进同一进程（独立应用，不 spawn 子进程）。
-// 双击启动的用户没有终端可按 Ctrl+C，托盘上必须有一个「退出」，否则只能去任务管理器杀进程。
-// DSH 内的桌面模式不设这个变量，托盘形态与 userData 目录都保持原样。
-const APP_MODE = process.env.DSH_PET_APP_MODE === '1';
-// 名字必须与 src/host/storage-paths.ts 的 DESKTOP_APP_NAME 逐字一致
-// （storage-paths.test.ts 会直接读本文件比对，改名不同步测试就红）。
+// 显式定名：Electron 取不到 app 名会回落成 "Electron"，userData 便落到 %APPDATA%\Electron ——
+// 那是所有这么跑的 Electron 脚本的公共目录，我们的 DPI 缓存与 Chromium profile 都会和别人混在一起。
+// 必须赶在任何 getPath('userData') 之前设。名字必须与 src/host/storage-paths.ts 的
+// DESKTOP_APP_NAME 逐字一致（storage-paths.test.ts 会直接读本文件比对，改名不同步测试就红）。
 app.setName('dsh-pet-electron-helper');
-// 应用模式只改**数据目录**，不改应用名：独立应用与 DSH 内的 helper 若共用同一个 userData，
-// 两个 Chromium 进程会抢同一份 profile（单例锁）互相踢。名字不动也就不会触发上面那个防漂移测试。
-if (APP_MODE) app.setPath('userData', path.join(app.getPath('appData'), 'dsh-pet'));
+// 独立应用用自己的数据目录，不和别的 Electron 脚本共用 Chromium profile；不改应用名，
+// 也就不会触发上面那个防漂移测试。
+app.setPath('userData', path.join(app.getPath('appData'), 'dsh-pet'));
 
 /** DPI 探测子进程模式：不建窗口，只把主屏 scaleFactor 打到 stdout 就退出（见 probePrimaryScale） */
 const DPI_PROBE = process.env.DSH_PET_DPI_PROBE === '1';
 /** 探测进程的输出标记（父进程按它抓值） */
 const DPI_MARK = 'dsh-pet-primary-scale:';
-
-// ---------- 宿主存活（issue #56）：管道断开 / 父进程消失 → 自己退出 ----------
-//
-// 【为什么必须自己退】宿主退出后，它在 helper 的 stdout/stderr 上握着的管道读端一起关闭；helper
-// 下一次写（bridge 协议行 —— 渲染端每秒至少一条 /state 轮询）拿到 EPIPE。未处理的 'error'
-// 事件 = 未捕获异常，而 Electron 主进程自带的处理器只弹一个模态框、**且不退出**
-// （lib/browser/init.ts 原文注释："Don't quit on fatal error"）—— 桌宠就此卡死、进程赖着不走。
-// 真机实测（宿主存活、只切断 stdout 管道）：那次写之后主线程彻底停住，14 秒里一次心跳都没有，
-// 进程也一直没有退出。
-//
-// 两条路都要有，缺一不可：
-//   ① 管道守卫：任何一次写失败都不许变成异常；管道断开本身就是"宿主已死"的铁证 → 立刻退。
-//      它只在**上层真的写**的时候才触发；
-//   ② 宿主探测：每 HOST_POLL_MS 用 kill(pid, 0) 问一次宿主还在不在，ESRCH 即退。
-//      渲染端崩了/根本没起来时一次写都不会发生，只有 ② 能收敛。
-// 两条路都只经 exitForDeadHost()，且只退一次。
-let hostGone = false;
-/** 宿主没了 → 立刻退出。这里**不能**再打日志：管道已经断了，写只会再踩一次同一个错误 */
-function exitForDeadHost() {
-  if (hostGone) return;
-  hostGone = true;
-  app.exit(0); // 宿主消失是"环境要求我退"，不是自身崩溃，退出码 0
-}
-
-// ① 管道守卫：必须赶在**任何一次写**之前装上（probePrimaryScale 失败就会往 stderr 写）
-for (const stream of [process.stdout, process.stderr]) {
-  stream.on('error', (error) => {
-    if (isBrokenPipeError(error)) exitForDeadHost();
-    // 其余流错误同样吞掉：Electron 的默认处理是弹模态框，任何流错误都不值得拿桌宠去换一个框
-  });
-}
-
-// ② 宿主探测：DSH_PET_HOST_PID 由宿主 spawn 时注入；未注入/非法 → parseHostPid 给 0 → 不探测（不误退）。
-// DPI 探测实例是一次性短命进程（它的父进程是 helper 而不是宿主），不参与这套机制。
-const HOST_PID = parseHostPid(process.env.DSH_PET_HOST_PID);
-if (!DPI_PROBE && HOST_PID > 0) {
-  setInterval(() => {
-    if (hostIsGone(HOST_PID)) exitForDeadHost();
-  }, HOST_POLL_MS).unref?.();
-}
 
 // Windows 透明分层窗口（WS_EX_LAYERED）在 DWM 硬件加速合成下存在多处缺陷：
 //   - 拖拽移动时窗口四周出现黑色边框（#37）
@@ -209,7 +156,7 @@ function parseProbeOutput(text) {
 /** 拉起探测子进程读主屏 scaleFactor（同一个 electron + 同一个 main.js，走 DPI_PROBE 分支） */
 function probePrimaryScale() {
   const opts = {
-    env: { ...process.env, DSH_PET_DPI_PROBE: '1', DSH_PET_BRIDGE: '0', DSH_PET_SMOKE: '0' },
+    env: { ...process.env, DSH_PET_DPI_PROBE: '1', DSH_PET_SMOKE: '0' },
     timeout: 20000,
     encoding: 'utf8',
     windowsHide: true,
@@ -266,34 +213,6 @@ function petScale() {
     primaryScale: PRIMARY_SCALE,
     forcedScale: FORCED_SCALE,
   });
-}
-
-/** bridge 模式：DSH_PET_BRIDGE=1（宿主注入）。开启时注册 dsh-pet-bridge scheme + 管道转发 */
-const BRIDGE = process.env.DSH_PET_BRIDGE === '1';
-
-/** 右键「设置」这一项的去向（宿主按自身形态注入）：
- *  'desktop' = 宿主是 DSH 桌面应用 → 唤起桌面应用主窗口；
- *  'site'    = dsh web / 独立模式 / 手写 start-desktop（无该变量）→ 原行为：默认浏览器打开站点。 */
-const OPEN_TARGET = process.env.DSH_PET_OPEN_TARGET === 'desktop' ? 'desktop' : 'site';
-/** 协议行前缀（与 helper-process.ts 的 BRIDGE_PREFIX 一致） */
-const BRIDGE_PREFIX = 'dsh-pet-bridge:';
-
-if (BRIDGE) {
-  // 自定义 scheme：standard（可解析 URL）+ secure（按 https 对待）+ supportFetchAPI（fetch 可用）
-  // + stream（视频流）+ corsEnabled（让 CORS 规则生效，配合响应里的 ACAO 头放行 file:// 源页面）
-  protocol.registerSchemesAsPrivileged([
-    {
-      scheme: 'dsh-pet-bridge',
-      privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        stream: true,
-        bypassCSP: true,
-        corsEnabled: true,
-      },
-    },
-  ]);
 }
 
 /** 窗口表：petId -> BrowserWindow */
@@ -372,11 +291,11 @@ const inputRegions = new Map();
 const offBodyMs = new Map();
 
 /**
- * 桌面宠物列表（[{id,size}]）：宿主经 DSH_PET_PETS 透传（每只宠物一个窗口）。
- * 解析失败/未透传（手动 start-desktop）时回落到单个默认宠物窗口；renderer 首帧发来的
+ * 桌面宠物列表（[{id,size}]）：应用经 DSH_PET_PETS 传进来（每只宠物一个窗口）。
+ * 解析失败/未透传时回落到单个默认宠物窗口；renderer 首帧发来的
  * set-bounds 会按真实配置自校正尺寸与位置。
- * **空数组是合法输入，不等于「未透传」**：宿主在「配置里没有宠物、但 Helper 仍需活着
- * 托住托盘」时会明确传 []（见 src/host/index.ts 的 desktopModeEverActive），此时必须建
+ * **空数组是合法输入，不等于「未透传」**：配置里没有宠物、但应用仍需托住托盘时
+ * 会明确传 []（见 src/app/main.ts 的 desktopPets），此时必须建
  * 0 个窗口——回落成默认窗口会让渲染端读到「没有宠物」并弹出红色错误条。
  */
 function petsFromEnv() {
@@ -541,14 +460,11 @@ function createPetWindows() {
       offBodyMs.delete(win.id);
     });
     win
-      // 绝对路径：本文件现在有两条运行方式（被宿主 spawn / 被 lib/app.js 同进程 require），
-      // 相对路径会按 Electron 的 app 路径解析——同进程时那是 lib/，必然 ERR_FILE_NOT_FOUND。
+      // 绝对路径：本文件被 lib/app.js 同进程 require 时，相对路径会按 Electron 的 app 路径解析
+      // （那是 lib/），必然 ERR_FILE_NOT_FOUND。
       .loadFile(path.join(__dirname, 'index.html'), {
         query: {
           configUrl,
-          bridge: BRIDGE ? '1' : '0',
-          // 工具项「设置」的去向按宿主形态自动变（见 sprite.js）：desktop=唤起桌面应用 / site=打开站点
-          openTarget: OPEN_TARGET,
           // 独立应用自己注册菜单项用的 owner（见 sprite.js：这组项放根菜单，不收进「更多」）
           appMenuOwner: process.env.DSH_PET_APP_MENU_OWNER || '',
           scale: String(scale),
@@ -575,118 +491,17 @@ function createPetWindows() {
   }
 }
 
-// ---------- bridge 协议（渲染端 custom scheme → 本进程 → 宿主 stdout JSON 行 + 本地回调） ----------
-// 渲染端的每个 fetch 都落到 dsh-pet-bridge://，protocol.handle 把请求以一行 JSON 写 stdout 转发宿主。
-// 宿主应答**不走近 0 号管道**：Electron 主进程在 Windows 上收不到 piped stdin（electron#4218），
-// 所以本进程开一个 127.0.0.1 随机端口 HTTP 回调（DSH 闸门只拦 DSH WebServer 路由，管不到这里）；
-// 请求行携带回调 URL，宿主处理完 POST 应答回来，按 id 唤醒等待中的请求。
-// 素材（webm/字体/光标）：宿主只回文件绝对路径，本进程自行读盘应答（二进制不过管道）。
-// 协议行统一前缀 BRIDGE_PREFIX，宿主侧按前缀区分协议与日志（console 输出也走 stdout）。
-
-let bridgeSeq = 0;
-/** id -> {resolve, reject}：一个请求对应宿主的一次回调应答 */
-const bridgePending = new Map();
-let bridgeCallbackUrl = '';
-
-/** 渲染端请求 → 宿主（请求行带回调 URL）；返回宿主应答（{status, contentType?, body?, file?}），超时抛错 */
-function bridgeRequest(method, url, body) {
-  return new Promise((resolve, reject) => {
-    const id = ++bridgeSeq;
-    bridgePending.set(id, { resolve, reject });
-    process.stdout.write(BRIDGE_PREFIX + JSON.stringify({ id, method, url, body, cb: bridgeCallbackUrl }) + '\n');
-    // 宿主若长期不应答（进程退出/宿主动作挂起）不无限挂起：45s 兜底（LLM 生成最长 30-60s）
-    setTimeout(() => {
-      const p = bridgePending.get(id);
-      if (!p) return;
-      bridgePending.delete(id);
-      p.reject(new Error('bridge request timeout'));
-    }, 45000).unref?.();
-  });
-}
-
-/** 把宿主回调应答（{id, status, ...}）派发给对应请求 */
-function bridgeResolve(resp) {
-  const p = resp && bridgePending.get(resp.id);
-  if (!p) return;
-  bridgePending.delete(resp.id);
-  p.resolve(resp);
-}
-
-/** 本地回调服务器：宿主把应答 POST 到这里（127.0.0.1 随机端口，绕开 stdin/DSH 闸门） */
-function startBridgeCallback() {
-  const http = require('node:http');
-  const server = http.createServer((req, res) => {
-    if (req.method !== 'POST' || req.url !== '/respond') {
-      res.writeHead(404, { 'content-type': 'text/plain' });
-      res.end('dsh-pet: not found');
-      return;
-    }
-    let raw = '';
-    req.on('data', (c) => (raw += c));
-    req.on('end', () => {
-      try {
-        bridgeResolve(JSON.parse(raw));
-        res.writeHead(200, { 'content-type': 'text/plain' });
-        res.end('ok');
-      } catch {
-        res.writeHead(400, { 'content-type': 'text/plain' });
-        res.end('dsh-pet: bad payload');
-      }
-    });
-    req.on('error', () => {
-      res.writeHead(400, { 'content-type': 'text/plain' });
-      res.end('dsh-pet: bad payload');
-    });
-  });
-  server.on('error', (e) => {
-    console.error('[dsh-pet-desktop-helper] bridge callback server error:', String(e && e.message ? e.message : e));
-  });
-  server.listen(0, '127.0.0.1', () => {
-    const addr = server.address();
-    bridgeCallbackUrl = 'http://127.0.0.1:' + (addr && typeof addr === 'object' ? addr.port : 0) + '/respond';
-    console.error('[dsh-pet-desktop-helper] bridge callback: ' + bridgeCallbackUrl);
-  });
-  return server;
-}
-
-/** 处理一个渲染端请求：拼宿主请求行 → 等应答 → 组装 Response（素材读盘） */
-async function handleBridgeRequest(request) {
-  const url = new URL(request.url); // dsh-pet-bridge://dsh-pet/dsh-pet-7340/...
-  const method = request.method || 'GET';
-  let body;
-  if (method === 'POST' || method === 'PUT') {
-    body = await request.text();
-  }
-  const resp = await bridgeRequest(method, url.pathname + url.search, body);
-  const headers = { 'access-control-allow-origin': '*' }; // 渲染端页面是 file:// 源，scheme 跨源需 CORS
-  if (resp.contentType) headers['content-type'] = resp.contentType;
-  if (resp.file) {
-    // 素材：直接读盘返回（宿主已解析好绝对路径；带 range 让视频能拖动进度条）
-    try {
-      const data = await fsPromises.readFile(resp.file);
-      return new Response(new Uint8Array(data), { status: resp.status || 200, headers });
-    } catch (e) {
-      console.error('[dsh-pet-desktop-helper] bridge file read failed:', resp.file, e);
-      return new Response('dsh-pet: asset read failed', { status: 500, headers });
-    }
-  }
-  return new Response(resp.body ?? '', { status: resp.status || 200, headers });
-}
-
 // ---------- 系统托盘（开机自启 / 退出） ----------
-// 为什么托盘放在本进程：它是桌面模式唯一「不进浏览器」的入口（退出应用、开机自启）。
+// 为什么托盘放在本进程：它是桌面宠物唯一「不进浏览器」的入口（退出应用、开机自启）。
 // 但它不是非有不可：main 条目的 `trayEnabled` 为 false 时不建托盘（默认 true，见下 startTray）。
-// 这种情况下宿主也不会为它常驻——判据是 desktopModeEverActive && trayEnabled（src/host/index.ts）：
-// 托盘关掉后已经没有需要保住的东西，让本进程活着只是白烧一个空进程。
-// 数据不新增任何通道：读配置走渲染端在用的同一条 bridge（手动 start-desktop 流退回 HTTP）。
+// 读配置直接 HTTP 访问同一个进程里的本机服务。
 
 const PET_ROUTE = '/dsh-pet-7340';
 const ORIGIN = new URL(process.env.DSH_PET_CONFIG_URL || 'http://127.0.0.1:3080/dsh-pet-7340/config').origin;
 const TRAY_PLATFORM = trayPlatform(process.platform);
 
-/** 与宿主 handlePetRoute 通信：bridge 模式走管道，手动 start-desktop 流退回 HTTP 直连 */
+/** 与宿主 handlePetRoute 通信：走本机 HTTP 服务 */
 async function hostRequest(method, url, body) {
-  if (BRIDGE) return bridgeRequest(method, url, body);
   const resp = await fetch(ORIGIN + url, {
     method,
     headers: body ? { 'content-type': 'application/json' } : undefined,
@@ -716,10 +531,6 @@ function trayIcon() {
  */
 async function startTray() {
   try {
-    // 请求行要携带回调 URL，而端口在 startBridgeCallback 的 listen 回调里才有值（最多等 2s）
-    for (let i = 0; BRIDGE && !bridgeCallbackUrl && i < 100; i += 1) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
     const resp = await hostRequest('GET', PET_ROUTE + '/config');
     const merged = JSON.parse(resp.body || '{}');
     // 托盘开关（main 条目的 trayEnabled）：只有**显式 false** 才不建——缺失或写坏时保持建，
@@ -729,18 +540,14 @@ async function startTray() {
     tray.setToolTip('dsh-pet 桌面宠物');
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        ...(APP_MODE
-          ? [
-              // 开机自启 = 系统登录项；勾选状态每次建菜单时从系统读，用户在系统设置里删掉也能如实反映
-              {
-                label: '开机自启',
-                type: 'checkbox',
-                checked: app.getLoginItemSettings().openAtLogin,
-                click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
-              },
-              { label: '退出', click: () => app.quit() },
-            ]
-          : []),
+        // 开机自启 = 系统登录项；勾选状态每次建菜单时从系统读，用户在系统设置里删掉也能如实反映
+        {
+          label: '开机自启',
+          type: 'checkbox',
+          checked: app.getLoginItemSettings().openAtLogin,
+          click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
+        },
+        { label: '退出', click: () => app.quit() },
       ]),
     );
     // Windows 上 setContextMenu 只接管右键，左键默认什么都不做（macOS 相反：左键即弹菜单）
@@ -769,25 +576,11 @@ app.whenReady().then(() => {
       petScale(),
   );
 
-  if (BRIDGE) {
-    // 自定义 scheme 接住渲染端全部请求（配置/碎碎念/广播/素材）
-    protocol.handle('dsh-pet-bridge', (request) =>
-      handleBridgeRequest(request).catch((e) => {
-        console.error('[dsh-pet-desktop-helper] bridge handler error:', String(e && e.message ? e.message : e));
-        return new Response('dsh-pet: bridge error', {
-          status: 502,
-          headers: { 'access-control-allow-origin': '*' },
-        });
-      }),
-    );
-    startBridgeCallback(); // 宿主应答回调服务器（stdin 在 Electron 主进程不可用，改走本地 HTTP）
-  }
-
   // macOS：桌面宠物不该占 Dock——Dock 里多一个图标只会碍事。**不跟 trayEnabled 联动**：
   // 宠物本体的右键菜单在，桌面侧仍能操作（只有「宠物全不在桌面」时才真正没有入口，那是另一件事）。
   if (TRAY_PLATFORM.hideDock && app.dock) app.dock.hide();
 
-  // 托盘：不 await（建窗与建托盘互不依赖），内部自己等 bridge 回调服务就绪
+  // 托盘：不 await（建窗与建托盘互不依赖）
   void startTray();
 
   createPetWindows();
@@ -910,21 +703,19 @@ app.whenReady().then(() => {
     inputRegions.set(win.id, { dragging: input.dragging === true, rects });
   });
 
-  // 右键菜单「设置」：交给**系统默认浏览器**打开（等效于网页里 Ctrl+点击链接新标签页），
+  // 右键菜单「设置」：交给**系统默认浏览器**打开带令牌的本机设置页，
   // 不建专属窗口——宠物窗口机制是透明小窗，不该承载常规网页浏览。URL 由渲染端从
-  // configUrl 推导 = DSH webServer 端口，端口变化自动跟随
+  // configUrl 推导，端口变化自动跟随。
   const openSite = (url) => {
-    // 宿主注入的已鉴权站点 URL（含本进程启动令牌）：DSH 只在 `GET /` 接受它并换发绑定 authority 的
-    // 浏览器 Cookie，裸 origin 在默认浏览器里必然 401（#87）。令牌等价登录态，所以**只在与目标同
-    // origin 时**才启用——绝不让它被带去别的站点；取不到该变量（旧宿主 / standalone / 手写
-    // start-desktop）时，行为与以前完全一致。
+    // 应用注入的已鉴权设置页 URL（含令牌，令牌等价登录态）：**只在与目标同 origin 时**才启用——
+    // 绝不让它被带去别的站点。
     let target = url;
     const authed = process.env.DSH_PET_SITE_URL || '';
     if (/^https?:[/][/]/.test(authed)) {
       try {
         if (new URL(authed).origin === new URL(url).origin) target = authed;
       } catch {
-        /* 形状不对：保持裸地址（原行为） */
+        /* 形状不对：保持裸地址 */
       }
     }
     shell.openExternal(target).catch((error) => {
@@ -932,23 +723,9 @@ app.whenReady().then(() => {
     });
   };
 
-  // 去向由宿主形态决定（OPEN_TARGET，宿主按自身形态注入）：
-  //   desktop（宿主 = DSH 桌面应用）→ 用应用自注册的 dsh:// 协议把主窗口叫回前台：已运行则第二个实例
-  //     被单实例锁拦下、宿主收到 second-instance 后 focusPrimaryWindow()；未运行则协议直接把应用拉起来。
-  //     比 spawn 宿主 exe 干净——不必处理 ELECTRON_RUN_AS_NODE（spawn 继承它就成了 node 模式，起不了界面）
-  //     与安装路径探测。
-  //   site（dsh web / 独立模式）→ 原行为：系统默认浏览器打开站点。
   ipcMain.on('pet:open-site', (event, payload) => {
     const url = payload && typeof payload === 'object' ? String(payload.url || '') : '';
     if (!/^https?:[/][/]/.test(url)) return;
-    if (OPEN_TARGET === 'desktop') {
-      // 协议未注册（绿色版 / 注册表被清）时回落成打开站点，至少不是"点了没反应"
-      shell.openExternal('dsh://open').catch((error) => {
-        console.error('[dsh-pet-desktop-helper] open dsh:// failed, falling back to site:', error);
-        openSite(url);
-      });
-      return;
-    }
     openSite(url);
   });
 
@@ -1214,8 +991,7 @@ app.whenReady().then(() => {
 });
 
 // 退出时销毁托盘图标：不销毁会在 Windows 通知区留下「幽灵图标」（鼠标划过才消失）。
-// 注意宿主改配置时是 SIGTERM/SIGKILL 硬杀（helper-process.ts），Windows 上那是
-// TerminateProcess、拦不到，所以这条只覆盖优雅退出（窗口全关、宿主存活探测判定退出等）。
+// 独立应用从托盘「退出」或正常关窗都走这里；异常结束拦不到，那是 Windows 的既有行为。
 app.on('before-quit', () => {
   if (!tray) return;
   try {
@@ -1227,7 +1003,7 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  // 托盘常驻：桌面上没有宠物也要留着（否则「全关掉」就再也切不回来，见 index.ts 的 desktopModeEverActive）
+  // 托盘常驻：桌面上没有宠物也要留着（否则「全关掉」就再也切不回来）
   if (tray) return;
   app.quit();
 });

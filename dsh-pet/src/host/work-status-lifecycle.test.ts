@@ -31,7 +31,6 @@ type Harness = {
 
 let dir = '';
 let savedHome: string | undefined;
-let savedElectron: string | undefined;
 /** 本文件建过的全部实例（after 里统一释放：apply() 现在会起常驻的碎碎念周期定时器） */
 const harnesses: Harness[] = [];
 
@@ -122,10 +121,7 @@ function setup(): Harness {
 before(() => {
   dir = mkdtempSync(join(tmpdir(), 'dsh-pet-workstatus-'));
   savedHome = process.env.DSH_HOME;
-  savedElectron = process.env.DSH_PET_ELECTRON_PATH;
   process.env.DSH_HOME = join(dir, 'home');
-  // 命中一个已存在的文件：桌面 Helper 无论走哪条分支都不会真的下载/拉起
-  process.env.DSH_PET_ELECTRON_PATH = process.execPath;
 });
 
 after(() => {
@@ -134,8 +130,6 @@ after(() => {
   for (const h of harnesses.splice(0)) h.dispose();
   if (savedHome === undefined) delete process.env.DSH_HOME;
   else process.env.DSH_HOME = savedHome;
-  if (savedElectron === undefined) delete process.env.DSH_PET_ELECTRON_PATH;
-  else process.env.DSH_PET_ELECTRON_PATH = savedElectron;
   rmSync(dir, { recursive: true, force: true });
 });
 

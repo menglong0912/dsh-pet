@@ -1,15 +1,15 @@
 /**
  * 桌面端「重载配置」契约测试：右键菜单 → POST /dsh-pet-7340/reload → 宿主 syncDesktop()。
  *
- * 背景：桌面宠物的配置只在 Helper 启动时拉一次（renderer.js 的 boot → GET /config），手改配置文件后
- * 桌面端不会自己跟上——此前唯一的生效途径是回设置页点「保存」，而保存只是顺带重启了 Helper。
+ * 背景：桌面宠物的配置只在应用启动时拉一次（renderer.js 的 boot → GET /config），手改配置文件后
+ * 桌面端不会自己跟上——此前唯一的生效途径是回设置页点「保存」，而保存只是顺带重启了应用。
  * 菜单项「重载配置」把这条路径显式暴露出来（重载是桌面专属）。
  *
- * 为什么必须走「宿主重启 Helper」而不是渲染端就地重拉配置：
- *   ① 每只桌面宠物一个窗口，是宿主启动时按 DSH_PET_PETS 建的——就地重拉改不了宠物数量 / size；
+ * 为什么必须走「应用整体重启」而不是渲染端就地重拉配置：
+ *   ① 每只桌面宠物一个窗口，是应用启动时按 DSH_PET_PETS 建的——就地重拉改不了宠物数量 / size；
  *   ② 本页的工作状态等全局轮询由 events.js 的 loopsStarted 一次性启动，
  *      就地重建 sprite 会漏启新循环（新宠物没有碎碎念/广播轮询）或留下旧定时器。
- * 因此「重载」必须复用 syncDesktop()（串行队列 + 等旧进程真正退出），不得自己实现一套停/起。
+ * 因此「重载」必须复用 syncDesktop()（串行队列 + 交给应用重启），不得自己实现一套停/起。
  *
  * 本文件钉住跨半侧契约（两半各自构建、无法互相 import，只能读源码断言）：
  *   ① 宿主有 POST /reload 路由，且它调用的正是 syncDesktop()，且**不写任何配置文件**；
@@ -29,7 +29,7 @@ const host = readSource('./index.ts');
 const sprite = readSource('../../runtime/electron-helper/sprite.js');
 const menu = readSource('../shared/menu.ts');
 
-describe('桌面端「重载配置」—— 菜单 → 宿主重启 Helper', () => {
+describe('桌面端「重载配置」—— 菜单 → 应用重启', () => {
   test('宿主：POST /reload 复用 syncDesktop()，且只重启、不写配置文件', () => {
     const block = /if \(rest === 'reload'\) \{([\s\S]*?)\n {4}\}/.exec(host);
     assert.ok(block, '宿主必须有 /reload 路由');
@@ -38,7 +38,7 @@ describe('桌面端「重载配置」—— 菜单 → 宿主重启 Helper', () 
     assert.ok(/void syncDesktop\(\)/.test(body), 'reload 必须复用 syncDesktop()：与保存同一条重启路径');
     assert.ok(
       !/writeFile|saveUserConfig|syncUserConfigFromDefault/.test(body),
-      'reload 只重启 Helper，绝不碰配置文件（写盘是 PUT /config 的职责）',
+      'reload 只重启应用，绝不碰配置文件（写盘是 PUT /config 的职责）',
     );
   });
 
@@ -46,7 +46,7 @@ describe('桌面端「重载配置」—— 菜单 → 宿主重启 Helper', () 
     assert.ok(/label: '重载配置', action: 'reload'/.test(sprite), '桌面端右键菜单必须有「重载配置」项');
     assert.ok(/leaf\.action === 'reload'/.test(sprite), 'onMenuAction 必须有 reload 分支（否则点了没反应）');
     const m = /fetch\(BASE \+ '\/([a-z-]+)', \{ method: 'POST' \}\)/.exec(sprite);
-    assert.ok(m, "reloadDesktop() 必须 POST 到 BASE + '/<路由名>'（bridge 已支持 POST，无需新增 IPC）");
+    assert.ok(m, "reloadDesktop() 必须 POST 到 BASE + '/<路由名>'（走本机 HTTP，无需新增 IPC）");
     const route = m[1];
     assert.ok(
       new RegExp(`rest === '${route}'`).test(host),
