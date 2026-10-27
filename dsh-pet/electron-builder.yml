@@ -13,15 +13,11 @@ copyright: dsh-pet contributors
 directories:
   output: dist-app
 
-# 应用主进程入口不是插件入口（package.json 的 main 必须留给 DSH 插件加载），所以在打包元数据里覆盖
-extraMetadata:
-  main: lib/app.js
-
 files:
   - lib/**
   - runtime/**
   # 素材只带运行时要用的四类：动画（webm）、字体、表情包、头像；
-  # `assets/preview` 是 README 的 GIF（64 MB），插件自己的 files 白名单也不发它，这里同样排除。
+  # `assets/preview` 是 README 的 GIF（64 MB），不随包发布，这里排除。
   - assets/webm/**
   - assets/fonts/**
   - assets/pic/**

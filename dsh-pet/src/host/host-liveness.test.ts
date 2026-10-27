@@ -197,10 +197,3 @@ describe('守卫：宿主侧必须把 pid 注入（否则 B 永远不生效）',
     assert.ok(/delete env\.ELECTRON_RUN_AS_NODE;/.test(src), '手动拉起同样要防这个变量（issue #63）');
   });
 });
-
-describe('守卫：host-liveness.js 必须在发布必需清单里', () => {
-  test('prepack-check.js 的 required 含它（main.js require，缺了会启动即崩）', () => {
-    const src = readSource('../../scripts/prepack-check.js');
-    assert.ok(/'runtime\/electron-helper\/host-liveness\.js'/.test(src), '漏了它，npm 包里就少一个 main.js 必需的模块');
-  });
-});

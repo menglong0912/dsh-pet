@@ -155,7 +155,7 @@ import {
   resolveElectronPath,
 } from './helper-process';
 
-/** 插件行 id（与 cordis.patch.yml 一致） */
+/** 插件名（宿主上下文里注册用） */
 export const name = 'pet';
 /** 需要注入的服务：webServer（路由）+ agentDefaultModel（当前对话模型）+ llm（对话模型调用）+ commands（斜杠命令）+ connection（桌面 Helper「打开网站」用的已鉴权站点 URL） */
 export const inject = ['webServer', 'agentDefaultModel', 'llm', 'commands', 'connection'];
@@ -738,7 +738,7 @@ export function apply(ctx: any): void {
       );
       // 真实 reason **原样带回**给调用方。改造前这里只回布尔值，路由只能把失败硬编码成
       // `generate-error`——独立模式下 `generateWhisper` 明明算出了 `provider-missing`，
-      // 却在边界被吞掉（API.md 描述的降级 reason 正是它）。
+      // 却在边界被吞掉。
       return result;
     }
     state.writePet(petId, 'say', result.image ? { text: result.text, image: result.image } : { text: result.text });
@@ -1848,10 +1848,7 @@ export function apply(ctx: any): void {
     // 所以没有 /report 就没有真实回执，查询永远停在 accepted。
     // 与 S 无关：播放记录是 per-caller 资源（只有发起那次点播的调用方关心、有生命周期、
     // 数量随第三方调用方增长），放进 1s 全局广播会让每个窗口为每个功能付流量。
-    // 前缀守卫写成**字面量比较**：一是把正则尝试限定在 playback 段（更快、边界更明确），
-    // 二是让 scripts/check-openapi.mjs 的「文档 ↔ 路由实现」对齐检查能认出这条路由
-    //（它靠 rest 与单引号段名的字面量比较从实现里提取路由，纯正则形式的匹配它看不见；
-    //  注意注释里别把那个比较原样写出来，会被同一条正则当成一条真实路由）。
+    // 前缀守卫写成**字面量比较**：把正则尝试限定在 playback 段（更快、边界更明确）。
     const playbackPath = rest === 'playback' || rest.startsWith('playback/') ? parsePlaybackPath(rest) : undefined;
     if (playbackPath) {
       const playbackId = playbackPath.playbackId;

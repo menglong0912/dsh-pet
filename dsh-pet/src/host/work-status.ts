@@ -188,9 +188,8 @@ export function pickDisplayed(entries: Iterable<SessionWorkEntry>): SessionWorkE
 export class WorkStatusStore {
   // 类字段一律 `declare` + 构造器赋值（与 HelperProcess 同一约定）：带初始化器的类字段在 target
   // es2020 下要被降级，rolldown 会为此产出
-  // `import _defineProperty from "@oxc-project/runtime/helpers/defineProperty"`——该包既不在本包
-  // dependencies 里、宿主 DSH 的安装树里也没有，DSH 加载插件树时直接 ERR_MODULE_NOT_FOUND、
-  // 整个 profile 起不来。scripts/prepack-check.js 第 8 项守着这条。
+  // `import _defineProperty from "@oxc-project/runtime/helpers/defineProperty"`——该包不在本包
+  // dependencies 里，漏打会 ERR_MODULE_NOT_FOUND。构建目标已提到 es2022，保留这个写法。
   declare private readonly sessions: Map<string, SessionWorkEntry>;
   declare private readonly snap: WorkStatusSnapshot;
 

@@ -161,13 +161,3 @@ describe('源码守卫 —— main.js 只接线，规则住在 dpi-linearization
     assert.ok(/const scale = petScale\(\)/.test(main), 'petScale() 必须在建窗前求值一次');
   });
 });
-
-describe('守卫：dpi-linearization.js 必须在发布必需清单里', () => {
-  test('prepack-check.js 的 required 含它（main.js require，缺了会启动即崩）', () => {
-    const src = readSource('../../scripts/prepack-check.js');
-    assert.ok(
-      /'runtime\/electron-helper\/dpi-linearization\.js'/.test(src),
-      '漏了它，npm 包里就少一个 main.js 必需的模块',
-    );
-  });
-});
