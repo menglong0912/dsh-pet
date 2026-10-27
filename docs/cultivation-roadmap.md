@@ -34,11 +34,14 @@
 | X14  | 演完马上收摊、心魔窗口不泄漏   | X13    | `features.ts`、`features.test.ts`                                                                       | 小   |
 | X15  | 不串门也能切磋（隔空切磋）     | X14    | `visit.ts`、`visit-identity.ts`、`features.ts`、`scripts/dev/visit-peer.mjs`、根 `README.md`            | 大   |
 | X16  | 降龙十八掌、送友风             | X15    | `battle.ts`、`battle-lines.ts`、`visit.ts`；演出 `battle-show.ts`、`fx-window.ts`、对手窗口、`features.ts` | 大   |
-| X17  | 逐手出招的底子 + 心魔试炼      | X16    | `battle.ts`、`battle-show.ts`、出招面板（新）、`app-routes.ts`、`features.ts`、AI 限流                  | 大   |
+| R1   | 拆 `features.ts`（只挪不改）   | X15    | `src/app/features.ts` → `src/app/features/*.ts`；`features.test.ts`                                     | 大   |
+| X17  | 逐手出招的底子 + 心魔试炼      | R1     | `battle.ts`、`battle-show.ts`、出招面板（新）、`app-routes.ts`、`features.ts`、AI 限流                  | 大   |
 | X18  | 历练接上逐手出招               | X17    | `dungeon.ts`、`adventure-flow.ts`、`adventure-show.ts`、`adventure-window.ts`                           | 中   |
-| X19  | 切磋逐手对传（串门 + 隔空）    | X18    | `visit.ts`、`features.ts`、`scripts/dev/visit-peer.mjs`                                                  | 大   |
+| X19  | 切磋逐手对传（串门 + 隔空）    | X17    | `visit.ts`、`features.ts`、`scripts/dev/visit-peer.mjs`                                                  | 大   |
 
 **执行顺序**：X0 → X1 → X2 → X3 → X4 → X5 → X6，一次一个。X2 起都改 `features.ts`，必须串行。
+
+2026-10-27 用户调了后半段：X15 之后先 **R1 → X17 → X19 → X18**，X16（降龙十八掌、送友风，要花约 250 积分做素材）往后放，等用户再说。
 
 和设计 §5 的编号不一样：引擎和图鉴提到最前（修炼要用图鉴里的法宝、招式编号），以本表为准。
 
@@ -1090,6 +1093,54 @@ X10 真机时发现（2026-10-26）：宠物名字以「的」结尾（用户的
 - 法宝：月光蛊、血月蛊、春剪、夏扇；
 - 再往后：大盗鬼手、春秋蝉。
 
+### R1 拆 `features.ts`（只挪不改）
+
+**来由**：`src/app/features.ts` 已经 3386 行（测试 2456 行），看屏幕、提醒、日记、串门、修炼、历练、心魔、渡劫、切磋、隔空切磋、右键菜单全在 `startAppFeatures` 一个闭包里。X17–X19 都要大改它，先拆开再做。用户 2026-10-27 同意插在 X17 前面。
+
+**原则**：**只挪代码，不改行为**。
+
+- 不改文案、时限、菜单顺序、日志措辞；
+- 不顺手修 bug、不顺手改名。看到的问题写进回报的遗留问题里。
+
+**拆法**：
+
+- 新目录 `src/app/features/`，按现在 `// ----------` 分出的块各成一个文件：
+
+  | 块 | 文件 |
+  | --- | --- |
+  | 桌宠路由、占锁 | `pet-io.ts` |
+  | 生成（`say` / `speak` / `compose` 和说话队列） | `speech.ts` |
+  | 看屏幕 | `screen.ts` |
+  | 采样与定时、提醒 | `ticks.ts` |
+  | 宠物日记 | `diary-glue.ts` |
+  | 串门 | `visiting.ts` |
+  | 修炼 | `practice.ts` |
+  | 历练 | `adventure-glue.ts` |
+  | 心魔试炼、渡劫 | `trial.ts` |
+  | 切磋（X5）、隔空切磋（X15）和共用演出 `runSparShow` | `spar.ts` |
+  | 右键菜单 | `menu.ts` |
+
+  文件名可以按实际调整，不要和 `src/app/` 下现有的文件重名，回报里列清楚。
+- **共享状态**：闭包里那 35 个 `let`（`battle`、`trip`、`hosting`、`spar`、`duel`……）收进一个共享的状态对象。各文件经同一个上下文对象（`deps`、日志、`tracker` / `diary` / `neighbors` 这些服务、状态对象）读写，不复制状态。
+- **跨块调用**：比如串门要 `refreshMenu`、心魔要 `say`，经上下文上的函数调。模块之间不循环 `import`。需要的话，入口先建好上下文，再把各块的函数挂上去。
+- **入口不变**：`src/app/features.ts` 留作入口。`startAppFeatures(deps)`、`MENU_OWNER`、`FeatureDeps`、`AppFeatures`、`FeatureElectron` 这些导出名字和形状不变，`main.ts`、`app-routes.ts` 和测试的 `import` 一个字不用改。
+- 每个文件尽量不超过 600 行。超了的（串门、切磋多半会超）可以再按协议侧、演出侧细分，回报里说明。
+- 注释跟着代码走，原样搬，不重写。
+
+**测试**：
+
+- 第一步只拆源码，`features.test.ts` **一个字不动**，全过。
+- 第二步拆测试：按同样的块拆成几份 `features-*.test.ts`，共用的假 electron、`withFeatures`、`env` 抽到一个测试辅助文件（不以 `.test.ts` 结尾）。
+  - 测试名、断言一字不改；
+  - 测试总数不变（开工时 1137）。
+- 每挪一块就跑一遍 `npm test`，全绿再挪下一块。
+
+**验收**：
+
+- prettier --check（`src/app/main.ts` 照旧不跑）、typecheck、lint、`npm test` 全过，测试总数和开工时一样；
+- `git diff --stat` 上 `features.ts` 大幅变短，新文件加起来和原来的行数差不多（多出的只有 `import` 和上下文接线）；
+- 真机由主会话做：冒烟、心魔一场、串门敲门一次、隔空切磋一场、看屏幕一次，行为和拆之前一样。
+
 ### X17 逐手出招的底子 + 心魔试炼
 
 **来由**：用户 2026-10-27 提出：不要只能开打前整场算好，要能让 AI 一手一手地挑法宝和招式，也能自己手动出招；整场自动的保留。拍板：
@@ -1201,7 +1252,7 @@ X10 真机时发现（2026-10-26）：宠物名字以「的」结尾（用户的
 - 每一手的时限：出手的一方自己保证 20 秒内给出（AI 15 秒、手动 20 秒，过了都用后备挑法），所以对方总能等到。等的一方 35 秒还没收到，就当**掉线**。
 - 收到的出手先过 `legalActions`，不合法也当掉线，不替对方编招：替对方编的话，两边会算出不同的一场。
 - 旧版本的对端回 `unsupported-mode`，发起方说「对方的桌宠还不会逐手切磋」，不自动降成全自动。
-- X16 的送友风（`':farewell'` 那一路随机数）照旧，两边一样算。
+- X16 推迟了，做 X19 时还没有送友风。以后做 X16 时，逐手局里的送友风按 X16 自己的规则接上（`':farewell'` 那一路随机数两边一样算）。
 
 **记账**：
 

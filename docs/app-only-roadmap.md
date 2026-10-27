@@ -594,6 +594,7 @@ DSH_PET_ELECTRON_DIST="$HOME/Library/Application Support/dsh-desktop/harness/ele
 ## 5. 之后再说
 
 - **拆 `features.ts`**（2891 行）：等历练这一轮收尾、合回 `custom` 以后另写任务书，现在拆会和历练的改动打架。
+  - 2026-10-27 排上了：写进 `cultivation-roadmap.md` 的 R1，插在 X17 前面。
 - **Windows 功能对齐**：等有 Windows 机器再说。
 - **以后要接 DSH**（用户 2026-10-27 定的方向）：不恢复网页版和插件入口 `apply(ctx)`，另做一个薄的桥接插件，放在仓库的子目录（比如 `dsh-plugin/`，自带 `package.json`）。它只做两件事：把 DSH 的会话动态（思考、调工具、完成）转发给桌宠的 `/work-status`，加斜杠命令；和桌宠通信走 `dsh-pet` 命令行、Claude Code hook 用的那套本机接口（`app.json` 里的端口）。
 - **图标**：`assets/logo.png` 只有 256px，mac 打包时用 `sips` 放大到 1024，会糊。要换的话用即梦出一张 1024 的。
