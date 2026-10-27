@@ -451,6 +451,19 @@ test('倒带一次：输了先倒回本层开头，attempt +1，春秋蝉沉眠'
   assert.ok(run);
   assert.equal(run.status, 'lost');
   harness.window.answer({ kind: 'rewind' });
+  // 倒带过场要播完才往下走（真机：自动走 1.5 秒就选，视频被切断在半截）
+  for (let step = 0; step < 40; step += 1) {
+    await flush();
+    if (harness.window.last?.run?.cutscene) break;
+    await harness.clock.tick(100);
+  }
+  const cut = harness.window.last;
+  assert.ok(cut?.run?.scene.video?.includes('过场-春秋蝉'), JSON.stringify(cut?.run?.scene));
+  await harness.clock.tick(20_000);
+  await flush();
+  assert.ok(harness.window.last?.run?.cutscene, '过场没播完之前，不往下走');
+  assert.ok(!harness.window.last?.run?.choices.some((choice) => choice.kind === 'node'), '过场里不出选项');
+  harness.window.answer({ kind: 'cutscene-done' });
   for (let step = 0; step < 80; step += 1) {
     await flush();
     const view = harness.window.last;
@@ -461,6 +474,10 @@ test('倒带一次：输了先倒回本层开头，attempt +1，春秋蝉沉眠'
     if (view?.kind === 'run' && view.run?.choices.some((choice) => choice.kind === 'node')) break;
     await harness.clock.tick(1_000);
   }
+  assert.ok(
+    harness.window.last?.run?.choices.some((choice) => choice.kind === 'node'),
+    '过场播完以后接着选这一层的节点',
+  );
   const rewritten = harness.stored();
   assert.ok(rewritten);
   assert.equal(rewritten.attempt, 2);

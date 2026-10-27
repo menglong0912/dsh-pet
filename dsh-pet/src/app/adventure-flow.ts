@@ -623,11 +623,10 @@ export class AdventureFlow {
         if (result.anim) this.deps.play(result.anim);
         return;
       case 'rewind':
-        this.scene = {
-          video: dungeonAsset(this.deps.def, result.video),
-          poster: dungeonAsset(this.deps.def, this.deps.def.cover),
-          text: result.text,
-        };
+        // 倒带也走过场（Y5 那一套）：播完或者主人点跳过再往下走。原来只是把场景换成视频就接着走，
+        // 下一步一渲染（自动走 1.5 秒就选）视频就被切断在半截（2026-10-27 真机）
+        this.scene = { text: result.text };
+        await this.playCutscene(run, { video: result.video, lines: result.text });
         return;
       case 'end':
         this.scene = { text: result.text };

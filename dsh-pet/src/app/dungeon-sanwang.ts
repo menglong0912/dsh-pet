@@ -481,7 +481,7 @@ const SANWANG_NODES: Record<string, NodeDef> = {
       choices: [
         {
           label: '「白凝冰，你演够了吗？」',
-          note: '识破她：逼她替你挡住铁若男（第五层她替挡 3 下，铁若男开场少两成气血）',
+          note: '识破她：不会被背刺；改炼定仙游时，第五层她被逼着替你挡下一击',
           safe: true,
           when: (run) => run.flags.remember === true,
           outcome: {
@@ -494,7 +494,7 @@ const SANWANG_NODES: Record<string, NodeDef> = {
         },
         {
           label: '不动声色',
-          note: '照她的安排走：第五层她照样翻脸',
+          note: '照她的安排走：炼到最后，她照样从背后出手',
           safe: false,
           when: (run) => run.flags.remember === true,
           outcome: {
