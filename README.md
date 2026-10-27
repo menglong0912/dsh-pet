@@ -36,17 +36,14 @@
 ```sh
 git clone https://github.com/yangfan000818-droid/dsh-pet.git
 cd dsh-pet/dsh-pet            # 包在子目录里
-pnpm install
-npm run ensure:electron       # 下载 Electron 43 到 ~/.dsh/electron（只需一次）
-npm run bundle && npm run build:desktop-core
-npm run dist                  # 产物：dist-app/mac-arm64/dsh-pet.app；需要本机 Electron，可用 DSH_PET_ELECTRON_DIST 指定
-ditto dist-app/mac-arm64/dsh-pet.app /Applications/dsh-pet.app
-open /Applications/dsh-pet.app
+pnpm install                  # 同时从 npmmirror 下载 Electron 43 到 node_modules/electron/dist
+npm run install:mac           # 打包（自动 bundle + build:desktop-core）并替换 /Applications/dsh-pet.app
 ```
 
+- 只想打包不安装：`npm run dist`，产物 `dist-app/mac-arm64/dsh-pet.app`。默认用 `node_modules/electron/dist`，需要时可用 `DSH_PET_ELECTRON_DIST` 指定别的 Electron 解压目录。
 - 应用是 ad-hoc 签名（没有开发者证书）。自己构建的可以直接打开；别人构建好发给你的，先运行 `xattr -dr com.apple.quarantine /Applications/dsh-pet.app` 再打开。
 - 签名只认 bundle id，重新构建后「屏幕录制」授权不用重新给。
-- 开发调试可以不打包直接跑：`npm run bundle && npm run build:desktop-core && npm run start:app`（从终端启动时，屏幕录制权限算在终端头上）。
+- 开发调试可以不打包直接跑：`npm run bundle && npm run build:desktop-core && npm start`（从终端启动时，屏幕录制权限算在终端头上）。
 - 数据都在 `~/Library/Application Support/dsh-pet/dsh-pet/`（宠物配置、记忆、AI 设置、`app-config.json`），日志在 `~/Library/Logs/dsh-pet/app.log`。
 
 ### 接上模型

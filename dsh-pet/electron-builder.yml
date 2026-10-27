@@ -3,7 +3,7 @@
 # 关键取舍：
 #   1. 不带 node_modules：`lib/app.js` 已把 zod 打进来，其余外部只有 `electron` 与两个
 #      永不执行的动态 import（@electron/get、@electron-internal/extract-zip，见 tsdown.config.mjs）。
-#   2. electronDist 指向本机已解压的 Electron（默认 ~/.dsh/electron），由 scripts/dist.mjs 注入，
+#   2. electronDist 指向 node_modules/electron/dist（pnpm install 时下载好的那份），由 scripts/dist.mjs 注入，
 #      避免每次打包都从 GitHub 重新下一套 110 MB —— 这台机器 github.com 不通。
 #   3. asar 打开：素材（webm 51 MB）留在包内由主进程 fs 读取；没有原生模块需要 unpack。
 appId: com.pc2005.dsh-pet
@@ -36,10 +36,17 @@ extraResources:
   - from: scripts/pet-cli.mjs
     to: pet-cli.mjs
 
-# 与 package.json 的 @electron/get 默认下载版本保持一致；改版本时两处一起改
-electronVersion: 43.3.0
-# electronDist 由 scripts/dist.mjs 经 `--config.electronDist=<本机解压目录>` 传入：
+# electronVersion 不再写死：electron 已在 devDependencies，electron-builder 会自己读。
+# electronDist 由 scripts/dist.mjs 经 `--config.electronDist=<解压目录>` 传入：
 # 这个字段不做 ${env.*} 宏展开（实测会原样当成路径），所以不能写死在 YAML 里。
+
+# 只保留中文和英文语言包。mac 是 *.lproj、Windows 是 locales/*.pak，两套命名都列上
+# （electron-builder 会把值转小写后按完整名或前缀匹配）。
+electronLanguages:
+  - en
+  - en-US
+  - zh_CN
+  - zh-CN
 
 # 只出「解包目录」一种形态：分发时把 win-unpacked 整个压成 zip 即可（绿色版）。
 # 不做 portable（每次启动自解压，慢）也不做 nsis（安装包对自用场景没有增量价值）——

@@ -13,6 +13,7 @@ import { test, describe, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -128,9 +129,11 @@ describe('resolveElectronPath —— 候选优先级', () => {
     });
   });
 
-  test('一个都不存在时返回 undefined', () => {
+  test('显式候选和 $DSH_HOME 都不存在时，回落到 npm 装好的 electron', () => {
     withIsolatedHome((dir) => {
-      assert.equal(resolveElectronPath([join(dir, 'missing-1.exe'), join(dir, 'missing-2.exe')]), undefined);
+      const resolved = resolveElectronPath([join(dir, 'missing-1.exe'), join(dir, 'missing-2.exe')]);
+      // D5 起 electron 是 devDependency，require('electron') 一定能返回 node_modules 里的可执行文件
+      assert.equal(resolved, createRequire(import.meta.url)('electron'));
     });
   });
 
@@ -150,7 +153,7 @@ describe('resolveElectronPath —— 候选优先级', () => {
     });
   });
 
-  test('$DSH_HOME/electron 落地路径在本地候选中（隔离 DSH_HOME 时可命中）', () => {
+  test('npm 装好的 electron 优先于 $DSH_HOME/electron 落地路径', () => {
     withIsolatedHome((dir) => {
       process.env.DSH_HOME = join(dir, 'dshhome');
       const rel =
@@ -162,7 +165,9 @@ describe('resolveElectronPath —— 候选优先级', () => {
       const landed = join(dir, 'dshhome', 'electron', rel);
       mkdirSync(dirname(landed), { recursive: true });
       writeFileSync(landed, '');
-      assert.equal(resolveElectronPath([]), landed);
+      const resolved = resolveElectronPath([]);
+      assert.equal(resolved, createRequire(import.meta.url)('electron'));
+      assert.notEqual(resolved, landed);
     });
   });
 });

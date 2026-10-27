@@ -2,16 +2,16 @@
 /**
  * start-app.mjs —— 开发期直接跑「单进程桌宠应用」（不打包）。
  *
- * 与打包产物的差别只有 Electron 从哪来：这里用本机已解压的 Electron 拉起 `lib/app.js`，
- * 打包产物则把这些文件塞进自己的 exe。环境变量与打包版一致，方便对照排查。
+ * 与打包产物的差别只有 Electron 从哪来：这里用 pnpm install 装好的
+ * node_modules/electron/dist 拉起 `lib/app.js`，打包产物则把这些文件塞进自己的 exe。
+ * 环境变量与打包版一致，方便对照排查。
  *
  * 用法：
- *   node scripts/start-app.mjs           # 用 $DSH_HOME/electron
+ *   node scripts/start-app.mjs           # 用 node_modules/electron/dist（npm start）
  *   DSH_PET_ELECTRON_PATH=... node scripts/start-app.mjs
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,12 +25,9 @@ const ELECTRON_REL =
       ? join('Electron.app', 'Contents', 'MacOS', 'Electron')
       : 'electron';
 
-const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh');
-const electron = [process.env.DSH_PET_ELECTRON_PATH, join(dshHome, 'electron', ELECTRON_REL)].find(
-  (value) => value && existsSync(value),
-);
-if (!electron) {
-  console.error('[start-app] 找不到 Electron：先跑 `npm run ensure:electron` 或设置 DSH_PET_ELECTRON_PATH。');
+const electron = process.env.DSH_PET_ELECTRON_PATH || join(root, 'node_modules', 'electron', 'dist', ELECTRON_REL);
+if (!existsSync(electron)) {
+  console.error('[start-app] 找不到 Electron：先跑 `pnpm install`，或设置 DSH_PET_ELECTRON_PATH 指向可执行文件。');
   process.exit(1);
 }
 
