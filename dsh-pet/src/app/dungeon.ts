@@ -41,17 +41,20 @@ export type Tier = 'mob' | 'elite' | 'boss';
 
 /** 对手倍率：按主人当前小境界的典型成长取期望值，再乘档（任务书 §3 Y0「数值」） */
 export const FOE_MULT: Record<Tier, number> = { mob: 0.8, elite: 0.9, boss: 0.9 };
-/** 各档的修为收益（设计 §4.7，各秘境一样） */
-export const FIGHT_XP: Record<Tier, number> = { mob: 4, elite: 7, boss: 12 };
+/**
+ * 各档的修为收益（各秘境一样）：设计 §4.7 的数值翻倍——按原数一趟平均约 10、手动每小时约 150，
+ * 离设计 §7.1 的约 350 太远，2026-10-27 用户拍板翻倍（宝箱、收齐后的法宝折算同步翻倍）
+ */
+export const FIGHT_XP: Record<Tier, number> = { mob: 8, elite: 14, boss: 24 };
 /** 精英：30% 掉一件还没有的法宝 */
 export const ELITE_DROP_CHANCE = 0.3;
 /** 守护那一份里功法玉简的比例（其余是一件法宝） */
 export const BOSS_SCROLL_CHANCE = 0.15;
 /** 图鉴收齐以后掉法宝改掉的修为（设计 §4.7「收齐以后」） */
-export const DROP_FALLBACK_XP = 5;
-/** 宝箱：修为 3–6、15% 破境丹；20% 是机关，没躲开扣 15% 气血 */
-export const CHEST_XP_MIN = 3;
-export const CHEST_XP_MAX = 6;
+export const DROP_FALLBACK_XP = 10;
+/** 宝箱：修为 6–12、15% 破境丹；20% 是机关，没躲开扣 15% 气血 */
+export const CHEST_XP_MIN = 6;
+export const CHEST_XP_MAX = 12;
 export const CHEST_PILL_CHANCE = 0.15;
 export const CHEST_TRAP_CHANCE = 0.2;
 export const CHEST_CUT_SHARE = 0.15;
