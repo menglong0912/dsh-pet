@@ -465,6 +465,7 @@ body{display:flex;flex-direction:column}
 #autoRow[hidden]{display:none}
 #autoRow .switch{margin:0;font-size:12.5px;color:#4c463b}
 .page{flex:1;min-height:0;overflow:hidden;padding:10px 14px 12px}
+#run{display:flex;flex-direction:column}
 #entry[hidden],#ending[hidden],#run[hidden]{display:none}
 h2{margin:2px 0 2px;font-size:20px}
 .title{margin:0 0 8px;color:#8a6d3b;font-size:13px}
@@ -486,6 +487,7 @@ button{font-family:inherit}
 .entryRight{flex:.82;min-width:0}
 #entry button.primary{margin-top:6px}
 #scene{position:relative;width:100%;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:#2f3a35;flex:none}
+body:not(.cutscene) #run:has(#loadout:not([hidden])) #scene{max-height:110px}
 #scene img,#scene video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
 #scene img{opacity:0;transition:opacity .45s}
 #scene img.on{opacity:1}
@@ -537,6 +539,7 @@ body.cutscene #sceneText{flex:1;min-height:0;max-height:none;overflow:hidden;mar
 .cracks span{flex:1;height:4px;border-radius:2px;background:#c9b891;transform:skewX(-18deg)}
 .sceneText{font-size:12.5px;line-height:1.55;margin:0;white-space:pre-line;min-height:2.2em;max-height:9.3em;overflow-y:auto;flex:none}
 .choices{display:flex;flex-direction:column;gap:5px;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:3px}
+.choices:empty{display:none}
 .choices .choice{display:flex;align-items:center;gap:7px;width:100%;padding:6px 8px;border:1px solid #cdbfa6;border-radius:9px;background:#fffaf0;color:#332f28;font-size:12.5px;line-height:1.35;text-align:left;cursor:pointer;flex:none}
 .choices .choice:hover{border-color:#3f7d5a;background:#fff}
 .choices .choice img{width:24px;height:24px;object-fit:contain;flex:none}
@@ -548,12 +551,13 @@ body.cutscene #sceneText{flex:1;min-height:0;max-height:none;overflow:hidden;mar
 .card img{width:42px;height:30px;object-fit:cover;border-radius:6px;flex:none}
 .card .label{font-size:12px}
 .card .note{display:block;color:#8a816f;font-size:10.5px;line-height:1.4;margin-top:2px}
-.loadout{margin:0;padding:8px;border:1px solid #cdbfa6;border-radius:10px;background:#fffaf0;max-height:100%;overflow:auto}
+.loadout{margin:0;padding:8px;border:1px solid #cdbfa6;border-radius:10px;background:#fffaf0;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 #loadout[hidden]{display:none}
-.tactics{font-size:12px;line-height:1.5;color:#6b4b3a;margin:0 0 6px}
+#weapons{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:3px;padding-bottom:2px}
+.tactics{font-size:12px;line-height:1.5;color:#6b4b3a;margin:0 0 6px;flex:none}
 .weapon{display:flex;align-items:center;gap:6px;font-size:12.5px;padding:3px 0}
 .weapon input{accent-color:#3f7d5a}
-.loadout .primary{margin-top:7px;font-size:13px;padding:7px}
+.loadout .primary{margin-top:7px;font-size:13px;padding:7px;flex:none}
 #fullShowRow{margin-top:2px;flex:none}
 .buttons{display:flex;gap:8px;margin-top:14px}
 .buttons button{flex:1;padding:9px 12px;border-radius:9px;border:1px solid #cdbfa6;background:#fffaf0;color:#332f28;font-size:13px;cursor:pointer}

@@ -138,6 +138,21 @@ test('adventurePage：只用 textContent，数据经 JSON 字面量；adv.wait �
   assert.equal(adventurePage.includes('ipcRenderer'), false);
 });
 
+test('adventurePage：选法宝时左栏高度受约束，法宝列表自己滚、确认按钮常驻', () => {
+  // #run 撑成纵向 flex，#full 的 flex:1 才有确定高度，#left 不再被内容撑高
+  assert.ok(/#run\{display:flex;flex-direction:column\}/.test(adventurePage));
+  assert.ok(/#full\{display:flex;gap:10px;flex:1;min-height:0\}/.test(adventurePage));
+  // 法宝列表自己滚，敌方招式与确认按钮固定在上下
+  assert.ok(
+    /\.loadout\{[^}]*display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden\}/.test(adventurePage),
+  );
+  assert.ok(/#weapons\{flex:1;min-height:0;overflow-y:auto/.test(adventurePage));
+  assert.ok(/\.loadout \.primary\{[^}]*flex:none\}/.test(adventurePage));
+  // 选项多时 .choices 同样自己滚；没有选项时不占位
+  assert.ok(/\.choices\{[^}]*flex:1;min-height:0;overflow-y:auto/.test(adventurePage));
+  assert.ok(adventurePage.includes('.choices:empty{display:none}'));
+});
+
 /** 假窗口：记录构造参数与 executeJavaScript；wait 的结果、位置、收起由测试控制 */
 function fakeWindows() {
   const created: Record<string, unknown>[] = [];
