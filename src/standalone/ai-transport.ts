@@ -3,6 +3,16 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { StandaloneAiSettings } from './ai-config';
 
 export type AiFetch = typeof globalThis.fetch;
+
+/** 模型接口是不是 DeepSeek 官方（deepseek.com 及其子域） */
+function isDeepseekBaseUrl(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return host === 'deepseek.com' || host.endsWith('.deepseek.com');
+  } catch {
+    return false;
+  }
+}
 export interface AiTextMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -100,7 +110,12 @@ export async function* sdkTextStream(
       ),
     ];
     // chat_template_kwargs 不在 OpenAI 类型里，SDK 会原样透传进请求体；官方 OpenAI 会拒收未知参数，所以只按设置开启
-    const thinking = settings.disableThinking ? { chat_template_kwargs: { enable_thinking: false } } : {};
+    // DeepSeek 官方接口默认 high 档思考：桌宠的回复都很短，压到 low 省时省钱，也不怕思考占满 max_tokens
+    const thinking = settings.disableThinking
+      ? { chat_template_kwargs: { enable_thinking: false } }
+      : isDeepseekBaseUrl(settings.baseUrl)
+        ? { reasoning_effort: 'low' as const }
+        : {};
     const stream = await client.chat.completions.create(
       { model: settings.model, messages, stream: true, max_tokens: maxTokens, n: 1, ...thinking },
       { signal },

@@ -414,6 +414,27 @@ test('disableThinking sends chat_template_kwargs only when enabled, including te
   );
 });
 
+test('DeepSeek endpoints get reasoning_effort=low unless thinking is disabled outright', async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  await fixture(
+    async (ai) => {
+      assert.equal(await collect(ai.stream(options)), 'ok');
+      await ai.saveSettings({ baseUrl: 'https://api.deepseek.com', model: 'test-model' });
+      assert.equal(await collect(ai.stream({ ...options })), 'ok');
+      await ai.saveSettings({ disableThinking: true });
+      assert.equal(await collect(ai.stream({ ...options })), 'ok');
+    },
+    async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return openAiResponse('ok');
+    },
+  );
+  assert.deepEqual(
+    bodies.map((body) => body.reasoning_effort),
+    [undefined, 'low', undefined],
+  );
+});
+
 test('streamVision sends the image to the configured endpoint on both protocols, local or remote', async () => {
   const image = 'data:image/jpeg;base64,AAAA';
   const vision = { system: 'persona', prompt: 'look', image };
