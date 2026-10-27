@@ -65,7 +65,8 @@ jobs:
       - name: 安装 pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 12
+          # 与本机一致（pnpm 10.33）；lockfileVersion 仍是 9.0
+          version: 10
 
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
@@ -92,9 +93,10 @@ jobs:
       - name: 类型检查
         run: pnpm run typecheck
 
-      - name: 打包解包目录（CI 无本机 Electron，允许下载）
-        env:
-          DSH_PET_ALLOW_ELECTRON_DOWNLOAD: "1"
+      - name: 运行测试
+        run: npm test
+
+      - name: 打包解包目录
         run: npm run dist
 
       - name: 压缩为固定名 zip
