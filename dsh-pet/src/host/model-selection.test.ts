@@ -1,6 +1,6 @@
 /**
  * 模型候选链单元测试 —— 钉住「条目配置的模型优先、失败回落当前对话的模型」这条链的构造规则：
- *  - whisperModel / chatModel 留空（内置默认）→ 链上**只有**当前对话的模型（旧行为逐字不变）；
+ *  - chatModel 留空（内置默认）→ 链上**只有**当前对话的模型（旧行为逐字不变）；
  *  - 填了 → 配置的模型在前、当前对话的模型在后（生成侧按序尝试，前者失败才用后者重试一次）；
  *  - 两个来源是同一个选择 → 去重只留一个（否则失败时会拿同一个模型白试一遍、白等一个超时）；
  *  - 当前对话没配模型 → 只留配置的那个；两边都拿不到 → 空链（生成侧回「当前对话未配置模型」）。
@@ -35,29 +35,25 @@ function ctxOf(sel: ModelRef | undefined | 'throw'): { agentDefaultModel: { curr
 }
 
 describe('preferredModel —— 独立模式不先试配置里的模型', () => {
-  const conf = { whisperModel: { provider: 'deepseek', model: 'deepseek-chat' } };
+  const conf = { chatModel: { provider: 'deepseek', model: 'deepseek-chat' } };
   test('DSH 内：同 configuredModel，配置的模型优先', () => {
-    assert.deepEqual(preferredModel(conf, 'whisperModel', false), { provider: 'deepseek', model: 'deepseek-chat' });
+    assert.deepEqual(preferredModel(conf, 'chatModel', false), { provider: 'deepseek', model: 'deepseek-chat' });
   });
-  test('独立模式：只有设置页那一个模型，DSH 时代留下的 whisperModel / chatModel 一律不看', () => {
-    assert.equal(preferredModel(conf, 'whisperModel', true), undefined);
-    assert.equal(preferredModel({ chatModel: conf.whisperModel }, 'chatModel', true), undefined);
+  test('独立模式：只有设置页那一个模型，DSH 时代留下的 chatModel 一律不看', () => {
+    assert.equal(preferredModel(conf, 'chatModel', true), undefined);
   });
 });
 
-describe('configuredModel —— 条目配置里的 whisperModel / chatModel', () => {
+describe('configuredModel —— 条目配置里的 chatModel', () => {
   test('两个字段都非空 → 该选择', () => {
-    assert.deepEqual(
-      configuredModel({ whisperModel: { provider: 'deepseek', model: 'deepseek-chat' } }, 'whisperModel'),
-      {
-        provider: 'deepseek',
-        model: 'deepseek-chat',
-      },
-    );
+    assert.deepEqual(configuredModel({ chatModel: { provider: 'deepseek', model: 'deepseek-chat' } }, 'chatModel'), {
+      provider: 'deepseek',
+      model: 'deepseek-chat',
+    });
   });
 
   test('都留空（内置默认）→ undefined（= 跟随当前对话）', () => {
-    assert.equal(configuredModel({ whisperModel: { provider: '', model: '' } }, 'whisperModel'), undefined);
+    assert.equal(configuredModel({ chatModel: { provider: '', model: '' } }, 'chatModel'), undefined);
   });
 
   test('只填一半 / 结构不对 → undefined（合并器已挡下，这里再防御一次）', () => {
@@ -88,12 +84,6 @@ describe('configuredModel —— 条目配置里的 whisperModel / chatModel', (
         model: 'deepseek-chat',
       },
     );
-  });
-
-  test('两个键互不串台：whisperModel 不读 chatModel', () => {
-    const conf = { whisperModel: { provider: 'a', model: 'a1' }, chatModel: { provider: 'b', model: 'b1' } };
-    assert.equal(configuredModel(conf, 'whisperModel')?.provider, 'a');
-    assert.equal(configuredModel(conf, 'chatModel')?.provider, 'b');
   });
 });
 

@@ -1,8 +1,8 @@
 /**
- * 碎碎念 / 对话的模型选择（host 半侧，纯逻辑、零依赖）——把「条目配置里单独指定的服务商 + 模型」
+ * 对话的模型选择（host 半侧，纯逻辑、零依赖）——把「条目配置里单独指定的服务商 + 模型」
  * 与「当前对话的模型」合成一条**候选链**，供生成侧按序尝试。
  *
- * 为什么要这条链：whisperModel / chatModel 留空时行为必须与旧版**逐字一致**（跟随当前对话的模型）；
+ * 为什么要这条链：chatModel 留空时行为必须与旧版**逐字一致**（跟随当前对话的模型）；
  * 填了则优先用它，但选中的模型可能已经不可用（凭据被删 / 模型下架 / 该服务商没配 key），
  * 那时**回落到当前对话的模型重试一次**，仍失败才按生成失败报错——桌宠不会因为改错一次配置就彻底哑掉。
  *
@@ -16,13 +16,10 @@ export interface ModelRef {
   model: string;
 }
 
-/** 读条目配置里的 whisperModel / chatModel：
+/** 读条目配置里的 chatModel：
  *  两个字段都非空 → 该选择；都为空（内置默认）→ undefined（= 跟随当前对话）；
  *  结构不对 / 只填一半（合并器已挡下，这里再防御一次）→ undefined。 */
-export function configuredModel(
-  conf: Record<string, unknown> | undefined,
-  key: 'whisperModel' | 'chatModel',
-): ModelRef | undefined {
+export function configuredModel(conf: Record<string, unknown> | undefined, key: 'chatModel'): ModelRef | undefined {
   const raw = conf?.[key];
   if (!raw || typeof raw !== 'object') return undefined;
   const m = raw as Record<string, unknown>;
@@ -33,10 +30,10 @@ export function configuredModel(
 }
 
 /** 生成时要先试的配置模型：独立模式（standalone）只有设置页配的那一个模型，配置里 DSH 时代留下的
- *  whisperModel / chatModel 不再先试（试了只会失败一次再回落到当前模型）→ undefined；DSH 内同 configuredModel。 */
+ *  chatModel 不再先试（试了只会失败一次再回落到当前模型）→ undefined；DSH 内同 configuredModel。 */
 export function preferredModel(
   conf: Record<string, unknown> | undefined,
-  key: 'whisperModel' | 'chatModel',
+  key: 'chatModel',
   standalone: boolean,
 ): ModelRef | undefined {
   return standalone ? undefined : configuredModel(conf, key);

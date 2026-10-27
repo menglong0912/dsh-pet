@@ -1671,8 +1671,7 @@ class PetSprite {
     e.preventDefault();
     this.stopThrow(); // 菜单弹出前停住飞行中的宠物
     this.stopMove(); // 菜单悬停期间宠物不漫游
-    // 桌面专属工具根项（打开网站 / 碎碎念 / 对话 / 回到初始位置 / 重载配置）+ 共享菜单树（动作→分类→具体动画）
-    // 碎碎念/对话项无条件显示：手动触发不受 whisperEnabled 限制（该字段只影响自动周期轮询）
+    // 桌面专属工具根项（打开网站 / 对话 / 回到初始位置 / 重载配置）+ 共享菜单树（动作→分类→具体动画）
     // 首项文案随宿主形态变（OPEN_TARGET）：宿主是 DSH 桌面应用时点是"唤起桌面应用窗口"，仍叫「打开网站」会误导
     const tools = [
       {
@@ -1682,7 +1681,6 @@ class PetSprite {
       },
     ];
     tools.push(
-      { label: '碎碎念', action: 'whisper' },
       { label: '对话', action: 'chat' },
       { label: '回到初始位置', action: 'home' },
       // 改配置文件后免去回设置页点保存：请宿主重启桌面 Helper（全部桌面宠物窗口按最新配置重建）。
@@ -1745,10 +1743,6 @@ class PetSprite {
       if (window.petBridge) window.petBridge.openDshSite(ORIGIN); // 系统默认浏览器打开（等效 Ctrl+点击链接）
       return;
     }
-    if (leaf.action === 'whisper') {
-      this.showWhisperFromMenu(); // 立即让 host 强制新生成一句并展示（绕过节流；展示路径与周期触发一致）
-      return;
-    }
     if (leaf.action === 'chat') {
       this.showChatFromMenu(); // 打开对话弹窗（记忆经 host /chat 读写，浏览器/桌面同一实例共享）
       return;
@@ -1793,19 +1787,6 @@ class PetSprite {
     window.__dshPetDebug.menuOpen = false;
     this.syncInputBusy(); // 菜单关：若没有别的占用（拖拽/弹窗）则交还常规判定
     if (!this.inputBusy()) this.setInteractive(false);
-  }
-
-  // 「碎碎念」菜单：POST 动作让 host 立即新生成一句（写进 S）。
-  // 动作不回文本——文本只有一个出口（S），随"版本号变化"唤醒的那一拍长轮询到达并展示。
-  // 手动触发不受 whisperEnabled 限制——该字段只关自动周期，手动永远可用。
-  showWhisperFromMenu() {
-    S.postAction(WHISPER_URL + '?pet=' + encodeURIComponent(this.pet.id))
-      .then((ok) => {
-        if (!ok) console.warn('[dsh-pet] 菜单碎碎念：生成动作未成功 pet=' + this.pet.id);
-      })
-      .catch((e) => {
-        console.warn('[dsh-pet] 菜单碎碎念异常', e);
-      });
   }
 
   // 「对话」菜单：最简输入框（shared 组件，与浏览器同一份）——回车发送后弹窗消失，

@@ -2,17 +2,23 @@ import { z } from 'zod';
 import type { StandaloneLogger } from './context';
 import { createAiConfig } from './ai-config';
 import type { StandaloneAiPublicSettings } from './ai-config';
-import { isAuthenticationFailure, isRateLimitFailure, sdkTextStream } from './ai-transport';
+import { isAuthenticationFailure, isRateLimitFailure, isUnsupportedImageFailure, sdkTextStream } from './ai-transport';
 import type { AiFetch, AiRequest, AiTransportEvent } from './ai-transport';
 
 const PROVIDER = 'standalone';
 const MAX_INPUT_CHARS = 32_768;
 const MAX_OUTPUT_CHARS = 16_384;
 const MAX_EVENTS = 4096;
-const REQUESTS_PER_MINUTE = 6;
+const REQUESTS_PER_MINUTE = 12;
 const RATE_WINDOW_MS = 60_000;
 /** 识图请求里单张图片（data URL）的上限：桌宠截图压成 JPEG 后通常 100–300 KB */
 const MAX_IMAGE_CHARS = 4 * 1024 * 1024;
+/** 视觉请求被服务端按客户端错误拒绝时的固定文案：模型不支持看图，之后降级成纯文本 */
+export const UNSUPPORTED_IMAGE_MESSAGE = 'Standalone AI model does not accept images.';
+/** 判断是不是「模型不支持看图」：只认这个固定文案，别的失败照旧按错误处理 */
+export function isUnsupportedImageError(error: unknown): boolean {
+  return error instanceof Error && error.message === UNSUPPORTED_IMAGE_MESSAGE;
+}
 const textBlock = z.object({ type: z.literal('text'), text: z.string().max(MAX_INPUT_CHARS) });
 const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
@@ -59,7 +65,6 @@ export interface StandaloneAiService {
     disableThinking?: boolean;
   }): Promise<{ ok: boolean; message: string; reply?: string }>;
   isReady(): boolean;
-  canWhisper(): boolean;
   dispose(): void;
 }
 /** Optional third argument is an isolated transport/clock seam; production uses official SDKs. */
@@ -133,6 +138,8 @@ export function createStandaloneAi(
   let saving = false;
   let requests: ReadonlyArray<number> = [];
   let active: AbortController | undefined;
+  /** 本次启动 / 本次设置下已经确认「模型不支持看图」：内存里记着，保存设置就清掉 */
+  let visionUnsupported = false;
   const ready = () =>
     !disposed &&
     !paused &&
@@ -150,7 +157,7 @@ export function createStandaloneAi(
     yield* run(settings, request, callerSignal);
   }
 
-  const canSeeScreen = () => ready();
+  const canSeeScreen = () => ready() && !visionUnsupported;
 
   async function* streamVision(input: {
     system: string;
@@ -158,7 +165,8 @@ export function createStandaloneAi(
     image: string;
     signal?: AbortSignal;
   }): AsyncIterable<{ type: 'text'; text: string }> {
-    if (!canSeeScreen()) throw new Error('Standalone AI vision requires a configured model.');
+    if (!ready()) throw new Error('Standalone AI vision requires a configured model.');
+    if (visionUnsupported) throw new Error(UNSUPPORTED_IMAGE_MESSAGE);
     if (!/^data:image\/(?:png|jpeg|webp);base64,/.test(input.image) || input.image.length > MAX_IMAGE_CHARS)
       throw new Error('Standalone AI image input is invalid or too large.');
     if (input.system.length + input.prompt.length > MAX_INPUT_CHARS || !input.prompt.trim())
@@ -168,7 +176,7 @@ export function createStandaloneAi(
       messages: [{ role: 'user', content: input.prompt }],
       images: [input.image],
     };
-    yield* run(store.current(), request, input.signal);
+    yield* run(store.current(), request, input.signal, true);
   }
 
   /** 一次请求的公共执行：单飞、限频、超时、输出上限与错误归一（stream / streamVision 共用） */
@@ -176,6 +184,7 @@ export function createStandaloneAi(
     settings: ReturnType<typeof store.current>,
     request: AiRequest,
     callerSignal: AbortSignal | undefined,
+    vision = false,
   ): AsyncIterable<{ type: 'text'; text: string }> {
     if (callerSignal?.aborted) throw new Error('Standalone AI request cancelled.');
     if (active) throw new Error('Standalone AI is busy. Please wait.');
@@ -217,6 +226,12 @@ export function createStandaloneAi(
       }
       if (isRateLimitFailure(error)) {
         throw new Error('Standalone AI provider rate limit reached. Please wait.', { cause: error });
+      }
+      // 视觉请求被服务端按客户端错误拒绝（400/404/415/422）：记住当前设置不支持看图，之后直接降级成纯文本
+      if (vision && isUnsupportedImageFailure(error)) {
+        visionUnsupported = true;
+        logger.warn('Standalone AI model rejected image input; falling back to text.');
+        throw new Error(UNSUPPORTED_IMAGE_MESSAGE, { cause: error });
       }
       // Only our fixed messages are safe; never propagate SDK errors, URLs, headers, or bodies.
       if (
@@ -260,7 +275,11 @@ export function createStandaloneAi(
       active?.abort();
       try {
         const result = await store.save(input);
-        if (!disposed) paused = false;
+        if (!disposed) {
+          paused = false;
+          // 换模型 / 换地址后重新给视觉一次机会（重启也会清掉）
+          visionUnsupported = false;
+        }
         return result;
       } catch (error) {
         paused = true;
@@ -302,9 +321,6 @@ export function createStandaloneAi(
         model,
         apiKey,
         enabled: true,
-        automaticWhispers: false,
-        whisperIntervalSec: 300,
-        maxTokens: 32,
         timeoutMs: 15_000,
         disableThinking,
       };
@@ -317,6 +333,7 @@ export function createStandaloneAi(
           { system: '', messages: [{ role: 'user', content: 'hi' }] },
           controller.signal,
           fetcher,
+          32,
         );
         let reply = '';
         for await (const chunk of testStream) {
@@ -354,7 +371,6 @@ export function createStandaloneAi(
         clearTimeout(timer);
       }
     },
-    canWhisper: () => ready() && store.current().automaticWhispers,
     dispose() {
       disposed = true;
       active?.abort();

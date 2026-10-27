@@ -4,8 +4,7 @@
  *
  * 用法：
  *   dsh-pet say <文本>     让桌宠说一句给定的话
- *   dsh-pet whisper        按人设碎碎念一句
- *   dsh-pet look           看一眼屏幕并吐槽（首次需要给应用开「屏幕录制」权限）
+ *   dsh-pet look           看一眼屏幕并吐槽；模型不支持看图时按人设说一句（首次需要给应用开「屏幕录制」权限）
  *   dsh-pet activity       打印「主人此刻」的采样（调试用）
  *   dsh-pet hook           给 Claude Code hook 用：从 stdin 读 hook JSON 转给桌宠；任何失败都静默退出 0，
  *                          绝不因为桌宠没开而打断 Claude Code
@@ -38,8 +37,6 @@ async function main() {
       if (!text) return usage();
       return print(await call('POST', '/app/say', { text }));
     }
-    case 'whisper':
-      return print(await call('POST', '/app/whisper', {}));
     case 'look':
       return print(await call('POST', '/app/look', {}, 90_000));
     case 'activity':
@@ -99,6 +96,6 @@ function print(result) {
 }
 
 function usage() {
-  console.error('用法：dsh-pet say <文本> | whisper | look | activity | hook');
+  console.error('用法：dsh-pet say <文本> | look | activity | hook');
   process.exitCode = 2;
 }

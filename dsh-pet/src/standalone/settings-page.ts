@@ -4,7 +4,7 @@ export const settingsPage = `<!doctype html>
 <title>桌宠 AI 设置</title><link rel="stylesheet" href="/standalone-ai/settings.css">
 <script src="/standalone-ai/settings.js" defer></script></head><body>
 <main><header><span class="fish" aria-hidden="true">🐾</span><p class="local">独立桌宠 / 本机设置</p>
-<h1>桌宠 AI 设置</h1><p class="intro">配置你的大模型 API 接口，开启桌面聊天与碎碎念。<br>所有设置仅保存在本机，支持即时测试连接。</p></header>
+<h1>桌宠 AI 设置</h1><p class="intro">配置你的大模型 API 接口，开启桌面聊天与看屏幕吐槽。<br>所有设置仅保存在本机，支持即时测试连接。</p></header>
 <form id="settings" aria-describedby="privacy">
 <fieldset><legend>模型连接</legend>
 <label for="protocol">接口协议</label><select id="protocol" name="protocol"><option value="openai-compatible">OpenAI 兼容</option><option value="anthropic">Anthropic</option></select>
@@ -19,24 +19,17 @@ export const settingsPage = `<!doctype html>
 <label class="check enabled"><input id="enabled" type="checkbox">启用 AI 对话</label>
 <div class="test-row"><button id="test-btn" type="button">测试连接</button><span id="test-result" class="test-result" role="status" aria-live="polite"></span></div>
 </fieldset>
-<fieldset><legend>定时自动碎碎念</legend>
-<label class="check"><input id="automaticWhispers" type="checkbox" aria-describedby="cost">开启自动碎碎念</label>
-<p id="cost" class="notice">开启后，桌宠会按设定间隔定时调用模型并在桌面上说话冒泡（产生 API 费用）。默认关闭；右键菜单中的手动对话与手动碎碎念不受此开关限制。</p>
-<div class="pair"><div><label for="whisperIntervalSec">碎碎念间隔（秒）</label><input id="whisperIntervalSec" type="number" min="60" max="86400" step="1" value="300" required></div>
-<div><label for="maxTokens">单次输出上限（tokens）</label><input id="maxTokens" type="number" min="128" max="4096" step="1" value="1024" required></div></div>
-<p class="hint">间隔至少 60 秒，默认 300 秒。输出上限越小，单次回复越简短。</p>
-</fieldset>
 <fieldset id="pet-settings" hidden><legend>宠物</legend>
 <div class="pair"><div><label for="petName">名字</label><input id="petName" type="text" maxlength="24" required spellcheck="false"></div>
 <div><label for="petSize">大小（宽度 px）</label><input id="petSize" type="number" min="100" max="1500" step="1" value="500" required></div></div>
 <p class="hint">改名字或大小后桌宠会重启一下，之后请从右键重新打开设置。</p>
 <label for="petPersona">人设</label><textarea id="petPersona" rows="4" maxlength="2000" aria-describedby="persona-note"></textarea>
-<p id="persona-note" class="hint">碎碎念、对话、看屏幕吐槽、串门都按它说话。留空就用默认人设（框里的灰字）。</p>
+<p id="persona-note" class="hint">对话、看屏幕吐槽、提醒、串门都按它说话。留空就用默认人设（框里的灰字）。</p>
 <label class="check"><input id="petWorkStatus" type="checkbox" aria-describedby="workstatus-note">头顶状态</label>
 <p id="workstatus-note" class="hint">头顶显示「Claude 等你确认」「在 X 家做客」这类状态，并换成对应的动作。</p>
 <label class="check"><input id="petFixed" type="checkbox" aria-describedby="fixed-note">待在原地</label>
 <p id="fixed-note" class="hint">不再自己转身、走开，只在原地待机和做小动作。</p>
-<label class="check"><input id="whisperImageEnabled" type="checkbox">碎碎念、看屏幕吐槽时配表情包</label>
+<label class="check"><input id="whisperImageEnabled" type="checkbox">说话时配表情包（看屏幕、对话、提醒）</label>
 <label class="check"><input id="chatImageEnabled" type="checkbox">对话时配表情包</label>
 <label for="chatMemoryRounds">对话记住最近几轮</label><input id="chatMemoryRounds" type="number" min="0" max="50" step="1" value="5" aria-describedby="memory-note">
 <p id="memory-note" class="hint">一问一答算一轮，带进每次对话；越多越费 token，0 = 不记。</p>
@@ -44,8 +37,8 @@ export const settingsPage = `<!doctype html>
 </fieldset>
 <fieldset id="app-settings" hidden><legend>陪伴与提醒</legend>
 <label class="check"><input id="screenEnabled" type="checkbox" aria-describedby="screen-note">定时看屏幕吐槽</label>
-<p id="screen-note" class="hint">截图会发给上面配置的模型接口：填本机地址就只留在本机，填云端地址会把屏幕内容上传给服务商，请确认模型支持图片输入。离开电脑或一分钟没碰键鼠时不看。开着自动碎碎念时，到点的那一句碎碎念换成看屏幕，两者不会互相顶掉。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
-<label for="screenIntervalMin">看屏幕间隔（分钟）</label><input id="screenIntervalMin" type="number" min="3" max="1440" step="1" value="15">
+<p id="screen-note" class="hint">截图会发给上面配置的模型接口：填本机地址就只留在本机，填云端地址会把屏幕内容上传给服务商，请确认模型支持图片输入。模型不支持看图时，会改成按人设随口说一句（不截图）；自动触发时没授权「屏幕录制」也这样降级。离开电脑或一分钟没碰键鼠时不看。右键「看看我在干嘛」随时手动看，不受此开关限制。</p>
+<label for="screenIntervalSec">看屏幕间隔（秒）</label><input id="screenIntervalSec" type="number" min="10" max="86400" step="1" value="900">
 <label class="check"><input id="sittingEnabled" type="checkbox" aria-describedby="sitting-note">久坐提醒</label>
 <div class="pair"><div><label for="sittingAfterMin">连续坐多久提醒（分钟）</label><input id="sittingAfterMin" type="number" min="5" max="600" step="1" value="50"></div>
 <div><label for="sittingRepeatMin">还没起身，每隔（分钟）</label><input id="sittingRepeatMin" type="number" min="5" max="600" step="1" value="20"></div></div>
@@ -131,11 +124,6 @@ export const settingsScript = `
     }
     return response.json();
   }
-  // 自动碎碎念只有一个开关：独立模式要设置里开着、且宠物配置里这只宠物的 whisperEnabled 也开着才会说；
-  // 两边合起来显示，保存时开着就顺带把这只宠物的 whisperEnabled 打开（见下面「宠物」一节）
-  let aiWhispers = false;
-  let petWhispers = true;
-  function syncWhispers() { get('automaticWhispers').checked = aiWhispers && petWhispers; }
   // 「陪伴与提醒」「局域网串门」只有独立应用有（/standalone-ai/app-settings）；CLI 里是 404，这两节保持隐藏
   const appSections = [get('app-settings'), get('visit-settings')];
   // 串门的细节开关挂在总开关下面：总开关关着时置灰（值照常保存，再打开时还是原来的选择）
@@ -176,7 +164,7 @@ export const settingsScript = `
   }
   function populateApp(data) {
     get('screenEnabled').checked = data.screen.enabled === true;
-    get('screenIntervalMin').value = String(data.screen.intervalMin);
+    get('screenIntervalSec').value = String(data.screen.intervalSec);
     get('sittingEnabled').checked = data.sitting.enabled === true;
     get('sittingAfterMin').value = String(data.sitting.afterMin);
     get('sittingRepeatMin').value = String(data.sitting.repeatMin);
@@ -328,8 +316,6 @@ export const settingsScript = `
     get('chatImageEnabled').checked = petConfig.main.chatImageEnabled === true;
     get('chatMemoryRounds').value = String(petConfig.main.chatMemoryRounds);
     get('petConfigFile').textContent = data.file;
-    petWhispers = pet.whisperEnabled === true;
-    syncWhispers();
     return true;
   }
   function petBody() {
@@ -339,9 +325,7 @@ export const settingsScript = `
         ...pet,
         name: get('petName').value.trim(), size: num('petSize'), whisperPrompt: get('petPersona').value,
         workStatusEnabled: get('petWorkStatus').checked,
-        fixedEnabled: get('petFixed').checked,
-        // 关掉时不动它：设置里的开关已经拦住了自动碎碎念
-        whisperEnabled: get('automaticWhispers').checked || pet.whisperEnabled === true
+        fixedEnabled: get('petFixed').checked
       }),
       whisperImageEnabled: get('whisperImageEnabled').checked, chatImageEnabled: get('chatImageEnabled').checked,
       chatMemoryRounds: num('chatMemoryRounds')
@@ -349,12 +333,10 @@ export const settingsScript = `
   }
   const num = id => Number(get(id).value);
   function populate(data) {
-    for (const id of ['protocol','baseUrl','model','whisperIntervalSec','maxTokens']) {
+    for (const id of ['protocol','baseUrl','model']) {
       if (data[id] !== undefined) get(id).value = String(data[id]);
     }
     for (const id of ['enabled','disableThinking']) get(id).checked = data[id] === true;
-    aiWhispers = data.automaticWhispers === true;
-    syncWhispers();
     get('key-state').textContent = data.hasKey ? '已保存 · 不回显' : '尚未设置';
     get('apiKey').value = '';
     get('clearApiKey').checked = false;
@@ -364,7 +346,6 @@ export const settingsScript = `
     if (get('clearApiKey').checked) {
       get('apiKey').value = '';
       get('enabled').checked = false;
-      get('automaticWhispers').checked = false;
     }
   });
   if (testBtn && testResult) {
@@ -421,11 +402,10 @@ export const settingsScript = `
     const input = {
       protocol: get('protocol').value, baseUrl: get('baseUrl').value.trim(), model: get('model').value.trim(),
       apiKey: get('apiKey').value, clearApiKey: get('clearApiKey').checked,
-      enabled: get('enabled').checked, automaticWhispers: get('automaticWhispers').checked,
-      disableThinking: get('disableThinking').checked,
-      whisperIntervalSec: Number(get('whisperIntervalSec').value), maxTokens: Number(get('maxTokens').value)
+      enabled: get('enabled').checked,
+      disableThinking: get('disableThinking').checked
     };
-    // 宠物这一节按点保存这一刻的表单算好：下面存完 AI 设置会重新显示碎碎念开关
+    // 宠物这一节按点保存这一刻的表单算好
     const petInput = petConfig ? petBody() : null;
     const petBefore = petConfig ? targetPet(petConfig) : null;
     get('apiKey').value = '';
@@ -435,7 +415,7 @@ export const settingsScript = `
       if (appAvailable) {
         populateApp(await appRequest('POST', {
           greetAfterAwayMin: num('greetAfterAwayMin'),
-          screen: { enabled: get('screenEnabled').checked, intervalMin: num('screenIntervalMin') },
+          screen: { enabled: get('screenEnabled').checked, intervalSec: num('screenIntervalSec') },
           sitting: { enabled: get('sittingEnabled').checked, afterMin: num('sittingAfterMin'), repeatMin: num('sittingRepeatMin') },
           water: { enabled: get('waterEnabled').checked, everyMin: num('waterEveryMin') },
           offWork: { enabled: get('offWorkEnabled').checked, time: get('offWorkTime').value, weekdaysOnly: get('offWorkWeekdaysOnly').checked, leadMin: num('offWorkLeadMin') },

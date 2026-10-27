@@ -1,8 +1,8 @@
 /**
  * 成品 → 渲染列表的契约测试：条目级字段只有**一处**填充点（flattenConfigPets）。
  *
- * 背景：animations / animationWeights / eventsRefreshSec / physics / confineToScreen / workStatusTexts /
- * whisperModel / chatModel 这八个条目级字段
+ * 背景：animations / animationWeights / physics / confineToScreen / workStatusTexts /
+ * chatModel 这六个条目级字段
  * 必须由 flattenConfigPets 从「条目」吹进每只实例。曾经设置页保存后把可编辑的裸实例列表回推给容器时
  * "补吹"一遍——它漏掉了 physics：新增宠物或同步后该实例的 physics 是 undefined，拖拽跟手第一帧读
  * cfg.physics.throwPower 直接抛错（表现为宠物完全拖不动）。现在写入方只回成品聚合，由调用方重新拍平。
@@ -27,11 +27,9 @@ import type { Pet } from './types.ts';
 const ENTRY_FIELDS: Array<keyof Pet> = [
   'animations',
   'animationWeights',
-  'eventsRefreshSec',
   'physics',
   'confineToScreen',
   'workStatusTexts',
-  'whisperModel',
   'chatModel',
 ];
 
@@ -128,13 +126,13 @@ describe('flattenConfigPets —— 成品 → 渲染列表的唯一填充点', (
       /physicsValid\(ph\)/.test(readSource('../host/config.ts')),
       'saveUserConfig 必须用 physicsValid 校验 physics（与读取侧同一套规则）',
     );
-    // ⑦ 模型选择（设置页「AI 模型」两个下拉框）必须真的提交：whisperModel / chatModel 若不在白名单里，
+    // ⑦ 模型选择（设置页「AI 模型」下拉框）必须真的提交：chatModel 若不在白名单里，
     //    前端选了也写不进用户层（只会被 existing 的透传值盖回去）。宿主必须用同一份
     //    modelSelectionValid 整段校验。
     const hostConfig = readSource('../host/config.ts');
     assert.ok(
-      /modelSelectionValid\(wm\)/.test(hostConfig) && /modelSelectionValid\(cm\)/.test(hostConfig),
-      'saveUserConfig 必须用 modelSelectionValid 校验 whisperModel / chatModel（与读取侧同一套规则）',
+      /modelSelectionValid\(cm\)/.test(hostConfig),
+      'saveUserConfig 必须用 modelSelectionValid 校验 chatModel（与读取侧同一套规则）',
     );
     // 下拉框的数据源必须与 DSH 的模型选择器同源：走宿主 llm 服务（listProviders / listModels），
     // 不得另立一份手写的服务商清单——那会随 DSH 支持的服务商漂移。

@@ -46,8 +46,6 @@ export interface StandaloneModelService {
   resolveModelInfo(provider?: string, model?: string, signal?: AbortSignal): Promise<unknown>;
   stream(options: unknown): AsyncIterable<unknown>;
   isReady(): boolean;
-  canWhisper(): boolean;
-  getSettings(): { whisperIntervalSec: number };
   dispose(): void;
 }
 
@@ -157,11 +155,7 @@ export function createStandaloneContext(options: StandaloneContextOptions): Stan
     connection: { authenticatedUrl: options.authenticatedUrl ?? ((baseUrl: string): string => baseUrl) },
     ...(ai
       ? {
-          standaloneAi: {
-            isReady: () => ai.isReady(),
-            canWhisper: () => ai.canWhisper(),
-            whisperIntervalSec: () => ai.getSettings().whisperIntervalSec,
-          },
+          standaloneAi: { isReady: () => ai.isReady() },
         }
       : {}),
     commands: { register: (): (() => void) => () => {} },
@@ -202,7 +196,7 @@ export function createStandaloneContext(options: StandaloneContextOptions): Stan
            * `for await` 会立刻抛 TypeError（文案由 V8 生成，形如 "llm.stream(...) is not a function
            * or its return value is not async iterable"），同时那个 rejected promise 无人接管，
            * 以 unhandled rejection **直接终止进程**。0.3.4 的崩溃根因即此：配置里设了
-           * whisperModel/chatModel 就必崩，因为只有配了模型才会真的走到这里。
+           * chatModel 就必崩，因为只有配了模型才会真的走到这里。
            */
           // 不用 `async function*`：一个只有 throw、没有 yield 的生成器会被 eslint 的
           // require-yield 拦下；而这里恰恰不该 yield 任何东西（独立模式没有模型后端）。

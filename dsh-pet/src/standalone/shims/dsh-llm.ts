@@ -6,7 +6,7 @@
  * `model-selection.ts` 的 `currentModel()` 判定为「未配置」→ `generateWhisper` / `generateChat`
  * 直接回 `{ ok: false, reason: 'provider-missing' }`。
  *
- * **但这不是结构性保证。** 用户在配置里显式写了 `whisperModel` / `chatModel`（设置页选过模型
+ * **但这不是结构性保证。** 用户在配置里显式写了 `chatModel`（设置页选过模型
  * 就会写进配置）时，候选链非空，生成侧会真的走到本文件的消息构造与 `ctx.llm.stream`。
  * 所以本文件与 ctx.llm 替身的每一处形状都必须与 DSH 的真实契约一致 —— 0.3.4 的崩溃正是因为
  * `stream` 被当成"永远不走的那条路"，实现成返回 Promise 而契约要求 AsyncIterable

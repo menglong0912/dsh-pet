@@ -29,13 +29,11 @@ export interface MenuLeaf {
   label: string;
   /** 播放的动画名（点播动作）；action 优先于 anim */
   anim?: string;
-  /** 自定义动作：open-site=打开网站；whisper=立即碎碎念一句；
-   * chat=打开对话弹窗；home=回到初始位置；reload=重载配置（桌面端专属：重启桌面 Helper，
-   * 全部桌面宠物窗口按最新配置重建——浏览器端刷新页面即可，不注入此项）；
-   * third-party=第三方注册的菜单项（见 buildMoreBranch）——点击只把 (owner, label) 上报给宿主，
-   * 具体做什么由注册方自己决定。
-   * 手动触发均不受 whisperEnabled 影响（该字段只关自动周期轮询） */
-  action?: 'open-site' | 'whisper' | 'chat' | 'home' | 'reload' | 'third-party';
+  /** 自定义动作：open-site=打开网站；chat=打开对话弹窗；home=回到初始位置；
+   * reload=重载配置（桌面端专属：重启桌面 Helper，全部桌面宠物窗口按最新配置重建——
+   * 浏览器端刷新页面即可，不注入此项）；third-party=第三方注册的菜单项（见 buildMoreBranch）——
+   * 点击只把 (owner, label) 上报给宿主，具体做什么由注册方自己决定。 */
+  action?: 'open-site' | 'chat' | 'home' | 'reload' | 'third-party';
   /** third-party：注册它的 owner（身份键，**只用于回传，不显示**）。同一个 owner 的项收在同一个
    *  分组下；只有一项时跳过这层、直接平铺（见 buildMoreBranch）。 */
   owner?: string;

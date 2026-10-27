@@ -357,7 +357,7 @@ describe('HTTP boundary protects every route and settings', () => {
       assert.equal((await fetch(base + '/standalone-ai/settings')).status, 403);
       const read = await fetch(base + '/standalone-ai/settings', { headers });
       assert.deepEqual(await read.json(), { protocol: 'anthropic', model: 'x', hasKey: true });
-      for (const body of ['null', '{broken', '{"whisperIntervalSec":59}']) {
+      for (const body of ['null', '{broken', '{"timeoutMs":999}']) {
         assert.equal((await fetch(base + '/standalone-ai/settings', { method: 'POST', headers, body })).status, 400);
       }
       assert.equal(saves, 0);

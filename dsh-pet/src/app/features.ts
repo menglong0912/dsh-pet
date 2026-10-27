@@ -4,7 +4,7 @@
  * 纯逻辑都在旁边的模块里（activity / reminders / claude-hooks / status，各有单测）；这里只做接线：
  *   - 每 TICK_MS 采样一次：系统空闲秒数与锁屏（Electron powerMonitor）+ 前台应用（`lsappinfo`，无需授权）；
  *   - 根据采样推进久坐 / 喝水 / 下班提醒、回来打招呼、定时看屏幕；
- *   - 与插件的自动碎碎念共用一个节拍（takeWhisperTurn）：看屏幕占它的拍，应用说话时它让一让；
+ *   - 看屏幕是唯一的自动说话节拍：模型不支持看图或没授权屏幕录制时，降级成按人设随口说一句；
  *   - 把 Claude Code 与串门合成为一个外部工作状态（桌宠只有一个外部槽）；
  *   - 把一天里的事记进宠物日记（diary.ts），第二天回到电脑前时补写前一天的日记；
  *   - 修炼（cultivation.ts）：在电脑前就涨修为，久坐提醒后离开会「调息」，Claude 干完活偶尔炼出破境丹；
@@ -28,7 +28,8 @@
  * 不碰插件内部状态——以后合并上游时这里不受插件内部重构影响。
  *
  * 说话的文本由本机模型按人设生成（人设 + 时间 + 「主人此刻」），模型不可用时用固定兜底句；
- * 看屏幕没有兜底句：看不了就明确说看不了（手动触发时）或安静跳过（自动触发时）。
+ * 看屏幕看不了时明确说看不了（手动触发时）或安静跳过（自动触发、模型没配好时）；
+ * 模型不支持看图、或自动触发时没授权屏幕录制，则改调插件的 /whisper，按人设随口说一句。
  */
 import { execFile } from 'node:child_process';
 import { userInfo } from 'node:os';
@@ -38,6 +39,7 @@ import { findPetInstance, flattenPetList, readAllConfig } from '../host/config';
 import type { ConfigPaths } from '../host/config';
 import { LOCK_MAX_TTL_MS } from '../host/lock';
 import { composeSystemPrompt, petPersona } from '../host/persona';
+import { isUnsupportedImageError } from '../standalone/ai-provider';
 import type { StandaloneAiService } from '../standalone/ai-provider';
 import { ActivityTracker, describeActivity, durationText } from './activity';
 import type { ActivitySnapshot } from './activity';
@@ -167,8 +169,10 @@ const NOTE_BUBBLE_MS = 20_000;
 const NOTE_RELAY_MS = 15_000;
 /** 自动看屏幕要求键鼠最近活动过（秒）：人在看视频 / 发呆时不打扰 */
 const SCREEN_ACTIVE_IDLE_SEC = 60;
-/** 应用刚说过话这么久内，自动碎碎念让一让（气泡默认显示 10 秒） */
+/** 应用刚说过话这么久内，不插入打坐这类小动作（气泡默认显示 10 秒） */
 const SPOKE_HOLD_MS = 15_000;
+/** 看屏幕日记的最小间隔：自动看屏幕改成秒级后，别一小时内就把一天 200 条日记挤满 */
+const SCREEN_DIARY_GAP_MS = 3 * 60_000;
 /** 打完到关掉心魔窗口 / 擂台之间的停顿（§X14：1 秒——run() 结束时收场动作只剩约 0.6 秒，停这么久正好播完） */
 const CLOSE_HOLD_MS = 1_000;
 /** 演出占着宠物的锁比时间线多留这么久：演完还要停 CLOSE_HOLD_MS 才放，定时器也会有点漂 */
@@ -282,13 +286,8 @@ export interface AppFeatures {
   say(text: string): Promise<boolean>;
   /** 按人设碎碎念一句（插件的 /whisper，结果原样返回） */
   whisper(): Promise<Record<string, unknown>>;
-  /** 看一眼屏幕并吐槽；返回结果说明（给 HTTP 调用方看；image = 配的表情包名） */
+  /** 看一眼屏幕并吐槽；模型不支持看图 / 自动触发没授权时降级成按人设说一句（返回结果说明；image = 配的表情包名） */
   lookAtScreen(manual: boolean): Promise<{ ok: boolean; text?: string; image?: string; reason?: string }>;
-  /**
-   * 插件自动碎碎念到点时先问这里（ctx.dshPetAppWhisperTurn）：返回 true = 这一拍归应用，插件不说。
-   * 到点该看屏幕就用看屏幕代替这句；应用正在 / 刚刚说话就让一让——两种气泡不互相顶掉、不同时抢模型。
-   */
-  takeWhisperTurn(petId: string): boolean;
   /** 邻居簿与串门身份（设置页「邻居」一节用，见 app-routes.ts 的 appNeighborsHandler） */
   neighbors: {
     /** 本机身份 id（GET 时只回前 8 位） */
@@ -366,8 +365,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let screenBusy = false;
   /** 上次成功说话的时间（SPOKE_HOLD_MS 用） */
   let lastSpokeAt = 0;
-  /** 插件上次来问碎碎念这一拍的时间：判断自动碎碎念在不在跑 */
-  let lastWhisperTurnAt = 0;
+  /** 上一条看屏幕日记的时间：日记一天最多 200 条，看屏幕太频繁时不每条都记 */
+  let lastScreenDiaryAt = 0;
   /** 串门身份（每台电脑一对密钥，重启不变）：信标 id、敲门签名、应答签名都用它；设置页可以重置成新的一对 */
   let visitIdentity = loadVisitIdentity(deps.identityPath, (message) => log(`串门：${message}`));
   /** 串门网络：信标（总开关开着、接待或出门开了任一项时有）与接待端口（允许别人来时有） */
@@ -684,20 +683,38 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return meme;
   }
 
+  /** 降级成原来的碎碎念：调插件的 /whisper（按人设 + 时间 + 主人此刻生成一句，不截图） */
+  async function whisperFallback(): Promise<{ ok: boolean; text?: string; image?: string; reason?: string }> {
+    try {
+      const result = await petRequest('POST', '/whisper');
+      if (result.ok === true && typeof result.text === 'string') {
+        return { ok: true, text: result.text, ...(typeof result.image === 'string' ? { image: result.image } : {}) };
+      }
+      log(`碎碎念降级失败：${JSON.stringify(result)}`);
+      return { ok: false, reason: typeof result.reason === 'string' ? result.reason : 'whisper-failed' };
+    } catch (error) {
+      log(`碎碎念降级失败：${errorText(error)}`);
+      return { ok: false, reason: 'error' };
+    }
+  }
+
   async function lookAtScreen(
     manual: boolean,
   ): Promise<{ ok: boolean; text?: string; image?: string; reason?: string }> {
     if (screenBusy) return { ok: false, reason: 'busy' };
-    if (!ai.canSeeScreen()) {
-      if (manual) await say('先在 AI 设置里把模型配好，我才能看屏幕哦～');
-      return { ok: false, reason: 'not-ready' };
-    }
-    // 自动触发不主动弹系统授权框：没授权就安静跳过；手动触发才去调 getSources（首次会弹授权）
-    if (!manual && electron.systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
-      return { ok: false, reason: 'no-permission' };
-    }
     screenBusy = true;
     try {
+      // 模型没配好：自动触发安静跳过；手动触发提示去配（不降级成碎碎念——碎碎念同样要模型）
+      if (!ai.isReady()) {
+        if (manual) await say('先在 AI 设置里把模型配好，我才能看屏幕哦～');
+        return { ok: false, reason: 'not-ready' };
+      }
+      // 记住「当前这套设置不支持看图」：之后到点不再发视觉请求，直接降级成碎碎念
+      if (!ai.canSeeScreen()) return await whisperFallback();
+      // 自动触发不主动弹系统授权框：没授权就降级成碎碎念；手动触发才去调 getSources（首次会弹授权）
+      if (!manual && electron.systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+        return await whisperFallback();
+      }
       // 没授权时 getSources 直接抛「Failed to get sources.」（不是返回空列表），按没授权处理；
       // 授权了还失败才算真错误，交给下面的 catch
       const sources = await electron.desktopCapturer
@@ -707,10 +724,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
           return [];
         });
       if (electron.systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
-        if (manual) {
-          await say('先在系统设置里给我开「屏幕录制」权限，再重开我哦～');
-          void electron.shell.openExternal(SCREEN_SETTINGS_URL);
-        }
+        if (!manual) return await whisperFallback();
+        await say('先在系统设置里给我开「屏幕录制」权限，再重开我哦～');
+        void electron.shell.openExternal(SCREEN_SETTINGS_URL);
         return { ok: false, reason: 'no-permission' };
       }
       // 看鼠标所在的那块屏幕
@@ -734,10 +750,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       // 正在演一场（心魔）时也不联动说话动画：手动看屏幕照样能看，只是别顶掉演出的动画
       if (!(await say(text, { image: meme?.name, ...(battle ? { anim: false } : {}) })))
         return { ok: false, text, reason: 'say-failed' };
-      diary.note(Date.now(), 'screen', `看了一眼主人的屏幕，说：「${text}」`);
+      const now = Date.now();
+      if (now - lastScreenDiaryAt >= SCREEN_DIARY_GAP_MS) {
+        diary.note(now, 'screen', `看了一眼主人的屏幕，说：「${text}」`);
+        lastScreenDiaryAt = now;
+      }
       return { ok: true, text, ...(meme ? { image: meme.name } : {}) };
     } catch (error) {
       log(`看屏幕失败：${errorText(error)}`);
+      // 识别出不支持看图的那一拍当场降级，别让这一拍空掉；401 / 429 / 超时 / 网络错误照旧
+      if (isUnsupportedImageError(error)) return await whisperFallback();
       if (manual) await say('刚才没看清，等会儿再看～');
       return { ok: false, reason: 'error' };
     } finally {
@@ -836,58 +858,25 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       }
     }
 
-    // 自动碎碎念在跑时，看屏幕占它让出的那一拍（takeWhisperTurn），不另起一路；没在跑才自己按间隔看
-    if (!whisperRunning(now) && screenDue(now)) void lookAtScreen(false);
+    // 到点自动看屏幕；看不了（不支持看图 / 自动触发没授权）时 lookAtScreen 内部降级成碎碎念
+    if (screenDue(now)) void lookAtScreen(false);
     await syncVisit();
     await refreshStatus(now);
     await refreshMenu();
   }
 
-  /**
-   * 到点该自动看屏幕：开着、没出门、没在演一场、人在且 activeIdleSec 内碰过键鼠、离上次够间隔、
-   * 能看（模型已就绪 + 已授权）
-   * @param activeIdleSec 「最近碰过键鼠」的窗口（秒）
-   */
-  function screenDue(now: number, activeIdleSec = SCREEN_ACTIVE_IDLE_SEC): boolean {
+  /** 到点该自动看屏幕：开着、没出门、没在演一场、人在且一分钟内碰过键鼠、离上次够间隔 */
+  function screenDue(now: number): boolean {
     const config = deps.appConfig();
     return (
       config.screen.enabled &&
       trip === null &&
       battle === null &&
       tracker.snapshot()?.present === true &&
-      electron.powerMonitor.getSystemIdleTime() < activeIdleSec &&
-      now - lastScreenAt >= config.screen.intervalMin * 60_000 &&
-      !screenBusy &&
-      ai.canSeeScreen() &&
-      electron.systemPreferences.getMediaAccessStatus('screen') === 'granted'
+      electron.powerMonitor.getSystemIdleTime() < SCREEN_ACTIVE_IDLE_SEC &&
+      now - lastScreenAt >= config.screen.intervalSec * 1000 &&
+      !screenBusy
     );
-  }
-
-  /** 插件的自动碎碎念周期（秒，与插件同口径：至少 60 秒） */
-  function whisperPeriodSec(): number {
-    return Math.max(60, ai.getSettings().whisperIntervalSec);
-  }
-
-  /** 插件的自动碎碎念在跑：最近两个周期内来问过拍 */
-  function whisperRunning(now: number): boolean {
-    return now - lastWhisperTurnAt <= 2 * whisperPeriodSec() * 1000;
-  }
-
-  function takeWhisperTurn(id: string): boolean {
-    if (id !== petId()) return false;
-    const now = Date.now();
-    lastWhisperTurnAt = now;
-    // 出门在外：家里只剩个半透明的影子，不碎碎念
-    if (trip) return true;
-    // 正在演一场（心魔试炼）：气泡按时间线一句一句走，碎碎念别来抢
-    if (battle) return true;
-    // 拍与拍之间可能隔好几分钟，「碰过键鼠」放宽到这一拍以来：看视频 / 发呆一整拍仍然不看，
-    // 但不会因为恰好在这一拍的瞬间停手了一分钟就错过（只按 60 秒卡，长间隔下几乎轮不到看屏幕）
-    if (screenDue(now, Math.max(SCREEN_ACTIVE_IDLE_SEC, whisperPeriodSec()))) {
-      void lookAtScreen(false);
-      return true;
-    }
-    return screenBusy || generating || now - lastSpokeAt < SPOKE_HOLD_MS;
   }
 
   function schedule(): void {
@@ -2780,7 +2769,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     say,
     whisper: () => petRequest('POST', '/whisper'),
     lookAtScreen,
-    takeWhisperTurn,
     neighbors: {
       identityId: () => visitIdentity.id,
       list: () => neighbors.list(),

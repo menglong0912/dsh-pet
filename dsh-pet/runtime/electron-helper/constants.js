@@ -145,7 +145,6 @@ const ORIGIN = new URL(CONFIG.configUrl).origin;
 /** 宿主 /dsh-pet-7340 前缀：bridge 走自定义 scheme（主进程转发），否则 HTTP 直连宿主 */
 const BASE = BRIDGE ? 'dsh-pet-bridge://dsh-pet/dsh-pet-7340' : ORIGIN + '/dsh-pet-7340';
 const STATE_URL = BASE + '/state'; // 轮询统一状态 S：前端 1s 轮询的唯一数据源（工作状态/通知/说话）
-const WHISPER_URL = BASE + '/whisper';
 // 实况上报（渲染端 → 宿主，**内部通道**）：第三方用 GET /pose 读宿主存下的这份快照
 const POSE_REPORT_URL = BASE + '/pose/report';
 // 实况上报的节流间隔（ms）。sendBounds 在走位/抛掷时是**逐帧**调用的（60Hz），必须合并。

@@ -39,8 +39,6 @@ test('validates safe endpoints and explicit configuration with fixed redacted er
   for (const patch of [
     { model: '' },
     { timeoutMs: 60001 },
-    { whisperIntervalSec: 59 },
-    { maxTokens: 100000 },
     { hasKey: true },
     { enabled: 'true' },
     { apiKey: 'bad\nkey' },
@@ -60,15 +58,47 @@ test('persists only in isolated home, redacts keys, supports keep and clear, rel
     const saved = await store.save(configured);
     assert.equal(saved.hasKey, true);
     assert.equal('apiKey' in saved, false);
-    assert.equal(saved.maxTokens, 1024);
-    assert.equal(saved.whisperIntervalSec, 300);
-    assert.equal((await store.save({ apiKey: '', automaticWhispers: true })).hasKey, true);
+    assert.equal('maxTokens' in saved, false);
+    assert.equal('automaticWhispers' in saved, false);
+    assert.equal('whisperIntervalSec' in saved, false);
+    assert.equal((await store.save({ apiKey: '' })).hasKey, true);
     assert.equal(createAiConfig(home).publicSettings().model, 'chosen-model');
     assert.match(readFileSync(join(home, 'dsh-pet', 'standalone-ai.json'), 'utf8'), /test-secret/);
     assert.equal((await store.save({ clearApiKey: true, enabled: false })).hasKey, false);
     assert.equal(createAiConfig(home).publicSettings().enabled, false);
     writeFileSync(join(home, 'dsh-pet', 'standalone-ai.json'), '{broken');
     assert.throws(() => createAiConfig(home), /^Error: Cannot securely load standalone AI settings\.$/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('legacy automaticWhispers / whisperIntervalSec / maxTokens load silently and are not written back', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'pet-ai-'));
+  try {
+    createAiConfig(home); // 建好 dsh-pet 目录
+    const legacy = {
+      ...DEFAULT_AI_SETTINGS,
+      ...configured,
+      automaticWhispers: true,
+      whisperIntervalSec: 45,
+      maxTokens: 100000,
+    };
+    writeFileSync(join(home, 'dsh-pet', 'standalone-ai.json'), JSON.stringify(legacy));
+    const store = createAiConfig(home);
+    const publicSettings = store.publicSettings();
+    assert.equal('automaticWhispers' in publicSettings, false);
+    assert.equal('whisperIntervalSec' in publicSettings, false);
+    assert.equal('maxTokens' in publicSettings, false);
+    assert.equal(publicSettings.model, 'chosen-model');
+    await store.save({ enabled: false });
+    const persisted = JSON.parse(readFileSync(join(home, 'dsh-pet', 'standalone-ai.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    assert.equal('automaticWhispers' in persisted, false);
+    assert.equal('whisperIntervalSec' in persisted, false);
+    assert.equal('maxTokens' in persisted, false);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
