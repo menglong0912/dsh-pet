@@ -376,11 +376,14 @@ test('a neighborhood lists other pets it hears from, ignores itself and junk, fo
       [{ id: 'bbbbbbbb-other', owner: '小王', pet: '小鱼', port: 2222, address: '127.0.0.1' }],
     );
     assert.equal(a.get('bbbbbbbb-other')?.owner, '小王');
+    // 127.0.0.1 不在本机网段里，a、b 还会互相单播回一条信标：先让 b 不再发，等已经发出的落地再拨钟，
+    // 否则慢一点的机器（Windows CI）上 b 的回发会在拨钟之后才处理，被当成「刚又听到」
+    b.stop();
+    await new Promise((done) => setTimeout(done, 100));
     clock += 21_000;
     assert.deepEqual(a.list(), []);
     assert.equal(a.get('bbbbbbbb-other'), undefined);
     // 不接待客人：只听不发，别人看不到它
-    b.stop();
     hosting = false;
     await b.start();
     await new Promise((done) => setTimeout(done, 100));
