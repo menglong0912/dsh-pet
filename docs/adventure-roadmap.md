@@ -30,7 +30,7 @@
 | Y1   | 存档与结算                                   | Y0     | `cultivation.ts`                                                                                                                             | 小   |
 | Y2   | 对手上桌面与演出                             | Y0     | `foe-window.ts`（新）、`battle-show.ts`、`app-routes.ts`                                                                                     | 中   |
 | Y3   | 历练小窗与接线                               | Y1、Y2 | `adventure-window.ts`（新）、`adventure-flow.ts`（新）、`app-routes.ts`、`features.ts`、根 `README.md`                                       | 大   |
-| YA   | 试点素材（主会话做）                         | 无     | `assets/webm/`、`assets/pic/adventure/三王传承/`、`assets/pic/adventure/通用/`、`assets/pic/fx/`、`prompts/`                                 | 大   |
+| YA   | 试点素材（主会话做）                         | 无     | `assets/webm/`、`assets/pic/adventure/三王传承/`、`assets/pic/adventure/通用/`、`assets/pic/fx/`、仓库根的 `prompts/`                        | 大   |
 
 **执行顺序**：Y0 → Y1、Y2（文件不重叠，可以并行）→ Y3。YA 和开发并行，先出样张给用户看（§YA）。
 
@@ -490,9 +490,9 @@
 
 **先出样张**：`封面`、`对手-白凝冰`、`对手-野狗`三张图（约 36 积分），给用户看画风，点头了再批量做。设计 §4.12 第 4 条提过「三个秘境各出两张比画风」，这里只比三王传承自己的。
 
-**批量**：清单见 §2.3，提示词写进 `prompts/秘境 三王传承 素材提示词.md`。
+**批量**：清单见 §2.3，提示词写进仓库根的 `prompts/秘境 三王传承 素材提示词.md`。
 
-- **宠物动作**：照 `prompts/桌面宠物 战斗与修炼动作提示词.md` 的规范（绿幕、首尾标准站姿、4 秒）。
+- **宠物动作**：照仓库根 `prompts/桌面宠物 战斗与修炼动作提示词.md` 的规范（绿幕、首尾标准站姿、4 秒）。
 - **对手动作**：先在纯绿底上画立绘，再用 `frames2video` 以立绘作首尾帧生成（设计 §9.3），抠像流程同宠物素材。
 - **量时刻**：每段对手动作量出离手时刻、手的位置、受击前摇，填进 Y2 的 `RELEASE` 和 `REACTION_WINDUP_MS`。
 
