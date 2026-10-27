@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
   fight,
+  fightUntilDecision,
+  fallbackAction,
+  legalActions,
+  rngFrom,
   tribulate,
   shadowOf,
   statCap,
@@ -47,6 +51,81 @@ test('同种子同结果，不同种子不同结果', () => {
   const first = mk(1);
   assert.deepEqual(mk(1), first, '输入和种子都相同必然同一场');
   assert.notDeepEqual(mk(2), first, '换了种子应该是另一场');
+});
+
+test('X17 逐手：两边都是 auto 时和 fight() 逐条一样（固定一批种子）', () => {
+  for (let i = 0; i < 20; i++) {
+    const a = named(fighterAt(8, seededRng(i)), '甲');
+    const b = named(fighterAt(8, seededRng(i + 100)), '乙');
+    const seed = `auto-${i}`;
+    const whole = fight(a, b, seed);
+    const stepwise = fightUntilDecision(a, b, seed, ['auto', 'auto']);
+    assert.equal(stepwise.need, null);
+    assert.deepEqual(stepwise.events, whole, `种子 ${seed}：逐手模式两边都自动，事件必须一字不差`);
+  }
+});
+
+test('X17 逐手：一边一串定好的手，每补一手从头算，前缀与对面的挑法都不变', () => {
+  const a = named(fighterAt(10, seededRng(3)), '甲');
+  const b = named(fighterAt(10, seededRng(4)), '乙');
+  const seed = 'predetermined';
+  const decisions: Action[] = [];
+  const prefixes: BattleEvent[][] = [];
+  let result = fightUntilDecision(a, b, seed, [[], 'auto']);
+  while (result.need) {
+    assert.equal(result.need.side, 0, '只有自家这一边是定好的手');
+    prefixes.push(result.events);
+    const legal = legalActions(result.need.view);
+    assert.ok(legal.length > 0);
+    decisions.push(legal[decisions.length % legal.length]!);
+    const next = fightUntilDecision(a, b, seed, [decisions, 'auto']);
+    assert.deepEqual(next.events.slice(0, result.events.length), result.events, '补一手后之前的事件前缀不变');
+    result = next;
+  }
+  assert.ok(prefixes.length > 0);
+  // 对面只吃决策随机数：用同一个种子单独喂它，最终事件应和逐步重算的一字不差
+  const replay = [...decisions];
+  const self: Controller = { decide: () => replay.shift() ?? { kind: 'unarmed' } };
+  const expected = fight(a, b, seed, [self, autoController(rngFrom(seed + ':decide'))]);
+  assert.deepEqual(result.events, expected, '对面的挑法不因自家补手而变');
+});
+
+test('X17 legalActions：不列用过的主动招、次数用完的招；法宝、空手、被动不列', () => {
+  const view: BattleView = {
+    self: 0,
+    hp: [50, 50],
+    maxHp: [50, 50],
+    you: {
+      weapons: ['water-gun'],
+      skills: ['bloom', 'dove', 'finger-sword'],
+      used: ['bloom'],
+      moves: ['gu-egg', 'gu-dogs'],
+      moveUses: ['gu-egg', 'gu-egg', 'gu-egg'],
+    },
+    foe: { weapons: [], skills: [] },
+  };
+  assert.deepEqual(legalActions(view), [
+    { kind: 'weapon', weapon: 'water-gun' },
+    { kind: 'unarmed' },
+    { kind: 'skill', skill: 'finger-sword' },
+    { kind: 'move', move: 'gu-dogs' },
+  ]);
+});
+
+test('X17 fallbackAction：单独一路随机数，不吃决策随机数（换对手的挑法不会变）', () => {
+  const a = named(fighterAt(10, seededRng(7)), '甲');
+  const b = named(fighterAt(10, seededRng(8)), '乙');
+  const seed = 'fallback';
+  const decisions: Action[] = [];
+  let result = fightUntilDecision(a, b, seed, [[], 'auto']);
+  while (result.need) {
+    decisions.push(fallbackAction(result.need.view, seed, decisions.length));
+    result = fightUntilDecision(a, b, seed, [decisions, 'auto']);
+  }
+  let index = 0;
+  const self: Controller = { decide: (view) => fallbackAction(view, seed, index++) };
+  const expected = fight(a, b, seed, [self, autoController(rngFrom(seed + ':decide'))]);
+  assert.deepEqual(result.events, expected, '后备挑法若吃了决策随机数，对面的挑法会和这里对不上');
 });
 
 test('换出招者后结算序列照样可复现', () => {

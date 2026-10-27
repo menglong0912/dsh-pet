@@ -10,6 +10,8 @@ const MAX_INPUT_CHARS = 32_768;
 const MAX_OUTPUT_CHARS = 16_384;
 const MAX_EVENTS = 4096;
 const REQUESTS_PER_MINUTE = 12;
+/** 逐手出招（X17）另给一份额度：一分钟 30 次，不占、也不挤掉看屏幕和对话的那 12 次 */
+const BATTLE_REQUESTS_PER_MINUTE = 30;
 const RATE_WINDOW_MS = 60_000;
 /** 识图请求里单张图片（data URL）的上限：桌宠截图压成 JPEG 后通常 100–300 KB */
 const MAX_IMAGE_CHARS = 4 * 1024 * 1024;
@@ -42,6 +44,11 @@ export interface StandaloneAiService {
     signal?: AbortSignal,
   ): Promise<undefined | { id: string; name: string }>;
   stream(options: unknown): AsyncIterable<{ type: 'text'; text: string }>;
+  /**
+   * 逐手出招（X17）的一次请求：与 `stream` 同一套解析与输出上限，但走另一份每分钟 30 次的额度
+   * （心魔一场自家最多出 15 手，12 次不够用）。
+   */
+  streamBattle(options: unknown): AsyncIterable<{ type: 'text'; text: string }>;
   /**
    * 带一张图的单轮请求（独立应用「看屏幕」用），发往当前配置的模型接口：
    * 本机地址只留在本机，云端地址会把截图上传给服务商。
@@ -137,6 +144,8 @@ export function createStandaloneAi(
   let paused = false;
   let saving = false;
   let requests: ReadonlyArray<number> = [];
+  /** 逐手出招的额度（X17）：与对话 / 看屏幕分开记，互不挤占 */
+  let battleRequests: ReadonlyArray<number> = [];
   let active: AbortController | undefined;
   /** 本次启动 / 本次设置下已经确认「模型不支持看图」：内存里记着，保存设置就清掉 */
   let visionUnsupported = false;
@@ -155,6 +164,13 @@ export function createStandaloneAi(
     const settings = store.current();
     const { request, signal: callerSignal } = parseRequest(options, settings.model);
     yield* run(settings, request, callerSignal);
+  }
+
+  async function* streamBattle(options: unknown): AsyncIterable<{ type: 'text'; text: string }> {
+    if (!ready()) throw new Error('Standalone AI is not ready. Configure and enable the model first.');
+    const settings = store.current();
+    const { request, signal: callerSignal } = parseRequest(options, settings.model);
+    yield* run(settings, request, callerSignal, false, 'battle');
   }
 
   const canSeeScreen = () => ready() && !visionUnsupported;
@@ -185,12 +201,16 @@ export function createStandaloneAi(
     request: AiRequest,
     callerSignal: AbortSignal | undefined,
     vision = false,
+    lane: 'chat' | 'battle' = 'chat',
   ): AsyncIterable<{ type: 'text'; text: string }> {
     if (callerSignal?.aborted) throw new Error('Standalone AI request cancelled.');
     if (active) throw new Error('Standalone AI is busy. Please wait.');
-    const recent = requests.filter((time) => now() - time < RATE_WINDOW_MS);
-    if (recent.length >= REQUESTS_PER_MINUTE) throw new Error('Standalone AI rate limit reached. Please wait.');
-    requests = [...recent, now()];
+    const battle = lane === 'battle';
+    const recent = (battle ? battleRequests : requests).filter((time) => now() - time < RATE_WINDOW_MS);
+    if (recent.length >= (battle ? BATTLE_REQUESTS_PER_MINUTE : REQUESTS_PER_MINUTE))
+      throw new Error('Standalone AI rate limit reached. Please wait.');
+    if (battle) battleRequests = [...recent, now()];
+    else requests = [...recent, now()];
     const controller = new AbortController();
     active = controller;
     const abort = () => controller.abort();
@@ -265,6 +285,7 @@ export function createStandaloneAi(
         ? { id: model, name: model }
         : undefined,
     stream,
+    streamBattle,
     streamVision,
     canSeeScreen,
     getSettings: () => store.publicSettings(),

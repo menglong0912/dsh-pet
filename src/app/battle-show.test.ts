@@ -32,6 +32,7 @@ import {
   BattleShow,
   FX_ASSETS,
   LINE_MS,
+  LiveTimeline,
   MOVE_SHOW,
   OPEN_MS,
   QUICK_OPEN_MS,
@@ -1306,4 +1307,41 @@ test('X8 水母分身：那一下打在原地的水母替身上（decoy），本
     [['战斗-闪避', impactOf(shot) - windupOf('战斗-闪避')]],
   );
   assert.equal(animsOf(steps, '受击-炸黑').length, 0, '本体没挨着');
+});
+
+test('X17 逐手演出：分段追加的时间线和整场生成的时间线对得上（时刻、动作、台词）', () => {
+  const a = { ...fighterAt(10, () => 0.37), name: '小鱼' };
+  const b = { ...fighterAt(10, () => 0.61), name: '心魔' };
+  const events = fight(a, b, 'live-timeline');
+  // 每个 decide 之前是一个决策点：前缀 = 从头到这一手之前；最后再补整场
+  const cuts = events.flatMap((event, index) => (event.kind === 'decide' ? [index] : []));
+  const prefixes = [...cuts.map((index) => events.slice(0, index)), events];
+  const live = new LiveTimeline(NAMES, seq(), [a.skills, b.skills]);
+  const segmented = prefixes.flatMap((prefix) => live.push(prefix));
+  const whole = timeline(events, NAMES, seq(), [a.skills, b.skills]);
+  assert.deepEqual(segmented, whole, '分段接起来必须和整场时间线一致');
+  assert.deepEqual(live.steps(), whole, '已经排好的全部步骤也一致');
+  assert.ok(segmented.length > 0);
+});
+
+test('X17 逐手演出：AI 给的台词替掉这一手模板解说里自家宠物的那句', () => {
+  const a = { ...fighterAt(10, () => 0.37), name: '小鱼' };
+  const b = { ...fighterAt(10, () => 0.61), name: '心魔' };
+  const events = fight(a, b, 'live-line');
+  const index = events.findIndex((event) => event.kind === 'decide' && event.actor === 0);
+  assert.ok(index >= 0, '这一场有自家的 decide');
+  const line = '先用陀螺晕住它！';
+  const steps = timeline(events, NAMES, seq(), [a.skills, b.skills], {
+    decideLines: new Map([[index, line]]),
+  });
+  assert.ok(
+    steps.some((step) => step.who === 0 && step.line === line),
+    'AI 的台词排在出手那一刻',
+  );
+  const plain = timeline(events, NAMES, seq(), [a.skills, b.skills]);
+  const template = plain.filter((step) => step.who === 0 && step.line && step.line !== line).length;
+  assert.ok(
+    steps.filter((step) => step.who === 0 && step.line && step.line !== line).length <= template,
+    '这一手自家宠物的模板解说被替掉了一句',
+  );
 });

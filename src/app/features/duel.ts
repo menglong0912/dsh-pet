@@ -66,6 +66,8 @@ export function createDuel(ctx: FeatureContext): Duel {
     if (!practice) return Promise.resolve({ ok: false, reason: 'off' });
     if (
       ctx.state.battle ||
+      ctx.state.liveBattle ||
+      ctx.state.actionPanel ||
       ctx.state.spar ||
       ctx.state.hosting !== null ||
       ctx.state.trip !== null ||
@@ -188,7 +190,7 @@ export function createDuel(ctx: FeatureContext): Duel {
       await compose(instruction, won ? '隔空切磋赢啦，承让承让～' : '隔空切磋输了，下次再战！'),
       LINE_MAX,
     );
-    if (ctx.state.battle === null) void say(text, { anim: false });
+    if (ctx.state.battle === null && ctx.state.liveBattle === null) void say(text, { anim: false });
   }
 
   /**
@@ -206,6 +208,8 @@ export function createDuel(ctx: FeatureContext): Duel {
       ctx.state.duel ||
       ctx.state.spar ||
       ctx.state.battle ||
+      ctx.state.liveBattle ||
+      ctx.state.actionPanel ||
       ctx.state.trip ||
       ctx.state.hosting ||
       ctx.state.duelWait ||
@@ -338,6 +342,8 @@ export function createDuel(ctx: FeatureContext): Duel {
     if (
       !practice ||
       ctx.state.battle ||
+      ctx.state.liveBattle ||
+      ctx.state.actionPanel ||
       ctx.state.spar ||
       ctx.state.duel ||
       ctx.state.duelWait ||

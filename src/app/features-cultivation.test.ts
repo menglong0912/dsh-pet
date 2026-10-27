@@ -17,6 +17,7 @@ import {
   emitPetBounds,
   env,
   startTrial,
+  pickPanel,
   liveWindowsOn,
   fightCount,
 } from './features-testkit.ts';
@@ -245,10 +246,11 @@ test('二选一过期没人挑：下一拍随机定一个（拨 Date，不真等
 test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线走；快进后奖励进存档', async () => {
   const clicks: string[] = [];
   windows.length = 0;
-  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, _said, bodies, home, extras) => {
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (features, _said, bodies, home, extras) => {
     const { menus, anims } = extras;
     await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), 'trial menu');
     clicks.push('修炼/心魔试炼');
+    await pickPanel(features, 1, '这一场');
     // 心魔窗口（暗色）与擂台窗口都开了
     await until(() => windowOn('/app/guest') !== undefined && windowOn('/app/arena') !== undefined, 'windows');
     const guest = windowOn('/app/guest')!;
@@ -313,10 +315,11 @@ test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线�
 test('心魔试炼：开演前占住宠物（两段动画之间不插播随机活动），演出的动画与台词都带着锁，演完放开', async () => {
   const clicks: string[] = [];
   windows.length = 0;
-  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, _said, _bodies, _home, extras) => {
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (features, _said, _bodies, _home, extras) => {
     const { menus, requests } = extras;
     await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), 'trial menu');
     clicks.push('修炼/心魔试炼');
+    await pickPanel(features, 1, '这一场');
     await until(() => requests.some((r) => r.path === '/anim'), 'opening anim');
     // 回归（X9 真机：两段演出动画之间宠物插播堆雪人、吃糖葫芦）：先拿锁，再播第一段
     const hold = requests.findIndex((r) => r.path === '/lock');
@@ -343,10 +346,11 @@ test('心魔试炼：锁被用户撤掉（点了 / 拖了宠物）就不带锁�
   windows.length = 0;
   await withFeatures(
     { cultivation: cultivationEarly(), clicks, lockLost: true },
-    async (_features, _said, _bodies, home, extras) => {
+    async (features, _said, _bodies, home, extras) => {
       const { menus, anims, requests, logs } = extras;
       await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), 'trial menu');
       clicks.push('修炼/心魔试炼');
+      await pickPanel(features, 1, '这一场');
       await until(() => anims.length > 0, 'opening anim resent');
       const opening = requests.filter((r) => r.path === '/anim').slice(0, 2);
       assert.deepEqual(
@@ -373,12 +377,13 @@ test('修炼：演完一场马上再点第二场，两场都记，第二场还�
   const clicks: string[] = [];
   windows.length = 0;
   const record = (home: string) => cultivationSave(home)?.record as { wins: number; losses: number };
-  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, said, _bodies, home, extras) => {
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (features, said, _bodies, home, extras) => {
     const { menus } = extras;
     let firstRound = -1;
     for (const round of [1, 2]) {
       await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), `第 ${round} 场可点`);
       clicks.push('修炼/心魔试炼');
+      await pickPanel(features, 1, `第 ${round} 场`);
       await until(() => menus.some((labels) => labels.includes('修炼/快进')), `第 ${round} 场开打`);
       clicks.push('修炼/快进');
       await until(() => record(home).wins + record(home).losses >= round, `第 ${round} 场记账`);
@@ -397,14 +402,14 @@ test('心魔试炼：第一场感言没回来就开第二场，第一场的窗�
   const clicks: string[] = [];
   windows.length = 0;
   const gate = deferred();
-  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, said, _bodies, home, extras) => {
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (features, said, _bodies, home, extras) => {
     const { menus } = extras;
     try {
       // 真机上 helper 会一直报自家宠物位置；先报一次，特效层才摆得出来
       emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
       env.memeHold = gate.promise;
       env.memeReplies = ['第一场的感言', '第二场的感言'];
-      await startTrial(clicks, menus, '第 1 场');
+      await startTrial(features, clicks, menus, '第 1 场');
       await until(
         () =>
           liveWindowsOn('/app/guest').length === 1 &&
@@ -425,7 +430,7 @@ test('心魔试炼：第一场感言没回来就开第二场，第一场的窗�
         return latest.includes('修炼/心魔试炼') && !latest.includes('修炼/快进');
       }, '第 1 场收摊、菜单换回来');
       // 第一场的 compose 还挂着，这时开第二场
-      await startTrial(clicks, menus, '第 2 场');
+      await startTrial(features, clicks, menus, '第 2 场');
       await until(() => liveWindowsOn('/app/guest').length === 1, '第 2 场心魔窗口');
       const second = {
         guest: liveWindowsOn('/app/guest')[0]!,
@@ -466,7 +471,7 @@ test('心魔试炼：compose 挂着不返回时，三扇窗到点先关、菜单
   const clicks: string[] = [];
   windows.length = 0;
   const gate = deferred();
-  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, said, _bodies, home, extras) => {
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (features, said, _bodies, home, extras) => {
     const { menus } = extras;
     try {
       // 真机上 helper 会一直报自家宠物位置；先报一次，特效层才摆得出来
@@ -474,7 +479,7 @@ test('心魔试炼：compose 挂着不返回时，三扇窗到点先关、菜单
       env.memeHold = gate.promise;
       env.memeReplies = ['收摊以后才回来的感言'];
       const asksBefore = memeAsks.length;
-      await startTrial(clicks, menus, '这一场');
+      await startTrial(features, clicks, menus, '这一场');
       clicks.push('修炼/快进');
       await until(() => fightCount(home) === 1, '记账');
       // compose 的模型调用已经发出去、卡在闸上
@@ -512,7 +517,7 @@ test('心魔试炼：第一场的感言在第二场开演以后才回来，就�
   const clicks: string[] = [];
   windows.length = 0;
   const gate = deferred();
-  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, said, _bodies, home, extras) => {
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (features, said, _bodies, home, extras) => {
     const { menus } = extras;
     try {
       // 真机上 helper 会一直报自家宠物位置；先报一次，特效层才摆得出来
@@ -520,14 +525,14 @@ test('心魔试炼：第一场的感言在第二场开演以后才回来，就�
       env.memeHold = gate.promise;
       env.memeReplies = ['第一场的旧感言', '第二场的感言'];
       const asksBefore = memeAsks.length;
-      await startTrial(clicks, menus, '第 1 场');
+      await startTrial(features, clicks, menus, '第 1 场');
       clicks.push('修炼/快进');
       await until(() => fightCount(home) === 1, '第 1 场记账');
       await until(() => {
         const latest = menus[menus.length - 1] ?? [];
         return latest.includes('修炼/心魔试炼') && !latest.includes('修炼/快进');
       }, '第 1 场收摊、菜单换回来');
-      await startTrial(clicks, menus, '第 2 场');
+      await startTrial(features, clicks, menus, '第 2 场');
       await until(() => memeAsks.slice(asksBefore).some((ask) => /心魔/.test(ask)), '第 1 场的感言卡在模型上');
       // 第二场还在演，放开第一场的 compose：这一句过时了，不许插进第二场
       gate.resolve();

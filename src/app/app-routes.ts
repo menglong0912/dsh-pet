@@ -10,6 +10,9 @@
  *   GET  /app/note          捎话小输入窗的页面（note-window.ts 开的窗口加载它）
  *   GET  /app/arena         擂台小窗的页面（arena-window.ts 开的窗口加载它，对战演出时的两条气血条）
  *   GET  /app/fx            特效层的页面（fx-window.ts 开的窗口加载它，X7 演出时飞在两只中间的飞行物）
+ *   GET  /app/panel         出招面板的页面（action-panel-window.ts 开的窗口加载它，X17 选方式 / 手动出招）
+ *   GET  /app/battle        现在在等哪一手（逐手出招，curl 调试用；没有就 null）
+ *   POST /app/battle/choose { pick }：选方式 / 点招（面板按钮与 curl 共用；pick 从 1 数）
  *
  * 与插件路由同一条安全线：拒绝网页来源（带 Origin 且不是 null 的请求），本机程序直接调用。
  * 端口每次启动随机，写在 `$DSH_HOME/dsh-pet/app.json`（见 discovery.ts）。
@@ -18,6 +21,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { saveAppConfig } from './app-config';
 import { adventurePage } from './adventure-window';
+import { panelPage } from './action-panel-window';
 import { arenaPage } from './arena-window';
 import type { AppConfig } from './app-config';
 import type { AppFeatures } from './features';
@@ -49,7 +53,13 @@ export function createAppRoutes(
   return (req, res, pathname) => {
     if (!pathname.startsWith('/app/')) return false;
     const origin = req.headers.origin;
-    if (origin !== undefined && origin !== 'null') {
+    // 出招面板自己的按钮从同一来源 POST（选方式 / 点招）；只给这一条放行同源，其余网页来源照旧拒绝。
+    // Host 还得是本机地址：DNS 重绑定的网页 Origin 和 Host 会一致，但 Host 是它自己的域名
+    const host = req.headers.host;
+    const port = req.socket.localPort;
+    const localHost = port !== undefined && (host === `127.0.0.1:${port}` || host === `localhost:${port}`);
+    const sameOrigin = localHost && origin === `http://${host}`;
+    if (origin !== undefined && origin !== 'null' && !(pathname === '/app/battle/choose' && sameOrigin)) {
       send(res, 403, { error: '不允许网页来源访问' });
       return true;
     }
@@ -78,13 +88,18 @@ async function handle(
     if (method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
     return send(res, 200, { snapshot: features.activity(), context: features.activityContext() });
   }
+  if (pathname === '/app/battle') {
+    if (method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
+    return send(res, 200, { question: features.battle.state() });
+  }
   if (
     pathname === '/app/guest' ||
     pathname === '/app/foe' ||
     pathname === '/app/adventure' ||
     pathname === '/app/note' ||
     pathname === '/app/arena' ||
-    pathname === '/app/fx'
+    pathname === '/app/fx' ||
+    pathname === '/app/panel'
   ) {
     if (method !== 'GET') return send(res, 405, { error: '仅支持 GET' });
     const page =
@@ -98,7 +113,9 @@ async function handle(
               ? notePage
               : pathname === '/app/arena'
                 ? arenaPage
-                : fxPage;
+                : pathname === '/app/panel'
+                  ? panelPage
+                  : fxPage;
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'content-length': Buffer.byteLength(page),
@@ -118,6 +135,13 @@ async function handle(
     }
     case '/app/look':
       return send(res, 200, await features.lookAtScreen(true));
+    case '/app/battle/choose': {
+      const pick = body.pick;
+      if (typeof pick !== 'number' || !Number.isInteger(pick) || pick < 1)
+        return send(res, 400, { error: 'pick 必须是正整数（从 1 数）' });
+      if (!features.battle.choose(pick)) return send(res, 409, { error: '现在没有等待的选择' });
+      return send(res, 200, { ok: true, question: features.battle.state() });
+    }
     case '/app/claude-hook':
       await features.handleClaudeHook(body);
       return send(res, 200, { ok: true });

@@ -1,7 +1,10 @@
+import { openActionPanel } from '../action-panel-window';
 import { arenaScoreboard, openArenaWindow } from '../arena-window';
+import { askAiTurn, legalChoices, startLiveBattle } from '../battle-live';
 import { BattleShow, SHOW_ANIMS, timeline } from '../battle-show';
 import type { Shot } from '../battle-show';
 import { fight, shadowOf, tribulate } from '../battle';
+import type { Action, BattleEvent, BattleView } from '../battle';
 import { Cultivation } from '../cultivation';
 import { openGuestWindow } from '../visit-windows';
 import { cleanText, LINE_MAX } from '../visit';
@@ -34,9 +37,10 @@ export function createTrial(ctx: FeatureContext): Trial {
   } = lazyFns(ctx);
   const { deps, electron, diary, homePet } = ctx;
   /**
-   * 开一场心魔试炼：心魔窗口 + 擂台 → 引擎算一场 → 按时间线演 → 算奖励、记日记、收摊、说赛后感言。
+   * 开一场心魔试炼：心魔窗口 + 擂台 + 出招面板 → 选方式（自动 / AI 出招 / 手动）→ 演 → 算奖励、记日记、收摊、说赛后感言。
    * 演法（§X3）：每句台词走 /broadcast 的 anim: false、时长和一步相当，下一句自然顶替上一句；
    * 台词不进说话队列（它们按时间线走），但碎碎念与自动看屏幕在这期间让路。
+   * 逐手出招（X17）：自动仍是一整场算好、整场时间线；AI / 手动由 `battle-live.ts` 一段一段接时间线。
    * 收摊不等模型（§X14）：菜单、窗口、记账都在 compose 之前，赛后感言回来只负责说。
    */
   async function runTrial(): Promise<void> {
@@ -44,6 +48,8 @@ export function createTrial(ctx: FeatureContext): Trial {
     if (
       !practice ||
       ctx.state.battle ||
+      ctx.state.liveBattle ||
+      ctx.state.actionPanel ||
       ctx.state.trip ||
       ctx.state.hosting ||
       ctx.state.duelWait ||
@@ -55,23 +61,18 @@ export function createTrial(ctx: FeatureContext): Trial {
     let windows: TrialWindows | null = null;
     const you = practice.fighter(petName());
     const foe = shadowOf(you);
-    const events = fight(you, foe, `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
-    const steps = timeline(events, [you.name, foe.name], Math.random, [you.skills, foe.skills]);
+    const seed = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const origin = new URL(deps.petBase).origin;
     const guest = openGuestWindow(
       electron,
-      `${new URL(deps.petBase).origin}/app/guest`,
+      `${origin}/app/guest`,
       foe.name,
       homePet.box,
       () => undefined, // 心魔不响应戳一下的反应
       // 对战等大、贴身：攻击特效的飞行距离才对得上素材里的命中时刻（串门维持小一号的表意）
       { tint: 'shadow', scale: 1, tight: true },
     );
-    const arena = openArenaWindow(
-      electron,
-      `${new URL(deps.petBase).origin}/app/arena`,
-      homePet.box,
-      () => windows?.guest.bounds() ?? null,
-    );
+    const arena = openArenaWindow(electron, `${origin}/app/arena`, homePet.box, () => windows?.guest.bounds() ?? null);
     // 心魔要播的动画先取到窗口里（X7：换源不等网络，出手才和飞行物对得上）
     guest.preload(SHOW_ANIMS);
     // 特效层（X7）：飞行物从出手方手里飞到对方身上，命中那一刻对方才开始反应
@@ -81,46 +82,129 @@ export function createTrial(ctx: FeatureContext): Trial {
       () => guest.side === 'left',
       true,
     );
-    windows = { guest, arena, fx };
+    // 出招面板（X17）：挂在擂台下面，先选这一场怎么出招；自动 / AI / 手动
+    const panel = openActionPanel(
+      electron,
+      `${origin}/app/panel`,
+      () => windows?.arena.bounds() ?? null,
+      homePet.box,
+      () => windows?.guest.bounds() ?? null,
+    );
+    windows = { guest, arena, fx, panel };
     ctx.state.trialWindowGroups.add(windows);
+    ctx.state.actionPanel = panel;
+    panel.place(arena.bounds());
     const scoreboard = arenaScoreboard({
       self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
       foe: { label: foe.name, maxHp: foe.hp },
     });
     // 自家宠物面朝对手：素材统一画成朝左，心魔站左边就原样播、站右边就镜像
-    ctx.state.battle = new BattleShow(steps, {
+    const showSides = {
       self: {
-        play: (anim, rate) => void playExtra(anim, { facing: guest.side === 'left' ? 'left' : 'right', rate }),
+        play: (anim: string, rate: number) =>
+          void playExtra(anim, { facing: guest.side === 'left' ? 'left' : 'right', rate }),
         // 演出台词：anim 一律 false（带 anim 的气泡会顶掉正在播的动画），时长跟着时间线的一步
-        say: (line, durationMs) => void say(line, { anim: false, durationMs }),
+        say: (line: string, durationMs: number) => void say(line, { anim: false, durationMs }),
       },
       foe: {
-        play: (anim, rate) => guest.play(anim, rate),
-        say: (line, durationMs) => guest.say(line, durationMs),
+        play: (anim: string, rate: number) => guest.play(anim, rate),
+        say: (line: string, durationMs: number) => guest.say(line, durationMs),
       },
-      arena: (hp) => {
+      arena: (hp: [number, number]) => {
         arena.place(homePet.box(), guest.bounds());
         // 左右跟着两只的实际位置：心魔站在自家宠物左边时它那条在左
         arena.update(scoreboard(hp, guest.side === 'left'));
-        // 特效层跟着两只挪（放一发时也会自己挪一次）
+        // 特效层与出招面板跟着两只挪（放一发时也会自己挪一次）
         fx.place();
+        panel.place(arena.bounds());
       },
       shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
-    });
-    void refreshMenu();
-    const end = events[events.length - 1];
-    const won = end.kind === 'end' && end.winner === 0;
-    // 先占住宠物再开演：两段动画之间别插播随机活动（等锁的这一下可能被退出打断，所以留住这一场）
-    const show = ctx.state.battle;
-    await holdPet(steps);
-    await show.run();
-    ctx.state.battle = null;
+    };
+    const mode = await panel.chooseMode(ctx.ai.isReady(), deps.modeTimeoutMs ?? 10_000);
+    if (!mode) {
+      if (ctx.state.actionPanel === panel) ctx.state.actionPanel = null;
+      closeTrialWindows(windows, 0);
+      return;
+    }
+    let events: BattleEvent[];
+    if (mode === 'auto') {
+      // 全自动：和以前完全一样——整场算好、整场时间线
+      panel.close();
+      if (ctx.state.actionPanel === panel) ctx.state.actionPanel = null;
+      events = fight(you, foe, seed);
+      const steps = timeline(events, [you.name, foe.name], Math.random, [you.skills, foe.skills]);
+      ctx.state.battle = new BattleShow(steps, showSides);
+      void refreshMenu();
+      const show = ctx.state.battle;
+      // 先占住宠物再开演：两段动画之间别插播随机活动（等锁的这一下可能被退出打断，所以留住这一场）
+      await holdPet(steps);
+      await show.run();
+      ctx.state.battle = null;
+    } else {
+      // 逐手：AI 出招 / 手动出招（X17）
+      const live = startLiveBattle({
+        a: you,
+        b: foe,
+        seed,
+        mode,
+        show: showSides,
+        lineRng: Math.random,
+        decide: async (
+          view: BattleView,
+          _index: number,
+          signal: AbortSignal,
+        ): Promise<{ action: Action; line?: string } | null> => {
+          if (mode === 'manual') {
+            const choices = legalChoices(view);
+            const pick = await panel.chooseAction(
+              choices.map((choice) => ({ label: choice.label, ...(choice.note ? { note: choice.note } : {}) })),
+              deps.actionTimeoutMs ?? 20_000,
+            );
+            if (pick === null) {
+              ctx.log('逐手出招：手动没点，按后备挑法');
+              return null;
+            }
+            const choice = choices[pick];
+            return choice ? { action: choice.action } : null;
+          }
+          const reply = await askAiTurn({
+            ai: ctx.ai,
+            system: ctx.fns.personaPrompt(),
+            view,
+            names: [you.name, foe.name],
+            timeoutMs: deps.aiTurnTimeoutMs ?? 15_000,
+            signal,
+            log: ctx.log,
+          });
+          if (!reply) return null;
+          const choice = legalChoices(view)[reply.pick - 1];
+          if (!choice) return null;
+          return { action: choice.action, ...(reply.line ? { line: reply.line } : {}) };
+        },
+        think: () => void say('想一想…', { anim: false }),
+        log: ctx.log,
+      });
+      ctx.state.liveBattle = live;
+      void refreshMenu();
+      // 逐手一场事先不知道多久：先占住宠物（holdPet 会夹到 /lock 的上限）
+      await holdPet([], 20 * 60_000);
+      const finished = await live.done;
+      if (ctx.state.liveBattle === live) ctx.state.liveBattle = null;
+      if (!finished || ctx.state.disposed) {
+        releasePet(ctx.state.disposed ? 0 : CLOSE_HOLD_MS);
+        return;
+      }
+      events = finished;
+    }
     releasePet(ctx.state.disposed ? 0 : CLOSE_HOLD_MS);
     // 中途退出了（dispose）：别再把这场算进存档
     if (ctx.state.disposed) return;
+    const end = events[events.length - 1];
+    const won = end.kind === 'end' && end.winner === 0;
+    const suffix = mode === 'ai' ? '（AI 出招）' : mode === 'manual' ? '（手动）' : '';
     // 奖励（修为进账、掉法宝、战绩都在 trialDone 里；冒泡与日记在 onCultivation）
     onCultivation(Date.now(), practice.trialDone(Date.now(), won), { anim: false });
-    diary.note(Date.now(), 'cultivate', won ? '心魔试炼打赢了' : '心魔试炼没打赢');
+    diary.note(Date.now(), 'cultivate', `${won ? '心魔试炼打赢了' : '心魔试炼没打赢'}${suffix}`);
     // 演完马上收摊（§X14）：菜单换回来、这一场的窗口按 CLOSE_HOLD_MS 收，都不等赛后感言
     void refreshMenu();
     closeTrialWindows(windows, CLOSE_HOLD_MS);
@@ -134,13 +218,15 @@ export function createTrial(ctx: FeatureContext): Trial {
       await compose(instruction, won ? '心魔被打跑了，呼～' : '心魔太强了，我输了，下次再来～'),
       LINE_MAX,
     );
-    if (ctx.state.battle === null) void say(text, { anim: false });
+    if (ctx.state.battle === null && ctx.state.liveBattle === null) void say(text, { anim: false });
   }
 
   /** 关掉某一组心魔试炼的窗口：0 = 立刻，`CLOSE_HOLD_MS` = 演完停一会儿；同一组只关一次 */
   function closeTrialWindows(windows: TrialWindows, afterMs: number): void {
     const close = (): void => {
       if (!ctx.state.trialWindowGroups.delete(windows)) return;
+      if (ctx.state.actionPanel === windows.panel) ctx.state.actionPanel = null;
+      windows.panel.close();
       windows.guest.close(0);
       windows.arena.close(0);
       windows.fx.close(0);
@@ -156,6 +242,13 @@ export function createTrial(ctx: FeatureContext): Trial {
 
   /** 快进：停掉剩下的步骤，直接看结果（菜单「修炼/快进」，有人敲门时也用它收场；渡劫同样用它） */
   function skipTrial(): void {
+    if (ctx.state.liveBattle) {
+      // 逐手：剩下的手全按后备挑法、立刻算完；等着的 AI / 手动选择作废，面板先收起来
+      ctx.state.actionPanel?.close();
+      ctx.state.actionPanel = null;
+      ctx.state.liveBattle.skip();
+      return;
+    }
     ctx.state.battle?.skip();
   }
 
@@ -173,6 +266,8 @@ export function createTrial(ctx: FeatureContext): Trial {
     if (
       !practice ||
       ctx.state.battle ||
+      ctx.state.liveBattle ||
+      ctx.state.actionPanel ||
       ctx.state.trip ||
       ctx.state.hosting ||
       ctx.state.duelWait ||
@@ -253,6 +348,8 @@ export function createTrial(ctx: FeatureContext): Trial {
     // 历练小窗开着时不能开心魔试炼和渡劫：先关了小窗再说；收起来的小窗只在宠物还在秘境里时算数（Y4）
     if (
       ctx.state.battle ||
+      ctx.state.liveBattle ||
+      ctx.state.actionPanel ||
       ctx.state.trip !== null ||
       ctx.state.hosting !== null ||
       ctx.state.duelWait !== null ||

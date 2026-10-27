@@ -283,6 +283,25 @@ export interface Controller {
   decide(view: BattleView): Action;
 }
 
+/**
+ * 逐手出招（X17）时每一边的出招来源：`'auto'` 走 `autoController`（吃决策随机数），
+ * 一串已经定好的 `Action` 则照着出手，用完就停下来等外层补一手。
+ */
+export type ActionSource = 'auto' | readonly Action[];
+
+/** 逐手对战停在哪个决策点：轮到哪一边、它看到的视野（外层照 `legalActions(view)` 挑下一手） */
+export interface DecisionNeed {
+  side: 0 | 1;
+  view: BattleView;
+}
+
+export interface FightUntilDecisionResult {
+  /** 已经算出来的事件（停下的那一手还没有 `decide` 事件） */
+  events: BattleEvent[];
+  /** 打完了是 null；否则是等外层补一手的地方 */
+  need: DecisionNeed | null;
+}
+
 /** 跳过出手的原因：陀螺 / 狮子吼是晕，雪球是冻住，鲸歌是睡着，魂牵梦绕是入梦（X9） */
 export type SkipCause = 'stun' | 'freeze' | 'sleep' | 'dream';
 
@@ -588,6 +607,33 @@ export function autoController(rng: () => number): Controller {
 
 /** 出手满这么多还没分出胜负就按剩余气血比例判 */
 export const MAX_ACTIONS = 30;
+
+/**
+ * 这一手能出什么（X17）：自有法宝、空手、还没用过的主动招式、还有次数的招式表招式。
+ * AI 和手动点招、X19 收到的对方出手都先过这里；不合法就当没选。
+ */
+export function legalActions(view: BattleView): Action[] {
+  const actions: Action[] = view.you.weapons.map((weapon): Action => ({ kind: 'weapon', weapon }));
+  actions.push({ kind: 'unarmed' });
+  for (const skill of view.you.skills) {
+    if (ACTIVE_SKILLS.includes(skill) && !view.you.used.includes(skill)) actions.push({ kind: 'skill', skill });
+  }
+  const used = view.you.moveUses ?? [];
+  for (const move of view.you.moves ?? []) {
+    const cap = MOVES[move].uses;
+    const count = used.filter((id) => id === move).length;
+    if (cap === undefined || count < cap) actions.push({ kind: 'move', move });
+  }
+  return actions;
+}
+
+/**
+ * 后备挑法（X17）：AI 超时 / 答不出合法的招、手动没点时的这一手。
+ * 随机数单独一路（`seed:fallback:index`），不吃决策随机数——从头重算时对面的挑法不会跟着变。
+ */
+export function fallbackAction(view: BattleView, seed: string, index: number): Action {
+  return autoController(rngFrom(`${seed}:fallback:${index}`)).decide(view);
+}
 /** 基础会心率（会心一击的持有者是 CRIT_SKILL_CHANCE） */
 const BASE_CRIT = 0.08;
 /** 灵力对伤害的加成比例（整段出手合计） */
@@ -639,11 +685,66 @@ const FIST_HP_SHARE = 0.8;
 const MYRIAD_MIRRORS = 3;
 
 export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Controller, Controller]): BattleEvent[] {
-  // 结算随机数只由种子决定，是 fight 内部的局部状态
-  const rng = rngFrom(seed + ':resolve');
+  if (!controllers) {
+    const decideRng = rngFrom(seed + ':decide');
+    controllers = [autoController(decideRng), autoController(decideRng)];
+  }
+  return runFight(a, b, seed, controllers);
+}
+
+/** 一次「要决策但那一串已经用完」的信号（只在 fightUntilDecision 内部抛，不落到外层） */
+class DecisionNeeded {
+  readonly need: DecisionNeed;
+  constructor(need: DecisionNeed) {
+    this.need = need;
+  }
+}
+
+/**
+ * 逐手对战（X17）：照「重放到缺决策处」的走法，`fight` 保持同步、纯函数。
+ * 两边都是 `'auto'` 时和 `fight()` 打出同一串事件；某一边是一串定好的 `Action` 时，
+ * 轮到它、那串用完就停下返回 `need`，外层把这一手补进那一串、**从头再算一遍**。
+ */
+export function fightUntilDecision(
+  a: Fighter,
+  b: Fighter,
+  seed: string,
+  sources: readonly [ActionSource, ActionSource],
+): FightUntilDecisionResult {
   const decideRng = rngFrom(seed + ':decide');
-  if (!controllers) controllers = [autoController(decideRng), autoController(decideRng)];
+  let need: DecisionNeed | null = null;
+  const controllers = sources.map((source, side): Controller => {
+    if (source === 'auto') return autoController(decideRng);
+    let index = 0;
+    return {
+      decide(view: BattleView): Action {
+        if (index >= source.length) {
+          need = { side: side as 0 | 1, view };
+          throw new DecisionNeeded(need);
+        }
+        return source[index++];
+      },
+    };
+  }) as [Controller, Controller];
   const events: BattleEvent[] = [];
+  try {
+    runFight(a, b, seed, controllers, events);
+  } catch (error) {
+    if (error instanceof DecisionNeeded) return { events, need };
+    throw error;
+  }
+  return { events, need: null };
+}
+
+function runFight(
+  a: Fighter,
+  b: Fighter,
+  seed: string,
+  controllers: [Controller, Controller],
+  events: BattleEvent[] = [],
+): BattleEvent[] {
+  // 结算随机数只由种子决定，是这一场内部的局部状态
+  const rng = rngFrom(seed + ':resolve');
   const sides = [makeSide(a, 0.8 + 0.4 * rng()), makeSide(b, 0.8 + 0.4 * rng())];
   events.push({ actor: 0, kind: 'start', hp: [sides[0].hp, sides[1].hp] });
 

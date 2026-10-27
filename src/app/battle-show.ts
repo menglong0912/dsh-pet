@@ -669,6 +669,11 @@ export interface TimelineOptions {
    * 受击、闪避、倒地、胜利。素材缺了由对手窗口退回 CSS 动作，时间线不查文件。
    */
   foe?: { prefix: string };
+  /**
+   * 逐手出招（X17）：第 i 个 `decide` 事件换成这句台词（AI 给的），替掉这一手模板解说里该方的那句。
+   * 键是 `events` 里的下标；重算前缀时同一句要一直在表里。
+   */
+  decideLines?: ReadonlyMap<number, string>;
 }
 
 /** 这一格的出手（`decide` 排出来的；`closeSlot` 作废）。只有带飞行物的出手才会排出来 */
@@ -767,6 +772,13 @@ export function timeline(
   let before: [number, number] = base;
   /** 最近一段伤害命中的时刻（第六感贴着自己挨的那一下再反劈、假死遁对准致命那一下）；还没有命中过是 null */
   let lastImpact: number | null = null;
+  /** 逐手出招（X17）：这一手被 AI 的台词顶掉了模板解说的那一方；下一个 decide / end 清掉 */
+  let overrideActor: 0 | 1 | null = null;
+  /** 这一手的台词：有 AI 台词时不再出这一手的模板解说（挨打方的反应台词照旧） */
+  const sayOf = (event: BattleEvent): string | undefined => {
+    if (overrideActor !== null && event.actor === overrideActor) return undefined;
+    return lineOf(event, names, rng, skillSets) ?? undefined;
+  };
 
   /** 一格用完：下一件事另起一格——至少隔一个 `SLOT_MS`（多段台词再长一点），并且等两只都回到站姿 */
   const closeSlot = (): void => {
@@ -908,12 +920,18 @@ export function timeline(
 
     if (event.kind === 'decide') {
       closeSlot();
+      const override = options?.decideLines?.get(i);
+      overrideActor = override === undefined ? null : event.actor;
       const show = showOf(event.action, event.actor, foePrefix);
       const hits = hitsOf(event.action, events, i);
       pushAnim({ at: cursor, who: event.actor, anim: show.action, rate: actionRate(show.action), hp: event.hp });
       // 魂牵梦绕（X9）：原著那四句咒先念出来，命中那一刻再接结算台词（一句顶一句，正好铺满这一格）
-      if (event.action.kind === 'skill' && event.action.skill === 'dream-chant') {
+      if (event.action.kind === 'skill' && event.action.skill === 'dream-chant' && override === undefined) {
         steps.push({ at: cursor, who: event.actor, line: DREAM_CHANT, hp: event.hp });
+      }
+      // 逐手出招（X17）：AI 想说就说一句，替掉这一手模板解说里自家宠物的那句
+      if (override !== undefined) {
+        steps.push({ at: cursor, who: event.actor, line: override, hp: event.hp });
       }
       if (show.fly) {
         slot = {
@@ -960,7 +978,8 @@ export function timeline(
         const anim = who === 1 && foePrefix ? `${foePrefix}-${action}` : `战斗-${action}`;
         pushAnim({ at: cursor, who, anim, rate: rateFor(anim, CLOSE_MS), hp: event.hp, closing: true });
       }
-      const line = lineOf(event, names, rng, skillSets);
+      overrideActor = null;
+      const line = sayOf(event);
       if (line) steps.push({ at: cursor, who: winner, line, hp: event.hp, closing: true });
       continue;
     }
@@ -969,7 +988,7 @@ export function timeline(
       // 渡劫里的躲闪 = 这一道雷被躲开了（引擎只记 dodge、没有 strike）：照样一格，乌云聚起、闪电劈到身边的地上，
       // 闪避对准劈下的那一刻；两道雷之间的回血（凭空生花）自己占一格。都排在上一段播完之后，不切断触电
       closeSlot();
-      const line = lineOf(event, names, rng, skillSets) ?? undefined;
+      const line = sayOf(event);
       if (event.kind === 'dodge') {
         bolt += 1;
         const impact = pushShot(cursor, event.actor, null, TRIBULATION_FLY, before, { sky: true, miss: true });
@@ -997,7 +1016,7 @@ export function timeline(
       bolt = event.index + 1;
       const blocked = blockedHere(event);
       const impact = pushShot(cursor, event.actor, null, TRIBULATION_FLY, before, { sky: true, blocked });
-      let line = lineOf(event, names, rng, skillSets) ?? undefined;
+      let line = sayOf(event);
       // 渡劫的台词报第几道雷（设计 §4.6：气泡显示「第 3 道天雷」）
       if (tribulation && line) line = `第 ${event.index + 1}/${strikeTotal} 道：${line}`;
       // 致命那道雷后面紧跟假死遁：倒下由假死遁自己演，不再触电（两段顶在一起只会打断它）
@@ -1013,7 +1032,7 @@ export function timeline(
 
     // 结算事件：`at` 是这一拍的老时刻（没有飞行物的那几类——skip、回血——照它走）
     const at = cursor + beat * BEAT_MS;
-    const line = lineOf(event, names, rng, skillSets) ?? undefined;
+    const line = sayOf(event);
     const hpBefore = before;
     before = event.hp;
     beat += 1;
@@ -1199,6 +1218,58 @@ export function timeline(
     if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
   }
   return steps.sort((a, b) => a.at - b.at);
+}
+
+/**
+ * 逐手演出（X17）的时间线：每算到下一个决策点，就把新多出来的那段事件交给 `push`，
+ * 它照**同一个随机序列**重算整场前缀，只返回新多出来的步骤（绝对时刻照 `timeline` 的口径）。
+ *
+ * 重算前缀必须先复现之前消耗过的解说随机数，否则已经播过的台词会换成另一句；
+ * 所以这里把每次调用 `timeline` 取到的数按序号缓存，重放时原样吐回去，只有新事件才往后取。
+ */
+export class LiveTimeline {
+  private readonly cache: number[] = [];
+  private cursor = 0;
+  private seen: Step[] = [];
+  private readonly names: [string, string];
+  private readonly rng: () => number;
+  private readonly skillSets?: [SkillId[], SkillId[]];
+  private readonly options?: TimelineOptions;
+
+  constructor(
+    names: [string, string],
+    rng: () => number,
+    skillSets?: [SkillId[], SkillId[]],
+    options?: TimelineOptions,
+  ) {
+    this.names = names;
+    this.rng = rng;
+    this.skillSets = skillSets;
+    this.options = options;
+  }
+
+  /** 追加到下一个决策点的事件前缀（整段事件），返回这一段新排出来的步骤 */
+  push(events: BattleEvent[]): Step[] {
+    this.cursor = 0;
+    const next = timeline(events, this.names, this.replay, this.skillSets, this.options);
+    const tail = next.slice(this.seen.length);
+    this.seen = next;
+    return tail;
+  }
+
+  /** 已经排好的全部步骤（快进时整场交给 BattleShow 跳收场） */
+  steps(): Step[] {
+    return this.seen;
+  }
+
+  /** 每一步按序号取随机数：序号在缓存里就重放，不在才向源随机数要一个新的 */
+  private readonly replay = (): number => {
+    if (this.cursor < this.cache.length) return this.cache[this.cursor++]!;
+    const value = this.rng();
+    this.cache.push(value);
+    this.cursor += 1;
+    return value;
+  };
 }
 
 /** 速战（Y2）开场：两边各起手一拍，压到这么短（4 秒素材按它算倍速，正好播完，不切给下一段） */

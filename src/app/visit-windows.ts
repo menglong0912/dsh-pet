@@ -36,6 +36,7 @@ export interface WindowLike {
   loadURL(url: string): Promise<void>;
   showInactive(): void;
   show(): void;
+  hide?(): void;
   focus(): void;
   once(event: 'closed', listener: () => void): void;
   destroy(): void;

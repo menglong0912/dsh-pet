@@ -127,6 +127,8 @@ export function createTicks(ctx: FeatureContext): Ticks {
         snap?.present &&
         ctx.state.trip === null &&
         ctx.state.battle === null &&
+        ctx.state.liveBattle === null &&
+        ctx.state.actionPanel === null &&
         now >= ctx.state.meditateAt &&
         !ctx.state.generating &&
         now - ctx.state.lastSpokeAt >= SPOKE_HOLD_MS
@@ -150,6 +152,8 @@ export function createTicks(ctx: FeatureContext): Ticks {
       config.screen.enabled &&
       ctx.state.trip === null &&
       ctx.state.battle === null &&
+      ctx.state.liveBattle === null &&
+      ctx.state.actionPanel === null &&
       tracker.snapshot()?.present === true &&
       electron.powerMonitor.getSystemIdleTime() < SCREEN_ACTIVE_IDLE_SEC &&
       now - ctx.state.lastScreenAt >= config.screen.intervalSec * 1000 &&

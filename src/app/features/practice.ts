@@ -49,7 +49,7 @@ export function createPractice(ctx: FeatureContext): Practice {
   function onCultivation(now: number, events: CultivationEvent[], options: SayOptions = {}): void {
     const view = ctx.state.cultivation?.view();
     // 正在演一场：冒泡一律 anim: false——升级、炼丹这些气泡撞上演出，会把正在播的动画顶掉（X2 真机的坑）
-    if (ctx.state.battle) options = { ...options, anim: false };
+    if (ctx.state.battle || ctx.state.liveBattle || ctx.state.actionPanel) options = { ...options, anim: false };
     for (const event of events) {
       if (event.kind === 'stage-up') {
         void sayLine(`修为精进，到${stageLabel(event.stage)}啦～`, options);
@@ -203,7 +203,7 @@ export function createPractice(ctx: FeatureContext): Practice {
       }
     }
     // 心魔试炼：没在打、没出门、家里没客人、也没有挂着的隔空挑战时才有；打的时候换成「快进」
-    if (ctx.state.battle) actions.set(`${MENU_CULTIVATION_GROUP}/快进`, skipTrial);
+    if (ctx.state.battle || ctx.state.liveBattle) actions.set(`${MENU_CULTIVATION_GROUP}/快进`, skipTrial);
     else if (
       ctx.state.trip === null &&
       ctx.state.hosting === null &&

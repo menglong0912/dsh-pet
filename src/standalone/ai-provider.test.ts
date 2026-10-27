@@ -213,6 +213,26 @@ test('text history ignores nontext/source data; provider-global rate limits rese
   );
 });
 
+test('X17 逐手出招另给一分钟 30 次的额度，不占也不挤掉对话 / 看屏幕的 12 次', async () => {
+  let time = 0;
+  await fixture(
+    async (ai) => {
+      for (let n = 0; n < 30; n++) assert.equal(await collect(ai.streamBattle(options)), 'ok');
+      await assert.rejects(collect(ai.streamBattle(options)), /rate limit/);
+      // 对话那一份额度一点没动
+      for (let n = 0; n < 12; n++) assert.equal(await collect(ai.stream(options)), 'ok');
+      await assert.rejects(collect(ai.stream(options)), /rate limit/);
+      // 逐手出招被限流也不影响对话继续用：两份各记各的
+      time = 60_001;
+      assert.equal(await collect(ai.stream(options)), 'ok');
+      assert.equal(await collect(ai.streamBattle(options)), 'ok');
+    },
+    async () => openAiResponse('ok'),
+    'openai-compatible',
+    () => time,
+  );
+});
+
 test('abort, save changes, and dispose cancel in-flight requests; concurrency stays bounded', async () => {
   for (const mode of ['abort', 'save', 'dispose']) {
     let started!: () => void;

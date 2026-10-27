@@ -111,6 +111,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     battle: null,
     trialWindowGroups: new Set(),
     tribulationFx: null,
+    liveBattle: null,
+    actionPanel: null,
     meditateAt: 0,
     spar: null,
     sparWindows: new Set(),
@@ -207,6 +209,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       },
     },
     cultivation: { view: () => state.cultivation?.view() ?? null },
+    battle: {
+      choose: (pick) => state.actionPanel?.choose(pick) ?? false,
+      state: () => state.actionPanel?.state() ?? null,
+    },
     dispose() {
       state.disposed = true;
       if (state.tickTimer !== null) clearTimeout(state.tickTimer);
@@ -216,6 +222,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       // 正在演一场：停掉剩下的步骤、立刻收窗口（不留下空转的心魔与擂台）
       state.battle?.dispose();
       state.battle = null;
+      // 逐手出招（X17）：等着的 AI / 手动选择作废，面板与窗口一起关
+      state.liveBattle?.dispose();
+      state.liveBattle = null;
+      state.actionPanel?.close();
+      state.actionPanel = null;
       fns.closeTrial(0);
       fns.closeTribulationFx(0);
       // 历练：小窗和这一场的窗口都关掉；run 已经在存档里，不补结算

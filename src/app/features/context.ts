@@ -7,8 +7,10 @@ import type { StandaloneAiService } from '../../standalone/ai-provider';
 import type { ActivitySnapshot, ActivityTracker } from '../activity';
 import type { AdventureFlow } from '../adventure-flow';
 import type { AppConfig } from '../app-config';
+import type { ActionPanelWindow, PanelView } from '../action-panel-window';
 import type { ArenaWindow } from '../arena-window';
 import type { BattleEvent, Fighter } from '../battle';
+import type { LiveBattle } from '../battle-live';
 import type { BattleShow } from '../battle-show';
 import type { Step } from '../battle-show';
 import type { ClaudeHookPayload, ClaudeSessions } from '../claude-hooks';
@@ -80,6 +82,8 @@ export interface AppFeatures {
   };
   /** 修炼的只读视图（设置页「修炼」一节用，X6）；开关关着时 null */
   cultivation: { view(): CultivationView | null };
+  /** 逐手出招面板（X17）：curl / 本机接口选方式、点招，也给 GET 看当前在等什么 */
+  battle: { choose(pick: number): boolean; state(): PanelView | null };
   dispose(): void;
 }
 
@@ -102,6 +106,12 @@ export interface FeatureDeps {
   cultivationRng?: () => number;
   /** 切磋等客人应战 / 亮随机数的时限（默认 30 秒，超时按客人认输）；只给测试调短用 */
   sparWaitMs?: number;
+  /** 逐手出招（X17）：选方式 10 秒不点按自动；只给测试调短用 */
+  modeTimeoutMs?: number;
+  /** 逐手出招：AI 一手 15 秒超时；只给测试调短用 */
+  aiTurnTimeoutMs?: number;
+  /** 逐手出招：手动一手 20 秒不点按后备；只给测试调短用 */
+  actionTimeoutMs?: number;
   /** 信标的端口与发往地址（默认 BEACON_PORT + 每块网卡的广播地址）；只给测试注入用，不往真实网络发 */
   beacon?: {
     port?: number;
@@ -184,6 +194,7 @@ export interface TrialWindows {
   guest: GuestWindow;
   arena: ArenaWindow;
   fx: FxWindow;
+  panel: ActionPanelWindow;
 }
 
 /**
@@ -336,6 +347,10 @@ export interface FeatureState {
   trialWindowGroups: Set<TrialWindows>;
   /** 这场渡劫的特效层（X7 第二步：乌云与闪电；演完 `CLOSE_HOLD_MS` 后关掉） */
   tribulationFx: FxWindow | null;
+  /** 逐手出招（X17）：正在逐手演的心魔；跟 `battle` 一样算「正在打」，快进 / 收摊都看它 */
+  liveBattle: LiveBattle | null;
+  /** 出招面板（X17）：开打前选方式 / 手动出招时等一手；收摊、退出一起关 */
+  actionPanel: ActionPanelWindow | null;
   /** 下次平时打坐最早什么时候（40–60 分钟一次） */
   meditateAt: number;
   /** 正在进行的那一场切磋（见 SparState） */
@@ -353,7 +368,7 @@ export interface FeatureState {
 export interface FeatureFunctions {
   petId(): string;
   petRequest(method: string, path: string, body?: unknown): Promise<Record<string, unknown>>;
-  holdPet(steps: Step[]): Promise<void>;
+  holdPet(steps: Step[], durationMs?: number): Promise<void>;
   releasePet(afterMs: number): void;
   say(text: string, options?: SayOptions): Promise<boolean>;
   personaPrompt(): string;

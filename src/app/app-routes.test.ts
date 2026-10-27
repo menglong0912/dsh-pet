@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { appCultivationHandler, appNeighborsHandler, createAppRoutes, petSettingsHandler } from './app-routes.ts';
@@ -209,7 +209,7 @@ test('/app/arena 回擂台页面（X3）、/app/fx 回特效层页面（X7）：
       }
     },
     async (base) => {
-      for (const page of ['/app/guest', '/app/foe', '/app/note', '/app/arena', '/app/fx']) {
+      for (const page of ['/app/guest', '/app/foe', '/app/note', '/app/arena', '/app/fx', '/app/panel']) {
         const got = await fetch(base + page);
         assert.equal(got.status, 200, page);
         assert.match(got.headers.get('content-type') ?? '', /text\/html/, page);
@@ -222,6 +222,8 @@ test('/app/arena 回擂台页面（X3）、/app/fx 回特效层页面（X7）：
       assert.match(await (await fetch(`${base}/app/fx`)).text(), /window\.fx = \{/);
       // /app/foe 回的就是对手窗口的页面（foe-window.ts 的 foePage）
       assert.match(await (await fetch(`${base}/app/foe`)).text(), /window\.foe = \{/);
+      // /app/panel 回的就是出招面板的页面（action-panel-window.ts 的 panelPage）
+      assert.match(await (await fetch(`${base}/app/panel`)).text(), /window\.panel = \{/);
       // 网页来源照旧拒绝（这几个页面都不例外）
       const web = await fetch(`${base}/app/arena`, { headers: { origin: 'https://evil.example' } });
       assert.equal(web.status, 403);
@@ -246,6 +248,105 @@ test('/app/arena 回擂台页面（X3）、/app/fx 回特效层页面（X7）：
           assert.equal((await fetch(`${other}/app/arena`)).status, 200);
         },
       );
+    },
+  );
+});
+
+test('X17 出招面板：GET /app/battle 看等什么，POST /app/battle/choose 选方式 / 点招（curl 与页面同源共用）', async () => {
+  const picks: number[] = [];
+  let question: unknown = {
+    kind: 'mode',
+    title: '这一场怎么出招？',
+    seconds: 10,
+    options: [
+      { pick: 1, label: '自动' },
+      { pick: 2, label: 'AI 出招' },
+      { pick: 3, label: '手动' },
+    ],
+  };
+  const fake = {
+    battle: {
+      state: () => question,
+      choose: (pick: number) => {
+        picks.push(pick);
+        if (pick !== 1) return false;
+        question = null;
+        return true;
+      },
+    },
+    say: async () => true,
+  } as unknown as AppFeatures;
+  const handler = createAppRoutes(
+    () => fake,
+    () => undefined,
+  );
+  await serve(
+    (req, res) => {
+      const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+      if (!handler(req, res, pathname)) {
+        res.writeHead(404);
+        res.end();
+      }
+    },
+    async (base) => {
+      const state = await fetch(`${base}/app/battle`);
+      assert.equal(state.status, 200);
+      assert.deepEqual(await state.json(), { question });
+      // 非 GET / POST 不发明新方法
+      assert.equal((await fetch(`${base}/app/battle`, { method: 'POST', body: '{}' })).status, 405);
+      // 面板自己的按钮从同一来源 POST：放行同源
+      const page = await fetch(`${base}/app/battle/choose`, {
+        method: 'POST',
+        headers: { origin: base, 'content-type': 'application/json' },
+        body: JSON.stringify({ pick: 1 }),
+      });
+      assert.equal(page.status, 200);
+      assert.deepEqual(picks, [1]);
+      // curl 不带 Origin 照旧能调
+      const curl = await fetch(`${base}/app/battle/choose`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pick: 3 }),
+      });
+      assert.equal(curl.status, 409, '现在没有等待的选择');
+      // 网页来源照旧拒绝
+      const evil = await fetch(`${base}/app/battle/choose`, {
+        method: 'POST',
+        headers: { origin: 'https://evil.example', 'content-type': 'application/json' },
+        body: JSON.stringify({ pick: 1 }),
+      });
+      assert.equal(evil.status, 403);
+      // DNS 重绑定：Origin 和 Host 一致，但 Host 不是本机地址 → 照旧拒绝（fetch 改不了 Host，用 node:http 发）
+      const rebound = await new Promise<number>((done, fail) => {
+        const target = new URL(`${base}/app/battle/choose`);
+        const req = request(
+          {
+            host: target.hostname,
+            port: target.port,
+            path: target.pathname,
+            method: 'POST',
+            headers: {
+              host: `evil.example:${target.port}`,
+              origin: `http://evil.example:${target.port}`,
+              'content-type': 'application/json',
+            },
+          },
+          (res) => {
+            res.resume();
+            done(res.statusCode ?? 0);
+          },
+        );
+        req.on('error', fail);
+        req.end(JSON.stringify({ pick: 1 }));
+      });
+      assert.equal(rebound, 403);
+      // 参数不对
+      const bad = await fetch(`${base}/app/battle/choose`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pick: 0 }),
+      });
+      assert.equal(bad.status, 400);
     },
   );
 });

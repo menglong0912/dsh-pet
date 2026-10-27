@@ -145,7 +145,12 @@ export function createScreen(ctx: FeatureContext): Screen {
       const meme = await memeFor(text);
       // 插件拒绝说话（生成失败等）：如实报失败，别让调用方以为说出来了
       // 正在演一场（心魔）时也不联动说话动画：手动看屏幕照样能看，只是别顶掉演出的动画
-      if (!(await say(text, { image: meme?.name, ...(ctx.state.battle ? { anim: false } : {}) })))
+      if (
+        !(await say(text, {
+          image: meme?.name,
+          ...(ctx.state.battle || ctx.state.liveBattle || ctx.state.actionPanel ? { anim: false } : {}),
+        }))
+      )
         return { ok: false, text, reason: 'say-failed' };
       const now = Date.now();
       if (now - ctx.state.lastScreenDiaryAt >= SCREEN_DIARY_GAP_MS) {

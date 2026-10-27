@@ -38,6 +38,12 @@ export const env = {
   memeHold: null as Promise<void> | null,
   visionDelayMs: 0,
   visionDone: 0,
+  /** 逐手出招（X17）：按调用顺序吐给 streamBattle 的回答 */
+  battleReplies: [] as string[],
+  /** 非 null 时 streamBattle 卡在这里不返回（测 15 秒超时） */
+  battleHold: null as Promise<void> | null,
+  /** streamBattle 被调用了几次 */
+  battleCalls: 0,
 };
 
 /** 假窗口（客人 / 心魔 / 擂台）：记下页面调用与销毁 */
@@ -189,6 +195,12 @@ export const ai = {
     const reply = env.memeReplies.length > 0 ? env.memeReplies.shift()! : env.memeAnswer;
     yield { type: 'text', text: reply };
   },
+  streamBattle: async function* () {
+    env.battleCalls += 1;
+    if (env.battleHold) await env.battleHold;
+    const reply = env.battleReplies.length > 0 ? env.battleReplies.shift()! : env.memeAnswer;
+    yield { type: 'text', text: reply };
+  },
   streamVision: async function* (input: { prompt: string }) {
     visionPrompts.push(input.prompt);
     env.visionCalls += 1;
@@ -257,6 +269,10 @@ export async function withFeatures(
     neighbors?: Record<string, unknown>;
     /** 切磋等应战 / 亮随机数的时限（默认 30 秒；测试调短） */
     sparWaitMs?: number;
+    /** 逐手出招（X17）：选方式 / AI 一手 / 手动一手的时限；测试调短 */
+    modeTimeoutMs?: number;
+    aiTurnTimeoutMs?: number;
+    actionTimeoutMs?: number;
     /** 信标的端口、发往地址与手动邻居的发往端口（测试注入：绑随机端口、不往真实广播地址发） */
     beacon?: {
       port?: number;
@@ -334,6 +350,9 @@ export async function withFeatures(
     cultivationPath: join(home, 'cultivation.json'),
     cultivationRng: options.rng,
     sparWaitMs: options.sparWaitMs,
+    modeTimeoutMs: options.modeTimeoutMs,
+    aiTurnTimeoutMs: options.aiTurnTimeoutMs,
+    actionTimeoutMs: options.actionTimeoutMs,
     beacon: options.beacon,
     petBase: `http://127.0.0.1:${(server.address() as AddressInfo).port}/dsh-pet-7340`,
     log: (message) => logs.push(message),
@@ -398,10 +417,23 @@ export function cultivationEarly(): Record<string, unknown> {
   return { ...cultivationSeed(), stage: 0, progress: 0, stats: { hp: 50, power: 4, agility: 4, speed: 3 } };
 }
 
-/** 点开一场心魔试炼并等它开演（§X14 那几条用；菜单看**最新**一帧，历史快照不算） */
-export async function startTrial(clicks: string[], menus: string[][], what: string): Promise<void> {
+/** 出招面板（X17）等在等选择时，按 `pick` 选（1 = 自动 / 2 = AI / 3 = 手动；手动出招时是编号） */
+export async function pickPanel(features: AppFeatures, pick: number, what: string): Promise<void> {
+  await until(() => features.battle.state() !== null, `${what}面板`);
+  assert.ok(features.battle.choose(pick), `${what}点了 ${pick}`);
+}
+
+/** 点开一场心魔试炼、选出招方式并等它开演（§X14 那几条用；菜单看**最新**一帧，历史快照不算） */
+export async function startTrial(
+  features: AppFeatures,
+  clicks: string[],
+  menus: string[][],
+  what: string,
+  pick = 1,
+): Promise<void> {
   await until(() => (menus[menus.length - 1] ?? []).includes('修炼/心魔试炼'), `${what}菜单`);
   clicks.push('修炼/心魔试炼');
+  await pickPanel(features, pick, what);
   await until(() => (menus[menus.length - 1] ?? []).includes('修炼/快进'), `${what}开打`);
 }
 

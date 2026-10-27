@@ -12,7 +12,7 @@ const SHOW_LOCK_SPARE_MS = 30_000;
 export interface PetIo {
   petId(): string;
   petRequest(method: string, path: string, body?: unknown): Promise<Record<string, unknown>>;
-  holdPet(steps: Step[]): Promise<void>;
+  holdPet(steps: Step[], durationMs?: number): Promise<void>;
   releasePet(afterMs: number): void;
 }
 
@@ -62,11 +62,12 @@ export function createPetIo(ctx: FeatureContext): PetIo {
   /**
    * 开演前占住自家宠物（见 showLock）：锁的时长按这一场的时间线算，再留出收场的余量。
    * 上一场刚演完、锁还没放：续上同一把（续不上就重新拿）。拿不到只记一行，照没锁的老样子演。
+   * @param durationMs 逐手出招（X17）事先不知道一场多久：给一个够用的时长，别让手还没出完锁就到期
    */
-  async function holdPet(steps: Step[]): Promise<void> {
+  async function holdPet(steps: Step[], durationMs?: number): Promise<void> {
     if (ctx.state.showLockRelease !== null) clearTimeout(ctx.state.showLockRelease);
     ctx.state.showLockRelease = null;
-    const showMs = steps.length ? steps[steps.length - 1].at + LINE_MS : 0;
+    const showMs = durationMs ?? (steps.length ? steps[steps.length - 1].at + LINE_MS : 0);
     const ttl = Math.min(LOCK_MAX_TTL_MS, showMs + SHOW_LOCK_SPARE_MS);
     let failure = '';
     for (const lockId of ctx.state.showLock === null ? [null] : [ctx.state.showLock, null]) {

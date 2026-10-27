@@ -342,7 +342,7 @@ export function createSpar(ctx: FeatureContext): Spar {
       (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人，下次再战。');
     const text = cleanText(await compose(instruction, won ? '切磋赢啦，承让承让～' : '切磋输了，下次再战！'), LINE_MAX);
     // 回来时已经开了下一场（battle 不是 null）就不说了，免得插进下一场的台词里
-    if (ctx.state.battle === null) void say(text, { anim: false });
+    if (ctx.state.battle === null && ctx.state.liveBattle === null) void say(text, { anim: false });
   }
 
   /**
