@@ -57,7 +57,7 @@ const todaySchema = z.object({
   rests: z.number().int().min(0),
   /** 今天炼成过几颗丹（每天最多 3） */
   pills: z.number().int().min(0),
-  /** 今天心魔算过收益的场次（只有第 1 场有收益） */
+  /** 今天打过几场心魔（收益随间隔恢复，不封顶，见 trialDone） */
   trial: z.number().int().min(0),
   /** 今天切磋算过收益的邻居（同一邻居一天一场，收益每天前 3 场） */
   spars: z.array(z.string().min(1).max(64)).max(16),
@@ -84,6 +84,8 @@ const saveSchema = z.object({
   offer: offerSchema.nullable(),
   today: todaySchema,
   record: z.object({ wins: z.number().int().min(0), losses: z.number().int().min(0) }),
+  /** 上一场心魔的时刻（毫秒时间戳，0 = 还没打过）：收益随间隔恢复要用；旧档没有就当没打过 */
+  trialAt: z.number().int().nonnegative().default(0),
 });
 
 export type CultivationSave = z.infer<typeof saveSchema>;
@@ -94,6 +96,8 @@ export type CultivationEvent =
   | { kind: 'full' }
   /** 渡劫成功、进了新大境界（属性加成已到账；招式在下面那条 `offer` / `choose` 里） */
   | { kind: 'breakthrough' }
+  /** 心魔还没缓过来（离上一场不到 TRIAL_RECOVER_MS）：这一场只给了一部分，再过 `minutes` 分钟才满额 */
+  | { kind: 'trial-tired'; minutes: number }
   /** 二选一挂出来了（菜单两项，`until` 前有效） */
   | { kind: 'offer'; a: SkillId; b: SkillId }
   /** 领悟了某一门招式（主人点的，或二选一过期随机定的） */
@@ -105,7 +109,7 @@ export type CultivationEvent =
   | { kind: 'drop'; weapon: WeaponId }
   /**
    * 这一笔实际进了账的修为（X3 打完一场要照它冒泡「修为 +30」）。
-   * 只在真的加进去时发（amount > 0）：圆满之后多出来的不要、当天不算收益的场次，都不发——
+   * 只在真的加进去时发（amount > 0）：圆满之后多出来的不要、当天不算收益的切磋、离上一场太近一点没恢复的心魔，都不发——
    * 冒泡「+30」而存档一点没动是骗人。一次升级跨两个小境界会发多条。
    */
   | { kind: 'xp'; amount: number };
@@ -153,10 +157,16 @@ const MINUTE_MS = 60_000;
 const PILLS_MAX = 9;
 const PILLS_DAILY_MAX = 3;
 const PILL_CHANCE = 0.2;
-/** 心魔：当天只有第 1 场有收益，赢了 30% 掉一件还没有的法宝 */
+/**
+ * 心魔：场次和总量都不封顶，但收益随间隔恢复——离上一场越久给得越多，隔满 10 分钟给满额
+ * （赢 +30、输 +10，赢了 30% 掉一件还没有的法宝；不满 10 分钟时修为和掉落概率都按比例打折）。
+ * 心魔能快进，不这样的话连点「心魔试炼」「快进」一小时能刷约 8 000（设计 cultivation-adventure-design.md §7.3）；
+ * 线性恢复下不管多久打一场，一小时最多约 +180。
+ */
 const TRIAL_WIN_XP = 30;
 const TRIAL_LOSE_XP = 10;
 const DROP_CHANCE = 0.3;
+const TRIAL_RECOVER_MS = 10 * 60_000;
 /** 切磋：每天前 3 场有收益 */
 const SPAR_DAILY_MAX = 3;
 const SPAR_WIN_XP = 20;
@@ -295,6 +305,8 @@ export class Cultivation {
   private offer: CultivationOffer | null = null;
   private today: z.infer<typeof todaySchema> = emptyToday('');
   private record = { wins: 0, losses: 0 };
+  /** 上一场心魔的时刻（0 = 还没打过） */
+  private trialAt = 0;
   /** 心浮气躁（久坐提醒到主人离开电脑为止）；不落盘，重启就不躁了 */
   private restless = false;
   private lastSitAt = 0;
@@ -334,6 +346,7 @@ export class Cultivation {
       this.offer = saved.offer;
       this.today = saved.today;
       this.record = saved.record;
+      this.trialAt = saved.trialAt;
     } else {
       // 第一次建档：drawInitialStats 的初始属性、随机一件凡器、没有招式
       this.stats = drawInitialStats(this.rng);
@@ -482,23 +495,29 @@ export class Cultivation {
     return events;
   }
 
-  /** 心魔试炼结束：战绩都记；收益只有当天第 1 场有，赢了 30% 掉一件还没有的法宝 */
+  /**
+   * 心魔试炼结束：战绩都记；收益随离上一场的间隔线性恢复，隔满 10 分钟给满额（见 TRIAL_RECOVER_MS 上的说明）。
+   * 时钟往回拨过（now 早于上一场）按间隔 0 算：这一场没有收益，从这一场重新计起。
+   */
   trialDone(now: number, won: boolean): CultivationEvent[] {
     this.rollDay(now);
     this.record[won ? 'wins' : 'losses'] += 1;
+    this.today.trial += 1;
     this.dirty = true;
-    let events: CultivationEvent[] = [];
-    if (this.today.trial < 1) {
-      this.today.trial = 1;
-      const gained = this.addXp(won ? TRIAL_WIN_XP : TRIAL_LOSE_XP);
-      events = gained.events;
-      if (gained.added > 0) events.unshift({ kind: 'xp', amount: gained.added });
-      if (won && this.rng() < DROP_CHANCE) {
-        const weapon = drawDropWeapon(this.weapons, this.rng);
-        if (weapon) {
-          this.weapons.push(weapon);
-          events.push({ kind: 'drop', weapon });
-        }
+    const elapsed = Math.min(Math.max(0, now - this.trialAt), TRIAL_RECOVER_MS);
+    this.trialAt = now;
+    const full = won ? TRIAL_WIN_XP : TRIAL_LOSE_XP;
+    // 先乘后除、向下取整：一分钟一场正好 +3，连点（不到 20 秒一场）一点都没有
+    const gained = this.addXp(Math.floor((full * elapsed) / TRIAL_RECOVER_MS));
+    const events = gained.events;
+    if (gained.added > 0) events.unshift({ kind: 'xp', amount: gained.added });
+    if (elapsed < TRIAL_RECOVER_MS)
+      events.unshift({ kind: 'trial-tired', minutes: Math.max(1, Math.ceil((TRIAL_RECOVER_MS - elapsed) / 60_000)) });
+    if (won && this.rng() < (DROP_CHANCE * elapsed) / TRIAL_RECOVER_MS) {
+      const weapon = drawDropWeapon(this.weapons, this.rng);
+      if (weapon) {
+        this.weapons.push(weapon);
+        events.push({ kind: 'drop', weapon });
       }
     }
     this.save();
@@ -690,6 +709,7 @@ export class Cultivation {
       offer: this.offer,
       today: this.today,
       record: this.record,
+      trialAt: this.trialAt,
     };
     try {
       const tmp = `${this.path}.tmp`;

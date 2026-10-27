@@ -827,11 +827,11 @@ test('心魔试炼：锁被用户撤掉（点了 / 拖了宠物）就不带锁�
   );
 });
 
-test('修炼：演完一场再点第二场，只有第一场加修为（当天只算一场收益）', async () => {
+test('修炼：演完一场马上再点第二场，两场都记，第二场还没缓过来、不加修为并说一声（心魔收益随间隔恢复）', async () => {
   const clicks: string[] = [];
   windows.length = 0;
   const record = (home: string) => cultivationSave(home)?.record as { wins: number; losses: number };
-  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, _said, _bodies, home, extras) => {
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, said, _bodies, home, extras) => {
     const { menus } = extras;
     let firstRound = -1;
     for (const round of [1, 2]) {
@@ -843,9 +843,11 @@ test('修炼：演完一场再点第二场，只有第一场加修为（当天�
       if (round === 1) firstRound = (cultivationSave(home)?.progress as number) ?? 0;
     }
     const save = cultivationSave(home)!;
-    assert.equal((save.today as { trial: number }).trial, 1, '当天只算一场收益');
+    assert.equal((save.today as { trial: number }).trial, 2, '两场都记了场次');
     assert.equal(record(home).wins + record(home).losses, 2, '两场战绩都记');
-    assert.equal(save.progress, firstRound, '第二场一点修为都没进账');
+    assert.equal(save.progress, firstRound, '隔了几秒的第二场一点修为都没进账');
+    assert.ok(firstRound > 0, '第一场（没打过）是满额');
+    await until(() => said.some((line) => /心魔还没缓过来/.test(line)), '说一声还没缓过来');
   });
 });
 

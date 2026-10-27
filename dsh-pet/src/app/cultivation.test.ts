@@ -205,17 +205,76 @@ test('claudeDone grants pills at 20%, capped 3 a day and 9 in stock', () => {
   });
 });
 
-test('trialDone rewards only the first trial of the day, record counts all', () => {
+test('trialDone rewards every trial of the day (no daily cap), record counts all', () => {
   withPath((path) => {
     const c = open(path, 3);
     c.trialDone(at(0), true);
     assert.equal(progressOf(path), 30);
     assert.deepEqual(c.view().record, { wins: 1, losses: 0 });
-    // 之后的场次只返回 0，战绩照记
-    assert.deepEqual(c.trialDone(at(0, 13), true), []);
-    assert.deepEqual(c.trialDone(at(0, 14), false), []);
+    // 同一天隔一小时再打：间隔早过了 10 分钟，照样满额进账（赢 +30、输 +10），场次和战绩都记
+    c.trialDone(at(0, 13), true);
+    c.trialDone(at(0, 14), false);
     assert.deepEqual(c.view().record, { wins: 2, losses: 1 });
+    assert.equal(progressOf(path), 70);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as { today: { trial: number } }).today.trial, 3);
+  });
+});
+
+test('trialDone: the reward recovers with the gap since the last trial (full after 10 min), drops scale too', () => {
+  withPath((path) => {
+    const kinds = (events: CultivationEvent[]) => events.map((event) => event.kind);
+    const tired = (events: CultivationEvent[]) =>
+      events.flatMap((event) => (event.kind === 'trial-tired' ? [event.minutes] : []));
+    // 常量 0.2：掉落判定是「0.2 < 30% × 恢复比例」，恢复满了掉、恢复一半不掉
+    const c = new Cultivation(
+      path,
+      () => undefined,
+      () => 0.2,
+      24 * 3_600_000,
+    );
+    const t0 = at(0);
+    // 第一次打：没有上一场，满额 +30、掉一件法宝，不说「没缓过来」
+    assert.deepEqual(kinds(c.trialDone(t0, true)), ['xp', 'drop']);
     assert.equal(progressOf(path), 30);
+    assert.equal(c.view().weapons.length, 2);
+    // 10 秒后连点：一点修为都没有，也不掉；说一声还要 10 分钟
+    const spam = c.trialDone(t0 + 10_000, true);
+    assert.deepEqual(kinds(spam), ['trial-tired']);
+    assert.deepEqual(tired(spam), [10]);
+    assert.equal(progressOf(path), 30);
+    // 再过 5 分钟：恢复一半，赢 +15，掉落概率 15% < 0.2 不掉
+    const half = c.trialDone(t0 + 10_000 + 5 * MIN, true);
+    assert.deepEqual(kinds(half), ['trial-tired', 'xp']);
+    assert.deepEqual(tired(half), [5]);
+    assert.equal(progressOf(path), 45);
+    assert.equal(c.view().weapons.length, 2);
+    // 再隔满 10 分钟：满额 +30、又掉一件，不再说「没缓过来」
+    const rested = t0 + 10_000 + 15 * MIN;
+    assert.deepEqual(kinds(c.trialDone(rested, true)), ['xp', 'drop']);
+    assert.equal(progressOf(path), 75);
+    assert.equal(c.view().weapons.length, 3);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as { today: { trial: number } }).today.trial, 4);
+    // 上一场的时刻落了盘：重启后马上再打照样没收益
+    const reopened = new Cultivation(
+      path,
+      () => undefined,
+      () => 0.2,
+      24 * 3_600_000,
+    );
+    assert.deepEqual(kinds(reopened.trialDone(rested + 1_000, false)), ['trial-tired']);
+    assert.equal(progressOf(path), 75);
+    // 旧档没有 trialAt：读得出来，当没打过，下一场满额（输 +10）
+    const old = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    delete old.trialAt;
+    writeFileSync(path, JSON.stringify(old), 'utf8');
+    const legacy = new Cultivation(
+      path,
+      () => undefined,
+      () => 0.2,
+      24 * 3_600_000,
+    );
+    assert.deepEqual(kinds(legacy.trialDone(rested + 2_000, false)), ['xp']);
+    assert.equal(progressOf(path), 85);
   });
 });
 
@@ -226,8 +285,8 @@ test('trialDone / sparDone report the xp that actually went in; tick and rest do
     const c = open(path, 3);
     // 第 1 场赢：xp 30
     assert.deepEqual(xp(c.trialDone(at(0), true)), [{ kind: 'xp', amount: 30 }]);
-    // 当天第 2 场：没有任何事件（也就不会冒泡「修为 +10」而存档一点没动）
-    assert.deepEqual(c.trialDone(at(0, 13), true), []);
+    // 当天第 2 场：照样进账，xp 照实发
+    assert.deepEqual(xp(c.trialDone(at(0, 13), false)), [{ kind: 'xp', amount: 10 }]);
     // 切磋：赢 20、输 10
     assert.deepEqual(xp(c.sparDone(at(1), 'a'.repeat(32), true)), [{ kind: 'xp', amount: 20 }]);
     assert.deepEqual(xp(c.sparDone(at(1), 'b'.repeat(32), false)), [{ kind: 'xp', amount: 10 }]);
@@ -549,7 +608,7 @@ test('day rolls over at 4 am: counters reset and the old file is backed up', () 
     // 备份的是昨天收尾时的那份
     const bak = JSON.parse(readFileSync(`${path}.bak`, 'utf8')) as { today: { date: string } };
     assert.equal(bak.today.date, '2026-10-20');
-    // 计数清零：第二场心魔又有收益了
+    // 第二天的心魔照样有收益
     c.trialDone(at(1, 5), true);
     assert.equal(progressOf(path), 90);
     assert.equal(c.view().record.wins, 3); // 昨天心魔 + 切磋各赢一场，今天心魔又赢一场

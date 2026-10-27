@@ -1765,8 +1765,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
         void sayLine('炼成一颗破境丹～', options);
         diary.note(now, 'cultivate', '炼成一颗破境丹');
       } else if (event.kind === 'xp') {
-        // 一场的进账（心魔试炼 / 切磋）：只在真的进了账时才发（圆满、当天不算收益的场次都没有这条）
+        // 一场的进账（心魔试炼 / 切磋）：只在真的进了账时才发（圆满、当天不算收益的切磋、连点没恢复的心魔都没有这条）
         void sayLine(`这一场修为 +${event.amount}`, options);
+      } else if (event.kind === 'trial-tired') {
+        // 心魔收益随间隔恢复：离上一场不到 10 分钟只给一部分（连点就一点没有），说一声免得以为白打了
+        void sayLine(`心魔还没缓过来，这一场收益打了折；再过 ${event.minutes} 分钟打才是满额～`, options);
       } else {
         // 打赢心魔掉了一件还没有的法宝
         void sayLine(`得到法宝：${WEAPONS[event.weapon].name}～`, options);
