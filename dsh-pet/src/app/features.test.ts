@@ -251,6 +251,16 @@ interface FeaturesExtras {
 }
 
 /**
+ * 测试用的应用配置：默认配置里下班提醒是开着的，它按真实钟点触发（工作日 17:50 起），
+ * 晚上跑测试时会插进来说一句、占住模型（被 memeHold 卡住时后面的 compose 全排在它后头）。
+ * 这里的用例都不测下班提醒（它在 reminders.test.ts 里单测），一律关掉，结果才不随钟点变。
+ */
+const TEST_APP_CONFIG: AppConfig = {
+  ...DEFAULT_APP_CONFIG,
+  offWork: { ...DEFAULT_APP_CONFIG.offWork, enabled: false },
+};
+
+/**
  * 起一套功能编排跑 fn：插件路由由假服务应答（/broadcast 回 broadcast 并记下说的话与整个请求体，
  * /memes 回 memes 池，其余一律成功），应用配置取 config 的当前值（测试里可以改）。
  * fn 的 home 是这套编排的临时数据目录（宠物日记在 home/diary）。
@@ -331,7 +341,7 @@ async function withFeatures(
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const home = mkdtempSync(join(tmpdir(), 'dsh-pet-features-'));
   if (options.cultivation) writeFileSync(join(home, 'cultivation.json'), JSON.stringify(options.cultivation));
-  const config = options.config ?? DEFAULT_APP_CONFIG;
+  const config = options.config ?? TEST_APP_CONFIG;
   const deps: FeatureDeps = {
     electron,
     ai,
@@ -592,7 +602,7 @@ test('看屏幕：手动「看看我在干嘛」在模型不支持看图时也�
 });
 
 test('看屏幕：自动触发按秒判断到点（不是按分钟）', async () => {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
+  const config = structuredClone(TEST_APP_CONFIG);
   config.screen.intervalSec = 10;
   const realNow = Date.now;
   const base = realNow();
@@ -642,7 +652,7 @@ function cultivationSave(home: string): Record<string, unknown> | null {
 }
 
 test('修炼：开关关着不建档，也没有修炼的菜单项', async () => {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
+  const config = structuredClone(TEST_APP_CONFIG);
   config.cultivation.enabled = false;
   await withFeatures({ config }, async (features, _said, _bodies, home, { menus }) => {
     await until(() => features.activity()?.present === true);
@@ -1323,7 +1333,7 @@ test('历练：收起来以后从菜单能叫回来，心魔试炼和渡劫照�
 });
 
 test('修炼关掉时没有「心魔试炼」这一项', async () => {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
+  const config = structuredClone(TEST_APP_CONFIG);
   config.cultivation.enabled = false;
   await withFeatures({ config }, async (_features, _said, _bodies, _home, { menus }) => {
     await until(() => menus.length > 0);
@@ -1385,7 +1395,7 @@ const hostFighter: Fighter = {
 
 /** 开接待那套配置（信标绑测试自己的端口、哪儿都不发） */
 function visitConfig(): AppConfig {
-  const config = structuredClone(DEFAULT_APP_CONFIG);
+  const config = structuredClone(TEST_APP_CONFIG);
   config.visit.enabled = true;
   config.visit.hosting = true;
   return config;
@@ -1585,7 +1595,7 @@ test('切磋：随机数对不上、超时没亮、邀约没人接，各按各�
 test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数 → 自家屏幕上演全套、账记上、没被叫回家、回家收窗', async () => {
   const clicks: string[] = [];
   windows.length = 0;
-  const config = structuredClone(DEFAULT_APP_CONFIG);
+  const config = structuredClone(TEST_APP_CONFIG);
   config.visit.enabled = true;
   config.visit.visiting = true;
   // 假主人家（跟 dev/visit-peer.mjs 的 host 模式同一套）：应战用一份假名帖，随机数是固定的
