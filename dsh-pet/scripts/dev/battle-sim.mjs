@@ -46,6 +46,71 @@ function withSkill(f, id) {
   return f;
 }
 
+const dungeonFlag = process.argv.indexOf('--dungeon');
+if (dungeonFlag >= 0 && process.argv[dungeonFlag + 1] === 'sanwang') {
+  const { advance, autoDecide, choicesOf, startRun, TRAVEL_MS, RUN_TTL_MS } = await import('../../src/app/dungeon.ts');
+  const { SANWANG } = await import('../../src/app/dungeon-sanwang.ts');
+  const { fighterAt } = await import('../../src/app/battle-testkit.ts');
+  const suppressed = process.argv.includes('--suppressed');
+  const runs = Number(process.argv.includes('--runs') ? process.argv[process.argv.indexOf('--runs') + 1] : 400);
+  const stage = SANWANG.originStage;
+  const tally = { mob: [0, 0], elite: [0, 0], boss: [0, 0] };
+  let clear = 0;
+  let rewinds = 0;
+  let xp = 0;
+  let steps = 0;
+  let ms = 0;
+  const endings = {};
+  for (let i = 0; i < runs; i++) {
+    const pet = fighterAt(stage, Math.random);
+    pet.name = '小鱼';
+    let run = startRun(SANWANG, { pet, stage, suppressed, nonce: `sim-${i}`, now: 0 });
+    let now = 0;
+    let localMs = 0;
+    for (let n = 0; n < 200 && run.status !== 'over'; n++) {
+      if (choicesOf(SANWANG, run, pet).length === 0) break;
+      now = Math.max(now, run.readyAt);
+      const decision = autoDecide(SANWANG, run, pet);
+      const res = advance(SANWANG, run, pet, decision, now);
+      run = res.run;
+      const out = res.outcome.result;
+      // 奇遇里打起来的那一场（韩不留）打赢时包在 event 的 fought 里，打输时才是 fight 本身
+      const fought = out.kind === 'fight' ? out : out.kind === 'event' ? out.fought : undefined;
+      if (fought) {
+        tally[fought.tier][fought.won ? 0 : 1] += 1;
+        localMs += fought.tier === 'boss' ? 60_000 : 10_000;
+      } else if (res.outcome.travel) {
+        localMs += TRAVEL_MS;
+      }
+      if (out.kind === 'rewind') rewinds++;
+      if (res.outcome.end) {
+        xp += res.outcome.end.loot.xp;
+        if (res.outcome.end.reason === 'clear') {
+          clear++;
+          const id = res.outcome.end.ending?.id ?? 'none';
+          endings[id] = (endings[id] ?? 0) + 1;
+        }
+      }
+      now += 1;
+      steps++;
+    }
+    ms += Math.min(localMs, RUN_TTL_MS);
+  }
+  const rate = ([w, l]) => (w + l === 0 ? 'n/a' : ((w / (w + l)) * 100).toFixed(1) + '%');
+  console.log(`三王传承${suppressed ? '（压境）' : ''}：${runs} 趟\n`);
+  console.log(`小怪胜率 ${rate(tally.mob)}（${tally.mob[0] + tally.mob[1]} 场）`);
+  console.log(
+    `精英胜率 ${rate(tally.elite)}（${tally.elite[0] + tally.elite[1]} 场；托管的走法只碰「绕开韩不留」失手后的残血场）`,
+  );
+  console.log(`守护胜率 ${rate(tally.boss)}（${tally.boss[0] + tally.boss[1]} 场）`);
+  console.log(`通关率 ${((clear / runs) * 100).toFixed(1)}%`);
+  console.log(`春秋蝉用了几成 ${((rewinds / runs) * 100).toFixed(1)}%`);
+  console.log(`结局 ${JSON.stringify(endings)}`);
+  console.log(`平均修为 ${(xp / runs).toFixed(1)}，平均走 ${(steps / runs).toFixed(1)} 步`);
+  console.log(`估算一趟 ${(ms / runs / 60_000).toFixed(1)} 分钟（每步赶路 15 秒 + 速战 10 秒 + 守护 1 分钟）`);
+  process.exit(0);
+}
+
 const HOLDOUT_STAGE = 10; // 筑基中期：有一件多的法宝和一个换招的位置，量持有优势最稳
 
 console.log(`对打 ${pairs} 场一场一种子（--pairs 可调）\n`);

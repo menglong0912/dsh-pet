@@ -147,6 +147,75 @@ export const SKILLS: Record<SkillId, SkillDef> = {
 
 export const SKILL_IDS = Object.keys(SKILLS) as SkillId[];
 
+/** 招式编号（历练路线 Y0）：对手招式和一转蛊，另开一张表，不进图鉴、不进名帖、不会掉落 */
+export type MoveId =
+  | 'gu-dogs'
+  | 'gu-crane'
+  | 'gu-egg'
+  | 'dog-bite'
+  | 'egg-burst'
+  | 'mastiff-maul'
+  | 'han-dogs'
+  | 'moon-blade'
+  | 'gold-needle'
+  | 'gold-blade'
+  | 'ice-blade'
+  | 'frost'
+  | 'bingpo';
+
+export interface MoveDef {
+  id: MoveId;
+  name: string;
+  /** 结算字段与 WeaponDef 一样（伤害区间、段数、连击、定身、必中、远程、重） */
+  min: number;
+  max: number;
+  hits: number;
+  comboBonus: number;
+  skipChance: number;
+  mustHit: boolean;
+  ranged: boolean;
+  heavy: boolean;
+  skipCause: 'stun' | 'freeze';
+  /** 一场最多用几次（爆蛋蛊 3 颗、金色飞刀一次、北冥冰魄爆发一次）；不给 = 不限次 */
+  uses?: number;
+  /** 段数 = 驭犬蛊带来的狗数（Fighter.pack），不用 hits */
+  packHits?: boolean;
+}
+
+const move = (id: MoveId, name: string, min: number, max: number, extra: Partial<MoveDef> = {}): MoveDef => ({
+  id,
+  name,
+  min,
+  max,
+  hits: 1,
+  comboBonus: 0,
+  skipChance: 0,
+  mustHit: false,
+  ranged: false,
+  heavy: false,
+  skipCause: 'stun',
+  ...extra,
+});
+
+/** 招式表（历练路线 Y0）：宠物的一转蛊 + 对手的招式；起点值按模拟调（任务书 §3 Y0） */
+export const MOVES: Record<MoveId, MoveDef> = {
+  'gu-dogs': move('gu-dogs', '驭犬蛊', 2, 4, { packHits: true, ranged: true }),
+  'gu-crane': move('gu-crane', '纸鹤蛊', 3, 5, { ranged: true }),
+  'gu-egg': move('gu-egg', '爆蛋蛊', 10, 14, { mustHit: true, uses: 3 }),
+  'dog-bite': move('dog-bite', '扑咬', 2, 4, { hits: 2 }),
+  'egg-burst': move('egg-burst', '撞上来炸开', 5, 8, { skipChance: 0.1 }),
+  'mastiff-maul': move('mastiff-maul', '扑击', 9, 13, { heavy: true }),
+  'han-dogs': move('han-dogs', '驱犬围攻', 3, 5, { hits: 3, ranged: true }),
+  'moon-blade': move('moon-blade', '月刃', 6, 10, { ranged: true }),
+  'gold-needle': move('gold-needle', '金针', 3, 5, { hits: 3 }),
+  'gold-blade': move('gold-blade', '金色飞刀', 17, 23, { mustHit: true, uses: 1 }),
+  'ice-blade': move('ice-blade', '冰刃', 3, 6, { hits: 3 }),
+  frost: move('frost', '寒气', 5, 8, { skipChance: 0.25, skipCause: 'freeze' }),
+  bingpo: move('bingpo', '北冥冰魄爆发', 16, 22, { mustHit: true, uses: 1 }),
+};
+
+export const MOVE_IDS = Object.keys(MOVES) as MoveId[];
+
 /**
  * 引擎版本（X5 名帖的 v）：结算规则、图鉴内容变了就 +1。切磋双方在名帖里各带一份，
  * 两边不同就切不了（谁也不知道对方那版引擎会打出什么）。
@@ -168,15 +237,29 @@ const ACTIVE_SKILLS: readonly SkillId[] = [
 
 export interface Fighter {
   name: string; // 显示用
-  hp: number; // 气血上限（开打时满血）
+  hp: number; // 气血上限
   power: number; // 灵力
   agility: number; // 身法
   speed: number; // 遁速
   weapons: WeaponId[];
   skills: SkillId[];
+  /** 开打时的气血（秘境里气血跨场保留）：不给 = 满血，夹在 1 到 hp 之间（Y0） */
+  hpNow?: number;
+  /** 招式表里的编号（对手、一转蛊）；不带时决策随机数的抽取次数和以前一样（Y0） */
+  moves?: MoveId[];
+  /** 驭犬蛊的狗数（gu-dogs 的段数）；一场里由调用方按驭犬蛊数摆好（Y0） */
+  pack?: number;
+  /** 秘境加持对战机的修正（Y0）：闪避率加成（闪避上限照旧）、气血低于三成时的伤害倍率 */
+  mods?: { dodge?: number; desperate?: number };
+  /** 替挡：挨打的前 times 下整下被别人挡掉（定仙游结局白凝冰挡在前面，Y0） */
+  guard?: { by: string; times: number };
 }
 
-export type Action = { kind: 'weapon'; weapon: WeaponId } | { kind: 'unarmed' } | { kind: 'skill'; skill: SkillId };
+export type Action =
+  | { kind: 'weapon'; weapon: WeaponId }
+  | { kind: 'unarmed' }
+  | { kind: 'skill'; skill: SkillId }
+  | { kind: 'move'; move: MoveId };
 
 /** 出手时引擎交给出招者的视野；以后手动对战时界面也从这里取 */
 export interface BattleView {
@@ -188,8 +271,12 @@ export interface BattleView {
     weapons: WeaponId[];
     skills: SkillId[];
     /** 这场已经用过的招式（主动的一次性、被动见次数说明） */ used: SkillId[];
+    /** 身上的招式（一转蛊 / 对手招式）；不带招式的一方给空数组（Y0） */
+    moves?: MoveId[];
+    /** 这场用掉的带次数限制的招，每次使用追加一个编号（Y0） */
+    moveUses?: MoveId[];
   };
-  foe: { weapons: WeaponId[]; skills: SkillId[] };
+  foe: { weapons: WeaponId[]; skills: SkillId[]; moves?: MoveId[] };
 }
 
 export interface Controller {
@@ -206,6 +293,8 @@ export type BattleEvent =
       actor: 0 | 1;
       kind: 'hit';
       weapon?: WeaponId;
+      /** 用招式表里的招打出的这一下（Y0） */
+      move?: MoveId;
       damage: number;
       crit: boolean;
       blocked: boolean;
@@ -219,6 +308,8 @@ export type BattleEvent =
       actor: 0 | 1;
       kind: 'combo';
       weapon?: WeaponId;
+      /** 用招式表里的招打出的这一下（Y0） */
+      move?: MoveId;
       damage: number;
       crit: boolean;
       blocked: boolean;
@@ -237,6 +328,8 @@ export type BattleEvent =
   | { actor: 0 | 1; kind: 'decoy'; hp: [number, number] }
   /** 万我的魂影替挨了这一下（X9；actor 是挨打的那一方，同 decoy） */
   | { actor: 0 | 1; kind: 'mirror'; hp: [number, number] }
+  /** 别人替挨了这一下（Y0 定仙游结局；actor 是挨打的那一方，by 是替挡者的名字） */
+  | { actor: 0 | 1; kind: 'guard'; by: string; hp: [number, number] }
   | { actor: 0 | 1; kind: 'play-dead'; hp: [number, number] }
   | {
       actor: 0 | 1;
@@ -290,9 +383,20 @@ function pick<T>(rng: () => number, items: readonly T[]): T {
   return items[Math.floor(rng() * items.length)];
 }
 
-/** 闪避率 = min(35%, 身法 × 1.5% + 化鸽遁 8%) */
+/** 闪避率 = min(35%, 身法 × 1.5% + 化鸽遁 8% + 加持的闪避加成（Y0，上限照旧）) */
 function dodgeRate(f: Fighter): number {
-  return Math.min(0.35, f.agility * 0.015 + (f.skills.includes('dove') ? 0.08 : 0));
+  return Math.min(0.35, f.agility * 0.015 + (f.skills.includes('dove') ? 0.08 : 0) + (f.mods?.dodge ?? 0));
+}
+
+/** 背水一战（Y0）：气血低于三成的伤害倍率，不带 mods 的一方恒为 1（不改变原来的结算） */
+function desperateFactor(f: Fighter, hp: number): number {
+  const mult = f.mods?.desperate;
+  return mult !== undefined && hp * 10 < f.hp * 3 ? mult : 1;
+}
+
+/** 开打时的气血（Y0）：`hpNow` 夹在 1 到上限之间；不给就是满血 */
+export function startingHp(f: Fighter): number {
+  return f.hpNow === undefined ? f.hp : Math.max(1, Math.min(f.hp, Math.floor(f.hpNow)));
 }
 
 interface Side {
@@ -313,12 +417,16 @@ interface Side {
   bubbles: number;
   /** 灵兽还跟着出几次手 */
   beastLeft: number;
+  /** 这场用掉的次数（Y0：`uses` 限制的招，按编号计） */
+  moveUses: Map<MoveId, number>;
+  /** 替挡还剩几下（Y0） */
+  guardLeft: number;
 }
 
 function makeSide(f: Fighter, initialDelay: number): Side {
   return {
     f,
-    hp: f.hp,
+    hp: startingHp(f),
     next: (100 / (f.speed + 10)) * initialDelay,
     skip: false,
     skipCause: 'stun',
@@ -327,6 +435,8 @@ function makeSide(f: Fighter, initialDelay: number): Side {
     used: new Set(),
     bubbles: f.skills.includes('bubble') ? 2 : 0,
     beastLeft: f.skills.includes('spirit-beast') ? 3 : 0,
+    moveUses: new Map(),
+    guardLeft: f.guard ? f.guard.times : 0,
   };
 }
 
@@ -363,7 +473,70 @@ function applyDamage(
   return { damage, blocked, playDead: false };
 }
 
-/** 主动招式与部分被动的次数说明见 SKILLS 表；autoController 的策略写在任务书 §X0 */
+/**
+ * 一次出手（法宝或招式）的结算口径。把 `WeaponDef` 和 `MoveDef` 收成同一张形状，
+ * attack() 里只认这些字段（法宝另有 slow / returnSure / twinChance，招式没有 = 不生效）。
+ */
+interface AttackSpec {
+  id: WeaponId | MoveId;
+  /** 招式表里的招（事件里记 `move` 而不是 `weapon`） */
+  isMove: boolean;
+  min: number;
+  max: number;
+  /** 段数：招式带 packHits 时是驭犬蛊的狗数（Fighter.pack，至少 1） */
+  hits: number;
+  comboBonus: number;
+  skipChance: number;
+  skipCause: SkipCause;
+  mustHit: boolean;
+  ranged: boolean;
+  heavy: boolean;
+  slow: boolean;
+  returnSure: boolean;
+  twinChance: number;
+}
+
+function specOf(action: Extract<Action, { kind: 'weapon' | 'move' }>, pack: number | undefined): AttackSpec {
+  if (action.kind === 'weapon') {
+    const w = WEAPONS[action.weapon];
+    return {
+      id: w.id,
+      isMove: false,
+      min: w.min,
+      max: w.max,
+      hits: w.hits,
+      comboBonus: w.comboBonus,
+      skipChance: w.skipChance,
+      skipCause: w.skipCause,
+      mustHit: w.mustHit,
+      ranged: w.ranged,
+      heavy: w.heavy,
+      slow: w.slow,
+      returnSure: w.returnSure,
+      twinChance: w.twinChance,
+    };
+  }
+  const m = MOVES[action.move];
+  return {
+    id: m.id,
+    isMove: true,
+    min: m.min,
+    max: m.max,
+    hits: m.packHits ? Math.max(1, Math.floor(pack ?? 1)) : m.hits,
+    comboBonus: m.comboBonus,
+    skipChance: m.skipChance,
+    skipCause: m.skipCause,
+    mustHit: m.mustHit,
+    ranged: m.ranged,
+    heavy: m.heavy,
+    slow: false,
+    returnSure: false,
+    twinChance: 0,
+  };
+}
+
+/** 主动招式与部分被动的次数说明见 SKILLS 表；autoController 的策略写在任务书 §X0、招式部分见 §3 Y0 */
+
 export function autoController(rng: () => number): Controller {
   return {
     decide(view: BattleView): Action {
@@ -382,6 +555,31 @@ export function autoController(rng: () => number): Controller {
       if (unused.includes('dream-chant') && foeHp * 10 > foeMax * 7) return { kind: 'skill', skill: 'dream-chant' };
       const actives = unused.filter((s) => s !== 'bloom');
       if (actives.length > 0 && rng() < 0.25) return { kind: 'skill', skill: pick(rng, actives) };
+      // 招式（Y0）：只在身上有招时才多抽随机数——不带 moves 的 Fighter，决策抽取次数和以前一样
+      const moves = view.you.moves ?? [];
+      if (moves.length > 0) {
+        const used = view.you.moveUses ?? [];
+        // 有次数限制的招：每次 35% 用，用完为止
+        const limited = moves.filter((id) => {
+          const cap = MOVES[id].uses;
+          return cap !== undefined && used.filter((x) => x === id).length < cap;
+        });
+        if (limited.length > 0 && rng() < 0.35) return { kind: 'move', move: pick(rng, limited) };
+        const rest = moves.filter((id) => MOVES[id].uses === undefined);
+        // 只有招、没有法宝（对手、压境入内的宠物）：驭犬蛊每次都用，别的招 80% 用、20% 空手
+        if (view.you.weapons.length === 0) {
+          if (rest.includes('gu-dogs')) return { kind: 'move', move: 'gu-dogs' };
+          if (rest.length > 0 && rng() < 0.8) return { kind: 'move', move: pick(rng, rest) };
+          return { kind: 'unarmed' };
+        }
+        // 其余的招和法宝放在一起随机挑（20% 空手，和只有法宝时同口径）
+        const pool: Action[] = [
+          ...view.you.weapons.map((w): Action => ({ kind: 'weapon', weapon: w })),
+          ...rest.map((m): Action => ({ kind: 'move', move: m })),
+        ];
+        if (rng() >= 0.2) return pick(rng, pool);
+        return { kind: 'unarmed' };
+      }
       if (view.you.weapons.length > 0 && rng() >= 0.2) return { kind: 'weapon', weapon: pick(rng, view.you.weapons) };
       return { kind: 'unarmed' };
     },
@@ -456,8 +654,18 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
       self,
       hp: [sides[0].hp, sides[1].hp],
       maxHp: [sides[0].f.hp, sides[1].f.hp],
-      you: { weapons: me.f.weapons, skills: me.f.skills, used: [...me.used] },
-      foe: { weapons: foe.f.weapons, skills: foe.f.skills },
+      you: {
+        weapons: me.f.weapons,
+        skills: me.f.skills,
+        used: [...me.used],
+        ...(me.f.moves ? { moves: me.f.moves } : {}),
+        ...(me.moveUses.size > 0
+          ? {
+              moveUses: [...me.moveUses.entries()].flatMap(([id, n]) => Array<MoveId>(n).fill(id)),
+            }
+          : {}),
+      },
+      foe: { weapons: foe.f.weapons, skills: foe.f.skills, ...(foe.f.moves ? { moves: foe.f.moves } : {}) },
     };
   };
 
@@ -465,16 +673,20 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
   const asleep = (side: Side): boolean => side.skip && (side.skipCause === 'sleep' || side.skipCause === 'dream');
 
   /**
-   * 一次攻击（法宝或空手）：命中、会心、连击、定身、反击、灵兽都从这进。
+   * 一次攻击（法宝、招式或空手）：命中、会心、连击、定身、反击、灵兽、替挡都从这进。
    * @param blinded 这次出手被墨汁糊着眼（X8）：每一下有一半打空
    */
-  const attack = (self: 0 | 1, action: Extract<Action, { kind: 'weapon' | 'unarmed' }>, blinded: boolean): void => {
+  const attack = (
+    self: 0 | 1,
+    action: Extract<Action, { kind: 'weapon' | 'move' | 'unarmed' }>,
+    blinded: boolean,
+  ): void => {
     const me = sides[self];
     const foe = sides[self ^ 1];
-    const def = action.kind === 'weapon' ? WEAPONS[action.weapon] : null;
+    const spec = action.kind === 'unarmed' ? null : specOf(action, me.f.pack);
     const comboCap = MAX_COMBOS;
     let combos = 0;
-    const hits = def ? def.hits : 1;
+    const hits = spec ? spec.hits : 1;
     for (let hit = 0; hit < hits + combos && foe.hp > 0; hit++) {
       // 每次挥击固定抽满六个，抽了不用的也抽：换出招者不挪动结算序列
       const dodgeRoll = rng();
@@ -489,7 +701,7 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
         continue;
       }
       // 必中：烟花；银托盘最后一段从背后回旋磕过来；对方睡着 / 入梦
-      const sure = def?.mustHit || (def?.returnSure && hit === hits - 1) || asleep(foe);
+      const sure = spec?.mustHit || (spec?.returnSure && hit === hits - 1) || asleep(foe);
       if (!sure && dodgeRoll < dodgeRate(foe.f)) {
         events.push({ actor: (self ^ 1) as 0 | 1, kind: 'dodge', hp: hpPair(sides[0], sides[1]) });
         continue;
@@ -505,27 +717,41 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
         events.push({ actor: (self ^ 1) as 0 | 1, kind: 'decoy', hp: hpPair(sides[0], sides[1]) });
         continue;
       }
-      let base = def ? randBetween(dmgRoll, def.min, def.max) : randBetween(dmgRoll, 3, 6);
+      // 替挡（Y0）：挨打的前 times 下整下替掉——不掉血、不消耗泡泡、不判反击（不新增抽签）
+      if (foe.guardLeft > 0) {
+        foe.guardLeft -= 1;
+        events.push({
+          actor: (self ^ 1) as 0 | 1,
+          kind: 'guard',
+          by: foe.f.guard?.by ?? '',
+          hp: hpPair(sides[0], sides[1]),
+        });
+        continue;
+      }
+      let base = spec ? randBetween(dmgRoll, spec.min, spec.max) : randBetween(dmgRoll, 3, 6);
       // 弹弓一发打两颗：用 skipRoll（弹弓没有定身），第二颗的点数由 dmgRoll 派生（不新增抽签）
-      const twin = !!def && def.twinChance > 0 && skipRoll < def.twinChance;
-      if (twin && def) base += randBetween((dmgRoll * 7.31) % 1, def.min, def.max);
+      const twin = !!spec && spec.twinChance > 0 && skipRoll < spec.twinChance;
+      if (twin && spec) base += randBetween((dmgRoll * 7.31) % 1, spec.min, spec.max);
       // 灵力和破势（伤害随对手气血上限加成，§平衡：不然境界高一线、血厚一线就接近稳赢）
       // 都是整段出手合计一份，多段法宝每段按段数分摊（否则一次三张/三件会吃成三倍）
-      const perPiece = Math.floor((me.f.power * POWER_FACTOR + foe.f.hp * HP_BONUS) / (def?.hits ?? 1));
+      const perPiece = Math.floor((me.f.power * POWER_FACTOR + foe.f.hp * HP_BONUS) / (spec?.hits ?? 1));
       let damage = base + perPiece;
       // 会心：人人有个基础会心率，会心一击把它提到 10%（§平衡：加方差，免得境界高一线就稳赢）
       const critChance = me.f.skills.includes('critical') ? CRIT_SKILL_CHANCE : BASE_CRIT;
       const crit = critRoll < critChance;
       if (crit) damage *= 2;
+      // 背水一战（Y0）：自己气血低于三成时这一段伤害翻倍率（不带 mods 时 ×1，结算不变）
+      const desperate = desperateFactor(me.f, me.hp);
+      if (desperate !== 1) damage = Math.floor(damage * desperate);
       const applied = applyDamage(foe, damage);
       const kind = hit < hits ? 'hit' : 'combo';
       // 鸡毛掸子：打中（含被泡泡挡下）就笑岔气，对方下次出手往后推半个间隔
-      const slowed = !!def?.slow && foe.hp > 0;
+      const slowed = !!spec?.slow && foe.hp > 0;
       if (slowed) foe.next += intervalOf(foe) * SLOW_FACTOR;
       events.push({
         actor: self,
         kind,
-        ...(def ? { weapon: def.id } : {}),
+        ...(spec ? (spec.isMove ? { move: spec.id as MoveId } : { weapon: spec.id as WeaponId }) : {}),
         damage: applied.damage,
         crit,
         blocked: applied.blocked,
@@ -536,12 +762,12 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
       if (applied.playDead)
         events.push({ actor: (self ^ 1) as 0 | 1, kind: 'play-dead', hp: hpPair(sides[0], sides[1]) });
       // 定身（陀螺是晕，雪球是冻住）
-      if (def && def.skipChance > 0 && skipRoll < def.skipChance) {
+      if (spec && spec.skipChance > 0 && skipRoll < spec.skipChance) {
         foe.skip = true;
-        foe.skipCause = def.skipCause;
+        foe.skipCause = spec.skipCause;
       }
       // 反击：远程、灵兽和反击本身不会被反击
-      if (!def?.ranged && foe.hp > 0 && foe.f.skills.includes('sixth-sense') && counterRoll < SIXTH_SENSE_CHANCE) {
+      if (!spec?.ranged && foe.hp > 0 && foe.f.skills.includes('sixth-sense') && counterRoll < SIXTH_SENSE_CHANCE) {
         const counterDmg = randBetween(rng(), 3, 6) + Math.floor(foe.f.power * POWER_FACTOR);
         const back = applyDamage(me, counterDmg);
         events.push({
@@ -560,7 +786,7 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
         hit + 1 >= hits &&
         comboRoll <
           Math.min(0.3, me.f.agility * 0.01) +
-            (def?.comboBonus ?? 0) +
+            (spec?.comboBonus ?? 0) +
             (me.f.skills.includes('shadow-fists') ? 0.15 : 0)
       ) {
         combos += 1;
@@ -591,6 +817,12 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
   /** 出招者交代的动作不合法（没有的法宝 / 招式、用过的主动招式）时按空手处理 */
   const legalize = (me: Side, action: Action): Action => {
     if (action.kind === 'weapon' && me.f.weapons.includes(action.weapon)) return action;
+    if (action.kind === 'move' && me.f.moves?.includes(action.move)) {
+      const cap = MOVES[action.move].uses;
+      const used = me.moveUses.get(action.move) ?? 0;
+      if (cap === undefined || used < cap) return action;
+      return { kind: 'unarmed' }; // 次数用完：按空手处理
+    }
     if (
       action.kind === 'skill' &&
       me.f.skills.includes(action.skill) &&
@@ -611,7 +843,11 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
     // 墨汁：糊着眼的这次出手用掉一次（放招式也算一次，只是招式不受影响）
     const blinded = me.blind > 0;
     if (blinded) me.blind -= 1;
-    if (action.kind === 'skill') {
+    // 招式（Y0）：记账用了几次，然后和法宝走同一条结算路
+    if (action.kind === 'move') {
+      me.moveUses.set(action.move, (me.moveUses.get(action.move) ?? 0) + 1);
+      attack(self, action, blinded);
+    } else if (action.kind === 'skill') {
       me.used.add(action.skill);
       const foe = sides[self ^ 1];
       if (action.skill === 'bloom') {
@@ -740,8 +976,9 @@ export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Contr
       me.skipCause = 'stun';
     } else {
       const done = takeAction(self);
-      // 鲸尾：用它出手后，下次出手间隔 ×1.2
-      const heavy = done.kind === 'weapon' && WEAPONS[done.weapon].heavy;
+      // 鲸尾 / 扑击：用它出手后，下次出手间隔 ×1.2
+      const heavy =
+        (done.kind === 'weapon' && WEAPONS[done.weapon].heavy) || (done.kind === 'move' && MOVES[done.move].heavy);
       me.next = now + intervalOf(me) * (heavy ? 1.2 : 1);
       continue;
     }

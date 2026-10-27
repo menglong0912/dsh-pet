@@ -488,7 +488,10 @@ function isDamageOnFoe(event: BattleEvent): boolean {
   return event.kind === 'skill' && event.damage !== undefined;
 }
 
-/** 出手在 `ATTACK_SHOW` 里的键：`Action` 的编号（空手 = unarmed） */
+/**
+ * 出手在 `ATTACK_SHOW` 里的键：`Action` 的编号（空手 = unarmed）。
+ * 招式（Y0 的 `move`）暂时没有自己的演出表，按空手演（adventure-roadmap §3 Y0 第 7 条）。
+ */
 function showKeyOf(action: Action): string {
   if (action.kind === 'weapon') return action.weapon;
   if (action.kind === 'skill') return action.skill;
@@ -1038,7 +1041,7 @@ export function timeline(
       continue;
     }
 
-    // skip（被定住 / 晕了）、回血：只有台词、没有飞行物
+    // skip（被定住 / 晕了）、回血、替挡（Y0 的 guard）：只有台词、没有飞行物；气血条照 `event.hp` 刷新
     if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
   }
   return steps.sort((a, b) => a.at - b.at);

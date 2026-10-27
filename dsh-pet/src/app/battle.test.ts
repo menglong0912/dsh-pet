@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   fight,
   tribulate,
@@ -16,6 +17,7 @@ import {
   type BattleView,
   type BattleEvent,
   type Action,
+  startingHp,
 } from './battle.ts';
 import { fighterAt, seededRng } from './battle-testkit.ts';
 
@@ -407,6 +409,64 @@ test('平衡：渡劫不吃丹约 65%、吃丹约 80%——七个渡劫分界全
   }
 });
 
+// ---------------------------------------------------------------------------
+// Y0 兼容快照：改引擎（hpNow / moves / mods / guard）之前先录下来的 200 场事件序列。
+// 不带新字段的 Fighter 必须逐条打出同一串事件，所以 `BATTLE_VERSION` 不升、`visit.ts` 不动。
+// ---------------------------------------------------------------------------
+
+/**
+ * 快照怎么生成的（`node --experimental-strip-types --import ./scripts/test-register.mjs` 跑同一份生成器）：
+ * 200 场、一场一种子（`compat-<i>`）；i % 4 轮过 stage 4 / 10 / 16 / 25（炼气五层、筑基中期、元婴中期、合体中期）；
+ * 两边的四项属性由 `fighterAt(stage, seededRng(i * 3 + 1))` / `seededRng(i * 5 + 2)` 随机成长，
+ * **法宝和招式另行随机配招**（每个图鉴项独立 50% 入选，法宝最多 4 件、招式最多 6 门，随机数 `seededRng(i * 977 + 13)`），
+ * 全默认 `autoController`。200 场合计 4620 个事件。
+ */
+const COMPAT_SNAPSHOT = 'c3288ca172dc78df12cda4c13f63d74cf4e8a5524678052221be39fd434d2224';
+
+function compatEvents(): BattleEvent[][] {
+  const out: BattleEvent[][] = [];
+  for (let i = 0; i < 200; i++) {
+    const stage = [4, 10, 16, 25][i % 4];
+    const rng = seededRng(i * 977 + 13);
+    const take = <T>(pool: readonly T[], max: number): T[] =>
+      pool
+        .filter(() => rng() < 0.5)
+        .slice(0, max)
+        .slice();
+    const a = fighterAt(stage, seededRng(i * 3 + 1));
+    const b = fighterAt(stage, seededRng(i * 5 + 2));
+    a.weapons = take(WEAPON_IDS, 4);
+    a.skills = take(SKILL_IDS, 6);
+    b.weapons = take(WEAPON_IDS, 4);
+    b.skills = take(SKILL_IDS, 6);
+    out.push(fight(named(a, '甲'), named(b, '乙'), `compat-${i}`));
+  }
+  return out;
+}
+
+/** 键名排序的规范 JSON：字段增减和数值变化都会改摘要，纯键序调整不会 */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+test('Y0 兼容快照：不带新字段的 Fighter 逐条打出同一串事件（BATTLE_VERSION 不升的依据）', () => {
+  const digest = createHash('sha256')
+    .update(
+      compatEvents()
+        .map((events) => canonical(events))
+        .join('\n'),
+    )
+    .digest('hex');
+  assert.equal(digest, COMPAT_SNAPSHOT);
+});
+
 /** 永远出同一招（招式用过以后引擎按空手处理） */
 const always = (action: Action): Controller => ({ decide: () => action });
 
@@ -728,4 +788,92 @@ test('X9 五指拳心剑：必中、穿护体（不减伤也不消耗泡泡）�
   const e = events.find((x) => x.kind === 'skill' && x.skill === 'finger-sword');
   assert.ok(e, '这一招该用出来');
   assert.equal(e.kind === 'skill' && e.pierce, undefined, '没护体就不标 pierce');
+});
+
+test('Y0 引擎：hpNow 从残血开打（夹在 1..上限），不带时仍是满血', () => {
+  const full = fighterAt(9, seededRng(3));
+  assert.equal(startingHp(full), full.hp);
+  assert.equal(startingHp({ ...full, hpNow: 0 }), 1);
+  assert.equal(startingHp({ ...full, hpNow: full.hp + 999 }), full.hp);
+  const hurt = { ...full, hpNow: 12 };
+  const events = fight(named(hurt, '甲'), named(fighterAt(9, seededRng(9)), '乙'), 'hpnow');
+  const first = events.find((e) => e.kind === 'decide');
+  assert.equal(first?.kind === 'decide' ? first.hp[0] : -1, 12, '开打就是残血');
+  const end = events[events.length - 1];
+  assert.equal(end?.kind === 'end' && end.hp[0] <= 12, true);
+});
+
+test('Y0 引擎：招式出手、有限次数用完就不能再出', () => {
+  const a = { ...fighterAt(9, seededRng(5)), weapons: [], skills: [], moves: ['gu-dogs' as const] };
+  const b = { ...fighterAt(9, seededRng(6)), weapons: [], skills: [], agility: 0 };
+  const useMove: Controller = { decide: () => ({ kind: 'move', move: 'gu-dogs' }) };
+  const events = fight(named(a, '甲'), named(b, '乙'), 'move-basic', [useMove, unarmedOnly()]);
+  const first = events.find((e) => e.kind === 'decide' && e.actor === 0);
+  assert.deepEqual(first?.kind === 'decide' && first.action, { kind: 'move', move: 'gu-dogs' });
+  assert.ok(
+    events.some((e) => (e.kind === 'hit' || e.kind === 'combo') && e.move === 'gu-dogs'),
+    '打出了招式',
+  );
+  // 限次招式：一场 1 次的北冥冰魄爆发，第二次出手会被换掉
+  const c = { ...fighterAt(9, seededRng(7)), weapons: [], skills: [], moves: ['bingpo' as const] };
+  const useOnce: Controller = { decide: () => ({ kind: 'move', move: 'bingpo' }) };
+  const ev = fight(named(c, '甲'), named({ ...fighterAt(9, seededRng(8)), hp: 999 }, '乙'), 'move-once', [
+    useOnce,
+    unarmedOnly(),
+  ]);
+  const moves = ev.filter((e) => e.kind === 'decide' && e.action.kind === 'move');
+  assert.equal(moves.length, 1, '一场只能出一次');
+});
+
+test('Y0 引擎：mods.dodge 加闪避、mods.desperate 在残血时加伤', () => {
+  const count = (mods: { dodge?: number } | undefined): number => {
+    let dodges = 0;
+    for (let i = 0; i < 40; i++) {
+      const a = { ...fighterAt(9, seededRng(i)), weapons: [], skills: [], agility: 0 };
+      const b = { ...fighterAt(9, seededRng(i + 100)), weapons: [], skills: [], agility: 0, ...(mods ? { mods } : {}) };
+      const events = fight(named(a, '甲'), named(b, '乙'), `dodge-${i}`, [unarmedOnly(), unarmedOnly()]);
+      dodges += events.filter((e) => e.kind === 'dodge' && e.actor === 1).length;
+    }
+    return dodges;
+  };
+  const plain = count(undefined);
+  const dodgy = count({ dodge: 0.3 });
+  assert.ok(dodgy > plain, `加了闪避，挨打时躲开的次数该更多：${dodgy} vs ${plain}`);
+
+  const hitHard = { ...fighterAt(9, seededRng(31)), weapons: [], skills: [], agility: 0, hp: 300, speed: 99 };
+  const dummy = { ...fighterAt(9, seededRng(32)), weapons: [], skills: [], agility: 0, hp: 300, speed: 1 };
+  const firstHit = (events: BattleEvent[]): number => {
+    const hit = events.find((e) => (e.kind === 'hit' || e.kind === 'combo') && e.actor === 0);
+    return hit?.kind === 'hit' || hit?.kind === 'combo' ? hit.damage : 0;
+  };
+  const normal = fight(named(hitHard, '甲'), named(dummy, '乙'), 'desperate-off', [unarmedOnly(), unarmedOnly()]);
+  const low = fight(
+    named({ ...hitHard, hpNow: 20, mods: { desperate: 2 } }, '甲'),
+    named(dummy, '乙'),
+    'desperate-on',
+    [unarmedOnly(), unarmedOnly()],
+  );
+  assert.ok(firstHit(low) > firstHit(normal), `背水一战该更疼：${firstHit(low)} vs ${firstHit(normal)}`);
+});
+
+test('Y0 引擎：guard 替挡整下、按次数用完，事件带替挡的人', () => {
+  const attacker = { ...fighterAt(9, seededRng(41)), weapons: [], skills: [], agility: 0 };
+  const guarded = {
+    ...fighterAt(9, seededRng(42)),
+    weapons: [],
+    skills: [],
+    agility: 0,
+    hp: 9999,
+    guard: { by: '白凝冰', times: 2 },
+  };
+  const events = fight(named(attacker, '甲'), named(guarded, '乙'), 'guard-basic', [unarmedOnly(), unarmedOnly()]);
+  const blocks = events.filter((e) => e.kind === 'guard');
+  assert.equal(blocks.length, 2, '挡两下');
+  assert.equal(blocks[0].kind === 'guard' && blocks[0].by, '白凝冰');
+  for (const block of blocks) {
+    assert.equal(block.kind === 'guard' && block.hp[1], 9999, '替挡整下不掉血');
+  }
+  // 挡完以后照常掉血
+  const after = events.slice(events.findIndex((e) => e.kind === 'guard' && e === blocks[1]) + 1);
+  assert.ok(after.some((e) => (e.kind === 'hit' || e.kind === 'combo') && e.actor === 0 && e.damage > 0));
 });

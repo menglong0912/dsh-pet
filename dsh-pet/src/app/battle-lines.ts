@@ -51,6 +51,26 @@ const SKILL_LINES: Record<string, string[]> = {
   'finger-sword': ['{a}五指收拢成拳、高举过顶，拳心射出一道剑光，-{d}', '{a}拳心一亮，剑光已到{b}身上，-{d}'],
 };
 
+/**
+ * 招式表（历练路线 Y0）：一转蛊和对手的招式，一件一条，`{g}` 是替挡者的名字。
+ * 只在这台机器上显示，不上网（这些招不进名帖），所以照旧全用模板。
+ */
+const MOVE_LINES: Record<string, string[]> = {
+  'gu-dogs': ['{a}放出一群狗扑上去，-{d}', '{a}的狗群撕成一团，-{d}', '{a}驱狗掩上，-{d}'],
+  'gu-crane': ['{a}放出纸鹤啄向{b}，-{d}', '{a}的纸鹤盘旋而下，-{d}'],
+  'gu-egg': ['{a}掷出爆蛋，轰然炸开，-{d}', '{a}的爆蛋在{b}脚边炸了，-{d}'],
+  'dog-bite': ['{a}扑上来就是一口，-{d}', '{a}的犬牙咬住{b}，-{d}'],
+  'egg-burst': ['{a}滚过来撞在{b}身上炸开，-{d}', '{a}闷头撞上来炸开，-{d}'],
+  'mastiff-maul': ['{a}猛扑下来压住{b}，-{d}', '{a}一爪拍下，-{d}'],
+  'han-dogs': ['{a}驱犬围攻，-{d}', '{a}一声令下，群狗扑向{b}，-{d}'],
+  'moon-blade': ['{a}挥出一道月刃，-{d}', '{a}的月刃掠向{b}，-{d}'],
+  'gold-needle': ['{a}弹出三根金针，-{d}', '{a}的金针钉向{b}，-{d}'],
+  'gold-blade': ['{a}额上金光一闪，飞刀已到，-{d}', '{a}的金色飞刀破空而来，-{d}'],
+  'ice-blade': ['{a}挥出三截冰刃，-{d}', '{a}的冰刃擦着{b}飞过，-{d}'],
+  frost: ['{a}吐出一口寒气，-{d}', '{a}的寒气罩住{b}，-{d}'],
+  bingpo: ['{a}化作北冥冰魄，天地一白，-{d}', '{a}的冰魄爆发轰在{b}身上，-{d}'],
+};
+
 /** 鸡毛掸子让对方迟缓、弹弓打两颗、五指拳心剑穿护体时的专属句（代替那件法宝 / 那招的普通句） */
 const FLAG_LINES: Record<string, string[]> = {
   slowed: ['{a}的掸子挠得{b}笑岔气，-{d}', '{b}被{a}掸得直乐，慢了一拍，-{d}'],
@@ -60,11 +80,14 @@ const FLAG_LINES: Record<string, string[]> = {
 
 const END_LINES = ['{a}赢了！', '{a}站到了最后！', '{b}躺平了，{a}获胜'];
 
+/** 替挡（Y0，定仙游结局）：`{g}` 是替挡者的名字，`{a}` 是被护住的那一方 */
+const GUARD_LINES = ['{g}挡在{a}前面，硬接了这一下', '{g}一把拦在{a}身前，这一下没打着'];
+
 /** 名字本身以「的」结尾时，`{a}的` / `{b}的` 只留一个「的」；只认占位符紧跟一个「的」的写法 */
-function fill(template: string, a: string, b = '', d = 0, h = 0): string {
-  return template.replace(/\{([abdh])\}(的?)/g, (_match, key: string, de: string) => {
+function fill(template: string, a: string, b = '', d = 0, h = 0, g = ''): string {
+  return template.replace(/\{([abdhg])\}(的?)/g, (_match, key: string, de: string) => {
     if (key === 'd' || key === 'h') return String(key === 'd' ? d : h) + de;
-    const name = key === 'a' ? a : b;
+    const name = key === 'a' ? a : key === 'g' ? g : b;
     return de && name.endsWith('的') ? name : name + de;
   });
 }
@@ -98,7 +121,9 @@ export function lineOf(
         ? FLAG_LINES.slowed
         : event.twin
           ? FLAG_LINES.twin
-          : HIT_LINES[event.weapon ?? 'unarmed'];
+          : event.move
+            ? MOVE_LINES[event.move]
+            : HIT_LINES[event.weapon ?? 'unarmed'];
       return decorate(fill(pick(lines), a, b, event.damage));
     }
     case 'combo':
@@ -129,6 +154,9 @@ export function lineOf(
       return fill(pick(KIND_LINES.miss), a);
     case 'decoy':
       return fill(pick(KIND_LINES.decoy), a);
+    case 'guard':
+      return fill(pick(GUARD_LINES), a, b, 0, 0, event.by);
+
     case 'mirror':
       return fill(pick(KIND_LINES.mirror), a);
     case 'play-dead':
