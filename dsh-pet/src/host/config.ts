@@ -41,11 +41,6 @@ import { dirname, join } from 'node:path';
 const CORNERS = ['top-left', 'top-right', 'bottom-left', 'bottom-right'] as const;
 const CORNER_SET: ReadonlySet<string> = new Set(CORNERS);
 
-/** display 白名单（导出：宿主路由 POST /pet-display 写单只宠物的显示位置时复用同一份枚举，
- *  读写两侧必须同一份规则，不在路由里另写一个 Set） */
-const PET_DISPLAYS = ['web', 'desktop', 'both', 'none'] as const;
-export const PET_DISPLAY_SET: ReadonlySet<string> = new Set(PET_DISPLAYS);
-
 /** font.family 白名单（预设 id）——**必须与 src/shared/fonts.ts 的 FONT_PRESETS 保持一致**：
  *  host 不能 import src/shared（见文件头注释的 DSH 单文件加载约束），这里是那份清单的自包含副本，
  *  所以加/删字体预设时两边都要改。 */
@@ -91,7 +86,7 @@ export const ID_FORBIDDEN = /[\\/:\x00-\x1f]/;
  *
  * 例外：**人设有实例级覆盖**。`pets[].whisperPrompt`（可选）写了就取代所属条目顶层那一份，
  * 没写则回落条目——回落本身由消费端做（./persona 的 petPersona），合并不填生效值（见 petPersonaField 注释）。
- * 其余实例级字段仍是固定白名单（id/name/size/4 个开关/display/position + whisperPrompt）。
+ * 其余实例级字段仍是固定白名单（id/name/size/4 个开关/position + whisperPrompt）。
  */
 const GLOBAL_DEFAULT_KEYS = [
   'physics',
@@ -251,25 +246,7 @@ function scanPetFiles(petDir: string): PetFileEntry[] {
 }
 
 /**
- * 按条目 key（= 文件名前缀 = 素材根）定位**文件宠物**的实际文件与磁盘原对象。
- *
- * 用途：写路径（POST /pet-display）改某只文件宠物的 display 时，既要写回**它自己的**配置文件，
- * 也要拿该文件的 existing 去做「透传保留」——否则文件里用户手改的 whisperPrompt / animations /
- * memes 等非白名单字段会被 saveUserConfig 的白名单重建整份抹掉（与 main 层 readUserConfig
- * 同一套语义，见其注释里的老 bug 说明）。
- *
- * 文件名可能是 `<前缀>-config.json` 或 `.jsonc`（与 scanPetFiles 同一套规则，不在这里重复写死
- * 扩展名——写错扩展名就会新建一个空配置，用户那只宠物反而"没被改到"）。前缀不存在 → undefined。
- */
-export function readPetConfigEntry(
-  paths: ConfigPaths,
-  entry: string,
-): { path: string; raw: Record<string, unknown> | undefined } | undefined {
-  const hit = scanPetFiles(paths.petDir).find((f) => f.prefix === entry);
-  return hit ? { path: hit.path, raw: readJsonc(hit.path) } : undefined;
-}
-
-/** animations 段完整性校验（与旧 assertAnimationsHost 同一套规则；不 throw，非法返回 false） */
+ * animations 段完整性校验（与旧 assertAnimationsHost 同一套规则；不 throw，非法返回 false） */
 function animationsValid(a: unknown): boolean {
   if (!a || typeof a !== 'object') return false;
   const anims = a as Record<string, unknown>;
@@ -612,7 +589,6 @@ function mergePet(
     whisperEnabled: petBool(p.whisperEnabled, base.whisperEnabled, label, 'whisperEnabled', id),
     workStatusEnabled: petBool(p.workStatusEnabled, base.workStatusEnabled, label, 'workStatusEnabled', id),
     fixedEnabled: petBool(p.fixedEnabled, base.fixedEnabled, label, 'fixedEnabled', id),
-    display: petEnum(p.display, PET_DISPLAY_SET, base.display, label, 'display', id),
     position: {
       corner: petEnum(ownPos.corner, CORNER_SET, basePos.corner, label, 'position.corner', id),
       marginX: petNumber(ownPos.marginX, basePos.marginX, -Infinity, label, 'position.marginX', id),
@@ -622,7 +598,7 @@ function mergePet(
     // （回落由消费端做：./persona 的 petPersona 取不到实例级就取条目顶层）；非字符串 → 告警 + 忽略。
     //
     // **这里刻意不填"生效值"**：合并器的契约是"拍平用户写了什么"，而人设的默认值是**所属条目那一份**，
-    // 不是某个常量。一旦在这里把条目人设填进每只实例，/pet-display（拿合并结果 → saveUserConfig 写回）
+    // 不是某个常量。一旦在这里把条目人设填进每只实例，设置页保存（拿合并结果 → saveUserConfig 写回）
     // 就会把"跟随条目"固化成每只实例的显式覆盖——之后用户改条目人设，这些实例不再跟着变。
     ...petPersonaField(p.whisperPrompt, label, id),
   };
@@ -705,7 +681,7 @@ export function findPetInstance(
  * 保存用户层（PUT /config）：更新 main-config.jsonc，接受可编辑字段（pets + 全局开关：
  * notificationsEnabled / whisperImageEnabled / chatImageEnabled / confineToScreen / trayEnabled + physics
  * + whisperModel / chatModel + chatMemoryRounds + chatImageLimit）。
- * pets 内除 id/name/size/四个开关/display/position 外，还接可选的 `whisperPrompt`（实例级人设；
+ * pets 内除 id/name/size/四个开关/position 外，还接可选的 `whisperPrompt`（实例级人设；
  * 空串 = 删除覆盖，回落条目）。
  * 编辑语义：**非白名单顶层字段（whisperPrompt / eventsRefreshSec / memes 等）从
  * `existing`（当前磁盘上的用户文件原对象）原样透传保留**——
@@ -743,8 +719,7 @@ export function saveUserConfig(
     // 传了必须是布尔，没传则走下面的读取侧默认值（内置默认 false = 保持原行为）。
     const fixedEnabled = pp.fixedEnabled;
     if (fixedEnabled !== undefined && typeof fixedEnabled !== 'boolean') return null;
-    const display = String(pp.display ?? '');
-    if (!PET_DISPLAY_SET.has(display)) return null;
+    // 已删的 display 字段（旧客端可能还带）：不校验、不写回，直接忽略。
     const pos = pp.position && typeof pp.position === 'object' ? (pp.position as Record<string, unknown>) : {};
     const corner = String(pos.corner ?? '');
     if (!CORNER_SET.has(corner)) return null;
@@ -765,7 +740,6 @@ export function saveUserConfig(
       whisperEnabled,
       workStatusEnabled,
       fixedEnabled,
-      display,
       position: { corner, marginX, marginY },
     };
     if (persona) pet.whisperPrompt = persona;

@@ -18,7 +18,7 @@ import {
   resolveElectronPath,
 } from '../host/helper-process';
 import type { StandaloneLogger } from './context';
-import { configPathsFor, describePets, isDesktopVisible } from './options';
+import { configPathsFor, describePets } from './options';
 
 /** 包版本（读不到就 unknown）—— 体检报告与启动横幅共用 */
 export function packageVersion(root: string): string {
@@ -74,12 +74,8 @@ export function runCheck(logger: StandaloneLogger): number {
       const idle = Array.isArray(animations?.idle) ? animations.idle.length : 0;
       lines.push(`  条目 ${entry}：宠物 ${pets.length} 只  ${describePets(pets)}｜idle 动画 ${idle} 个`);
     }
-    const desktopVisible = flattenPetList(merged).filter(isDesktopVisible);
-    lines.push(
-      `桌面小窗        ${desktopVisible.length} 只${
-        desktopVisible.length === 0 ? '（display 需要 desktop 或 both，否则独立模式没有可显示的宠物）' : ''
-      }`,
-    );
+    const pets = flattenPetList(merged);
+    lines.push(`桌面小窗        ${pets.length} 只${pets.length === 0 ? '（配置里没有宠物，服务仍在运行）' : ''}`);
     for (const line of lines) logger.info(line);
     logger.info('结论：配置与 Electron 就绪，可以直接启动（npm run standalone）。');
     return 0;

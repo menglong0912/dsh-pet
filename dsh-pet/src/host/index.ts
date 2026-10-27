@@ -22,7 +22,7 @@
  *                                直接拍平这份响应，客户端不再有第二份"补吹条目级字段"的实现
  *   /dsh-pet-7340/reload              → 桌面端「重载配置」（右键菜单，POST）：重启桌面 Helper，全部桌面
  *                                宠物窗口按最新配置重建（改配置文件后不必回设置页点保存）；与保存走
- *                                **同一条**重启路径（syncDesktop），宠物数量/display/size 变化同样生效
+ *                                **同一条**重启路径（syncDesktop），宠物数量/size 变化同样生效
  *   /dsh-pet-7340/config/meta         → 配置文件与素材目录路径 + 全部存储位置清单
  *                                       （设置页「高级配置」「卸载与存储」展示用）
  *   /dsh-pet-7340/models              → 可选「服务商 + 模型」清单（设置页「AI 模型」下拉框数据源；
@@ -56,16 +56,6 @@
  *                                       `force` = **渲染端**报告用户接管（拖拽、点击、隐藏、关闭）。
  *                                       占用期间 5 个动作端点必须带 `?lock=<lockId>`，否则
  *                                       lock-required（没带）/ lock-lost（带了不匹配，附 cause）
- *   `?surface=`（**必填**，issue #122 第 1 条）→ 声明"我要**哪一端**的宠物"：web / desktop /
- *                                       both / any。`pet` 只说明"哪一只"，不说明"哪一端"——一只
- *                                       `display: desktop` 的宠物被当成网页目标时宿主照旧受理，
- *                                       但**没有任何渲染端会消费它**（拿到 ok:true 却什么都不会
- *                                       发生，直到回执超时）。这里把那种"必然不可能"提前变成显式
- *                                       失败：pet-not-displayed + **该宠物实际的 display**。
- *                                       **只开在会产生渲染端可见效果的端点上**：/anim、/broadcast、
- *                                       /bubble/clear、/position、/throw、/lock、/whisper 与
- *                                       /chat 的 POST；/lock/release（释放必须永远能成功）与
- *                                       /chat 的 GET（读记忆与显示在哪一端无关）**不开**。见 ./surface
  *   /dsh-pet-7340/playback/<id>        → **播放回执**（GET）：返回那一次点播的真实状态
  *                                       （accepted/playing/ended/failed/cancelled）。带
  *                                       `?wait=<状态[,状态]>` + `?timeout=<ms>`（**成对必填**）时挂起等待：
@@ -83,8 +73,8 @@
  * host 侧监听宿主事件（session/event + agent/error）生成帧写进 S 的 sections.notify，
  * 浏览器统一轮询 /state 后弹 toast（帧契约与 shared/notify.ts 一致；单槽，见下方 pushNotifyFrame）。
  *
- * 桌面模式（Electron 透明窗）没有独立配置文件：宠物显示在哪全部由宠物条目的 display 决定
- * （web=仅浏览器 / desktop=仅桌面 / both=两者 / none=都不显示；缺失时合并器填内置默认值）。
+ * 桌面模式（Electron 透明窗）：配置里的每只宠物都显示在桌面上（没有独立配置文件，也没有
+ * 「显示位置」开关）。
  *
  * 安全性：resolveAsset 做"防穿越"校验，保证路径仍在对应根目录内；
  *         PUT 保存经 saveUserConfig 白名单重建，id 过滤文件名非法字符。
@@ -117,15 +107,12 @@ import { MENU_WAIT_MAX_MS, MenuRegistry } from './menu';
 import { decidePosition, decideThrow, positionLeafData } from './motion-cue';
 import { parsePlaybackPath, parseWaitQuery, PlaybackStore } from './playback';
 import { PoseStore, normalizePoseInput } from './pose';
-import { SURFACE_TEXT, displayCovers, normalizeSurface, type Surface } from './surface';
 import {
   findPetInstance,
   flattenPetList,
   ID_FORBIDDEN,
   migrateUserConfig,
-  PET_DISPLAY_SET,
   readAllConfig,
-  readPetConfigEntry,
   readUserConfig,
   saveUserConfig,
   sliceMemoryRounds,
@@ -261,9 +248,6 @@ function sendFile(res: ServerResponse, file: string, contentType: string): void 
 
 // 配置的读取/校验/合并/保存全部收敛在 ./config（readAllConfig / saveUserConfig，host 自包含实现，
 // 不 import src/shared —— DSH 单文件加载约束）。本文件不再保留任何配置逻辑，只消费成品返回值。
-
-/** 该宠物是否参与桌面模式（Electron 透明窗） */
-const isDesktopVisible = (display: unknown): boolean => display === 'desktop' || display === 'both';
 
 /** 发送 JSON 响应（headers 可选：如 no-cache 触发计数） */
 function sendJson(res: ServerResponse, status: number, obj: unknown, headers: Record<string, string> = {}): void {
@@ -464,61 +448,7 @@ export function apply(ctx: any): void {
   });
 
   // 实况快照（issue #122 第 1 条）：桌面渲染端变化时上报，第三方用 GET /pose 读。
-  // 网页端不走这里——它的位置**天生每个页面一份**，走页面内的 Cordis 服务 `petApi7340`。
   const pose = new PoseStore();
-
-  /**
-   * `?surface=` 的**参数级**校验（缺省 / 非法 → `bad-request`）。放在读盘之前：必然失败的请求
-   * 不碰磁盘（与 pet 空串同一处境）。通过则给出收窄后的取值。
-   */
-  const surfaceParam = (params: URLSearchParams): { ok: true; want: Surface } | { ok: false; res: RouteResult } => {
-    const want = normalizeSurface(params.get('surface'));
-    if (want !== null) return { ok: true, want };
-    return {
-      ok: false,
-      res: { kind: 'json', status: 200, obj: { ok: false, reason: 'bad-request', message: SURFACE_TEXT } },
-    };
-  };
-
-  /**
-   * `?surface=` 与该宠物 `display` 的对齐校验（issue #122 第 1 条）：不满足 → `pet-not-displayed`
-   * + **实际 display 原样回给调用方**（调用方据此一眼知道该怎么办），放行回 null。
-   *
-   * 这是**前置校验**，不是按面分发——指令照旧写进同一个叶子、两端内容照旧完全一致
-   * （要"网页播 A、桌面播 B"用两只宠物表达，见 ./surface 的第 1 条边界）。
-   */
-  const surfaceMismatch = (pet: Record<string, unknown>, petId: string, want: Surface): RouteResult | null => {
-    const display = String(pet.display ?? '');
-    if (displayCovers(want, display)) return null;
-    return {
-      kind: 'json',
-      status: 200,
-      obj: {
-        ok: false,
-        reason: 'pet-not-displayed',
-        message: petId + ' 的显示模式是 ' + display + '，不满足 surface=' + want,
-        display,
-      },
-    };
-  };
-
-  /**
-   * 决策函数**之后**的 surface 校验（`/anim`、`/broadcast`、`/bubble/clear`、`/position`、
-   * `/throw` 共用）：这五条的 pet 解析住在各自的决策模块里，所以这里按 `petId` 再查一次实例取
-   * `display`（配置已在手，成本可忽略）。放行回 null。
-   *
-   * 位置与 `lockBlocked` 一致——都在决策函数之后、任何副作用之前，所以校验顺序是
-   * 「body → pet → surface → 锁」。
-   */
-  const surfaceBlocked = (
-    cfg: Record<string, Record<string, unknown>>,
-    petId: string,
-    params: URLSearchParams,
-  ): RouteResult | null => {
-    const p = surfaceParam(params);
-    if (!p.ok) return p.res;
-    return surfaceMismatch(findPetInstance(cfg, petId)?.pet ?? {}, petId, p.want);
-  };
 
   /**
    * 路由层的 pet 参数解析（`/lock`、`/lock/release`、`/whisper`、`/chat` 用——这四条没有独立决策层；
@@ -531,20 +461,14 @@ export function apply(ctx: any): void {
    * 收紧前这四条是 `get('pet') || resolveActivePetId() || 'main'`：缺省会落到"当前桌宠"
    * = **有效宠物列表第一只**（`/whisper`、`/chat` 更彻底——`?? ''` 直接空串：人设按 main 条目取、
    * 生成结果写进没人消费的 `pets[""].say`，还回 ok:true——钱花了、话丢了、调用方以为成功）。
-   * 落点随用户 /pet 操作而变、失败也不报，第三方无从预期，故整条缺省链已删除：
-   * pet 与 `/pet-display` 的 `id` 一样是必填项。
+   * 落点随用户 /pet 操作而变、失败也不报，第三方无从预期，故整条缺省链已删除：pet 必填。
    *
    * `cfg` 传**惰性读取**：pet 空串时不必碰磁盘（与 /broadcast 的 text/duration 同一处境，
    * routes.test.ts 里"配置不可达"那一组断言正是靠这个顺序钉住的）。
-   *
-   * `opts.surface` = 是否同时校验 `?surface=`。**只对会产生渲染端可见效果的端点开**：
-   * `/lock`、`/whisper`、`/chat` 的 POST。`/lock/release` 与 `/chat` 的 GET 不开——
-   * 释放必须永远能成功（否则宠物中途被隐藏就撤不掉锁），读记忆与显示在哪一端无关。
    */
   const requirePet = (
     params: URLSearchParams,
     cfg: () => Record<string, Record<string, unknown>>,
-    opts?: { surface?: boolean },
   ):
     | { ok: true; petId: string; entry: string; conf: Record<string, unknown>; pet: Record<string, unknown> }
     | { ok: false; res: RouteResult } => {
@@ -554,21 +478,10 @@ export function apply(ctx: any): void {
     });
     const petId = String(params.get('pet') ?? '').trim();
     if (!petId) return fail('pet-required', 'pet 必填：要指定操作哪只桌宠');
-    // surface 分两步：参数级校验在读盘之前（必然失败的请求不碰磁盘），显示模式校验在找到宠物之后。
-    let want: Surface | null = null;
-    if (opts?.surface === true) {
-      const p = surfaceParam(params);
-      if (!p.ok) return { ok: false, res: p.res };
-      want = p.want;
-    }
     // 一次查找同时给出"存在性"与"所属条目"（entry 即素材根，/chat 读记忆分桶要用）+ 条目配置
     // （/chat 取 chatMemoryRounds 要用）——调用方拿到的就是校验时那份快照里的值，不必再查一次。
     const found = findPetInstance(cfg(), petId);
     if (!found) return fail('unknown-pet', '没有这只桌宠：' + petId);
-    if (want !== null) {
-      const mismatch = surfaceMismatch(found.pet, petId, want);
-      if (mismatch) return { ok: false, res: mismatch };
-    }
     return { ok: true, petId, entry: found.entry, conf: found.conf, pet: found.pet };
   };
 
@@ -928,12 +841,12 @@ export function apply(ctx: any): void {
   let hasDesktopPet = false;
   /**
    * 桌面模式是否**曾经**成功启动过（粘性，仅本插件生命周期内有效）。
-   * 把「没有桌面宠物就不启动」放宽成「从来没有过桌面宠物才不启动」：桌面宠物被全部改成
-   * web/none 之后，Helper 仍会带着空宠物列表重启并常驻——只为了把托盘（桌面端显示开关）留着，
-   * 那是此时唯一还能在**桌面侧**把宠物切回桌面的入口，Helper 一退它就没了。
+   * 把「没有宠物就不启动」放宽成「从来没有过宠物才不启动」：配置被清空、宠物被删光之后，
+   * Helper 仍会带着空宠物列表重启并常驻——只为了把托盘（开机自启 / 退出）留着，
+   * Helper 一退它就没了。
    * 但它只在托盘还开着时才值得：`trayEnabled` 为 false 时没人需要那个图标，常驻就只是空进程
    * （0 窗口 / 0 托盘 / 0 Dock），于是判据收紧成 `desktopModeEverActive && trayOn`。
-   * 纯浏览器用户（从未有过桌面宠物）不受影响：照旧不探测、不下载、不拉起 Electron。
+   * 从未启动过（全新安装、配置里一只宠物都没有）不受影响：照旧不探测、不下载、不拉起 Electron。
    */
   let desktopModeEverActive = false;
   /**
@@ -946,28 +859,20 @@ export function apply(ctx: any): void {
     try {
       const merged = readAllConfig(configPaths);
       const pets = flattenPetList(merged);
-      const desktopPets = pets.filter((p) => isDesktopVisible(p.display));
-      hasDesktopPet = desktopPets.length > 0;
+      hasDesktopPet = pets.length > 0;
       trayOn = merged.main?.trayEnabled !== false;
-      // 诊断日志（issue #168）：设置页显示「仅桌面」却始终没有 helper 进程时，这一行能立刻
-      // 分辨「宿主读到的 display 就是 web」还是「读到了 desktop」——此前这个判定完全不可见。
-      // 托盘开关同样只在这一行里可见：加了它之后「为什么没有托盘/为什么留着空进程」都靠这里看。
-      ctx.logger?.info?.(
-        `[dsh-pet] 桌面判定：pets=${pets.length}，桌面可见=${desktopPets.length}` +
-          `（${desktopPets.map((p) => String(p.id)).join(',') || '无'}）→ hasDesktopPet=${hasDesktopPet} tray=${trayOn}`,
-      );
+      // 托盘开关只在这一行里可见：加了它之后「为什么没有托盘/为什么留着空进程」都靠这里看。
+      ctx.logger?.info?.(`[dsh-pet] 桌面判定：pets=${pets.length} → hasDesktopPet=${hasDesktopPet} tray=${trayOn}`);
     } catch (e) {
       ctx.logger?.warn?.(`[dsh-pet] 宠物配置非法，桌面模式已跳过：${e instanceof Error ? e.message : String(e)}`);
     }
   };
   refreshDesktop();
 
-  /** 桌面可见宠物列表（[{id,size}]）：透传 Helper 决定创建几个局部窗口（每宠物一个）。 */
+  /** 宠物列表（[{id,size}]）：全部宠物都显示在桌面上，透传 Helper 决定创建几个局部窗口（每宠物一个）。 */
   const desktopPetList = (): Array<{ id: string; size: number }> => {
     try {
-      return effectivePetList()
-        .filter((p) => isDesktopVisible(p.display))
-        .map((p) => ({ id: String(p.id), size: Number(p.size) }));
+      return effectivePetList().map((p) => ({ id: String(p.id), size: Number(p.size) }));
     } catch {
       return [];
     }
@@ -979,7 +884,7 @@ export function apply(ctx: any): void {
   let disposed = false;
   /** 「无图形环境」提示只在进程生命周期内打一次，避免守护循环刷屏 */
   let displayWarned = false;
-  /** 「无桌面宠物 → 跳过」的 info 只打一次：纯网页用户每次启动都会走这条短路，不该刷屏 */
+  /** 「没有宠物 → 跳过」的 info 只打一次：空配置每次启动都会走这条短路，不该刷屏 */
   let noDesktopSkipped = false;
   /** webServer 端口等待次数：只用于日志节流，不改变重试行为 */
   let portWaitAttempts = 0;
@@ -999,7 +904,7 @@ export function apply(ctx: any): void {
   const launchHelper = (electronPath: string | undefined): void => {
     if (inProcessHost) return; // 应用模式：窗口由本进程建，绝不 spawn
     if (helper || disposed) return;
-    // 无桌面宠物时：只有「桌面模式曾启用过**且**托盘还开着」才值得为托盘常驻，否则不启动
+    // 配置里没有宠物时：只有「桌面模式曾启用过**且**托盘还开着」才值得为托盘常驻，否则不启动
     if (!hasDesktopPet && !(desktopModeEverActive && trayOn)) return;
     const port = typeof ctx.webServer?.port === 'number' ? ctx.webServer.port : 0;
     if (!port || port <= 0) {
@@ -1093,13 +998,11 @@ export function apply(ctx: any): void {
     if (helper || electronEnsure || disposed) return;
     if (!hasDesktopPet && !(desktopModeEverActive && trayOn)) {
       // 诊断日志（issue #168）：这条短路以前完全静默，是「桌面模式凭空消失：无进程、无目录、
-      // 无提示」的直接成因。用 info 而非 warn——纯网页用户这是正常状态；只打一次避免刷屏。
+      // 无提示」的直接成因。用 info 而非 warn——配置里没有宠物是正常状态；只打一次避免刷屏。
       // 托盘关掉后这里也会命中：没人需要那个图标，空常驻没有意义（见 desktopModeEverActive 注释）。
       if (!noDesktopSkipped) {
         noDesktopSkipped = true;
-        ctx.logger?.info?.(
-          `[dsh-pet] 无桌面宠物（display 均为 web/none）且无需保留托盘（tray=${trayOn}），已跳过桌面 Helper 启动`,
-        );
+        ctx.logger?.info?.(`[dsh-pet] 配置里没有宠物且无需保留托盘（tray=${trayOn}），已跳过桌面 Helper 启动`);
       }
       return;
     }
@@ -1168,7 +1071,7 @@ export function apply(ctx: any): void {
   };
 
   /**
-   * 宠物配置（display / size 等）变更后：重解析桌面宠物，**等旧 helper 退出**再拉起新的。
+   * 宠物配置（数量 / size 等）变更后：重解析桌面宠物，**等旧 helper 退出**再拉起新的。
    *
    * 为什么要等（issue #64）：Electron 收到 SIGTERM 后关窗是异步的（几百 ms 起），"发完 kill 就 spawn
    * 新进程"会让旧窗口（旧大小）与新窗口（新大小）短暂共存——用户看到的就是"改完大小冒出来第二只宠物"。
@@ -1249,7 +1152,7 @@ export function apply(ctx: any): void {
               status: 400,
               obj: {
                 error:
-                  'invalid pet config: expected { pets:[{name?,id,size,display,position:{corner,marginX,marginY}}] }（display 为 web/desktop/both/none 之一；可选顶层 notificationsEnabled / whisperImageEnabled / chatImageEnabled / trayEnabled 布尔；可选宠物布尔 whisperEnabled / workStatusEnabled / fixedEnabled）',
+                  'invalid pet config: expected { pets:[{name?,id,size,position:{corner,marginX,marginY}}] }（可选顶层 notificationsEnabled / whisperImageEnabled / chatImageEnabled / trayEnabled 布尔；可选宠物布尔 whisperEnabled / workStatusEnabled / fixedEnabled）',
               },
             };
           }
@@ -1265,7 +1168,7 @@ export function apply(ctx: any): void {
           }
           await mkdir(userRoot, { recursive: true });
           await writeFile(userConfigPath, JSON.stringify(clean, null, 2), 'utf8');
-          void syncDesktop(); // display/size 等可能变化：重解析桌面宠物并重启 Helper（异步，不阻塞保存响应）
+          void syncDesktop(); // 宠物数量/size 等可能变化：重解析桌面宠物并重启 Helper（异步，不阻塞保存响应）
           // 响应体 = 保存后的**成品聚合**（与 GET /config 同一份，字段已填满）：
           // 设置页把它直接交给容器的 flattenConfigPets 拍平渲染——客户端的条目级字段
           // （动画池/权重/物理参数/工作状态文案）只有这一处填充，不再有第二份补吹实现。
@@ -1290,99 +1193,9 @@ export function apply(ctx: any): void {
       return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
     }
 
-    // 单只宠物的显示位置（桌面端右键「关闭桌面显示」→ POST /pet-display）。
-    // 高频操作，故只收 id + display 两个参数，不要求调用方回传整段 pets（那是 PUT /config 的形态：
-    // 客户端做读-改-写既容易误伤同层其它宠物，也拿不准该写哪一层）。
-    // 层归属由服务端反查：id 在合并后被 mergePet 保证**全局唯一**（重复实例会被跳过、不进聚合），
-    // 所以 findPetInstance 的结果没有歧义；反过来让客户端传 entry 只会多出"参数与真实归属不符"的
-    // 新失败面（还平白把 entry 暴露成拼文件路径的输入）。
-    // 写入语义与 PUT /config 完全一致：saveUserConfig 白名单重建 + existing 透传——用户手改的
-    // whisperPrompt / memes 等非白名单字段不许被抹掉（见 ./config 里那段老 bug 的注释）。
-    if (rest === 'pet-display') {
-      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
-      // 失败一律 **HTTP 200 + `{ok:false, reason, message}`**（与其他动作端点同一口径）：
-      // 缺 id / display 非法 / 宠物不存在 / 写盘失败全是**业务错误**，不是"资源未找到"或"请求非法"，
-      // 用 400/404 会让调用方把业务结论当成传输层故障。200 不代表改动生效——必须看 body 的 ok。
-      // 只有 405（方法错）与 400（JSON 坏了）仍是协议层错误码，全插件只有这两处不是 200。
-      const fail = (reason: string, message: string): RouteResult => ({
-        kind: 'json',
-        status: 200,
-        obj: { ok: false, reason, message },
-      });
-      let payload: { id?: unknown; display?: unknown };
-      try {
-        payload = JSON.parse(body ?? '') as { id?: unknown; display?: unknown };
-      } catch {
-        return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
-      }
-      const petId = typeof payload.id === 'string' ? payload.id.trim() : '';
-      const nextDisplay = String(payload.display ?? '');
-      // id **必填**（与 9 条 `?pet=` 路由同一对词汇：没给 → pet-required；不存在 → unknown-pet）
-      if (!petId) return fail('pet-required', 'pet 必填：要指定操作哪只桌宠');
-      if (!PET_DISPLAY_SET.has(nextDisplay)) {
-        return fail('bad-request', `display 必须是 web / desktop / both / none：${nextDisplay}`);
-      }
-      let merged: Record<string, Record<string, unknown>>;
-      try {
-        merged = readAllConfig(configPaths);
-      } catch (e) {
-        return fail('generate-error', e instanceof Error ? e.message : String(e));
-      }
-      // 命中不到有两种可能：id 根本不存在，或该实例在合并时**因 id 与其它条目重复被跳过**（于是不在
-      // 聚合里）。两种都只能按"没有这只桌宠"报——绝不能凭 id 去猜它"应该"属于哪个文件。
-      const hit = findPetInstance(merged, petId);
-      if (!hit) return fail('unknown-pet', `没有这只桌宠：${petId}`);
-      // 目标层：main → 用户主配置；其余 → 文件宠物自己的配置（.json 或 .jsonc，定位统一走 ./config）
-      let layerPath: string;
-      let layerDir: string;
-      let existing: Record<string, unknown> | undefined;
-      if (hit.entry === 'main') {
-        layerPath = userConfigPath;
-        layerDir = userRoot;
-        existing = readUserConfig(configPaths);
-      } else {
-        const file = readPetConfigEntry(configPaths, hit.entry);
-        if (!file) {
-          return fail('generate-error', `宠物条目配置文件找不到：${hit.entry}`);
-        }
-        layerPath = file.path;
-        layerDir = petConfigDir;
-        existing = file.raw;
-      }
-      // 整段替换语义：saveUserConfig 重建的是整个 pets 数组，必须带上**该层全部**宠物，只把目标
-      // 那只的 display 换掉（漏掉别的 = 把它们从配置里删掉）。
-      const layerPets = Array.isArray(hit.conf.pets) ? (hit.conf.pets as Record<string, unknown>[]) : [];
-      const pets = layerPets.map((p) => (String(p.id) === petId ? { ...p, display: nextDisplay } : p));
-      const clean = saveUserConfig({ pets }, existing);
-      if (!clean) return fail('bad-request', '宠物配置非法');
-      try {
-        await mkdir(layerDir, { recursive: true });
-        await writeFile(layerPath, JSON.stringify(clean, null, 2), 'utf8');
-      } catch (e) {
-        return fail('generate-error', e instanceof Error ? e.message : String(e));
-      }
-      // 配置变更信号（**只在写盘成功之后**：失败时不该动版本号，否则浏览器白重拉一次 /config）。
-      // 这是全插件**唯一**写 sections.config 的地方：保存 / 同步配置的调用方自己就拿到了成品聚合
-      // （响应体），桌面端由下面的 syncDesktop() 重启，都不需要这个信号；
-      // 而桌面端右键改 display 时浏览器页面**不是发起方**，只能靠它发现「配置被别处改过」。
-      state.writeSection('config', {});
-      // 占用锁：改成 `none`（桌面端右键「关闭桌面显示」）＝ 用户主动隐藏/关闭，属于**抢占**——
-      // 撤销本轮占用（cause: preempted）。不做的话宠物会被锁到 TTL 到点，而用户明明已经把它藏了
-      // （issue #122：「用户主动停止、隐藏或关闭时，也应能取消联动，避免宠物被永久锁住」）。
-      // 只认 `none`：web/desktop/both 是换显示位置，不是"用户接管"。
-      if (nextDisplay === 'none') lock.release({ petId, force: true });
-      // 不 await：发起者很可能就是**即将被这次重载换掉的**桌面 Helper（与 /reload 同一处境）。
-      // 写盘已经落定，重启结果不需要回给调用方。
-      void syncDesktop();
-      // 响应体 = 改动后的**成品聚合**（与 PUT / POST /config 同形）：调用方（浏览器端右键菜单）
-      // 直接把它交给 petBridge.reload，不必再发一次 GET /config —— 与设置页保存走的是同一条路，
-      // 也就不会拿到可能陈旧的配置（现场表现：不返回聚合时浏览器端要刷新才生效）。
-      return { kind: 'json', status: 200, obj: readAllConfig(configPaths) };
-    }
-
     // 桌面端「重载配置」（右键菜单 → POST /reload）：重启桌面 Helper，全部桌面宠物窗口按最新配置重建。
     // 与保存走**同一条**重启路径（syncDesktop：串行队列 + 等旧进程真正退出再起新的），
-    // 所以宠物数量 / display / size 的变化同样生效——渲染端就地重拉配置做不到这几项
+    // 所以宠物数量 / size 的变化同样生效——渲染端就地重拉配置做不到这几项
     // （每只宠物一个窗口，是宿主启动时按 DSH_PET_PETS 建的）。
     // 注意：发起者就是**即将被重启的那个 helper**，本响应不保证送达，因此不 await 重启、立刻回 200。
     if (rest === 'reload') {
@@ -1660,8 +1473,7 @@ export function apply(ctx: any): void {
       const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
       try {
         // pet **必填**且必须真实存在（与 /anim、/broadcast 同一口径，见 requirePet）
-        // surface 只对**取锁**这一支校验：`/lock/release` 必须永远能成功（否则宠物中途被隐藏就撤不掉锁）
-        const who = requirePet(url.searchParams, () => readAllConfig(configPaths), { surface: !isRelease });
+        const who = requirePet(url.searchParams, () => readAllConfig(configPaths));
         if (!who.ok) return who.res;
         const petId = who.petId;
         if (isRelease) {
@@ -1705,7 +1517,7 @@ export function apply(ctx: any): void {
       try {
         // pet **必填**且必须真实存在：收紧前这里是 `?? ''`——空串会让人设/配图按 main 条目取、
         // 生成结果写进没人消费的 `pets[""].say`，还回 ok:true（钱花了、话丢了、调用方以为成功）。
-        const who = requirePet(url.searchParams, () => readAllConfig(configPaths), { surface: true });
+        const who = requirePet(url.searchParams, () => readAllConfig(configPaths));
         if (!who.ok) return who.res;
         const r = await publishWhisper(who.petId);
         if (r.ok) {
@@ -1779,9 +1591,6 @@ export function apply(ctx: any): void {
           memeDirs: memeDirsFor,
         });
         if (!d.ok) return { kind: 'json', status: 200, obj: { ok: false, reason: d.reason, message: d.message } };
-        // 显示端对齐：不满足 → pet-not-displayed（+ 实际 display），早于锁门禁
-        const noSurface = surfaceBlocked(cfg, d.petId, url.searchParams);
-        if (noSurface) return noSurface;
         // 占用门禁：有锁时只有持锁者能投喂（无锁恒放行，见 lockBlocked）
         const blocked = lockBlocked(d.petId, url.searchParams);
         if (blocked) return blocked;
@@ -1818,8 +1627,6 @@ export function apply(ctx: any): void {
           requested: String(url.searchParams.get('pet') ?? ''),
         });
         if (!d.ok) return { kind: 'json', status: 200, obj: { ok: false, reason: d.reason, message: d.message } };
-        const noSurface = surfaceBlocked(cfg, d.petId, url.searchParams);
-        if (noSurface) return noSurface;
         const blocked = lockBlocked(d.petId, url.searchParams);
         if (blocked) return blocked;
         state.writePet(d.petId, 'say', { clear: true });
@@ -1874,9 +1681,6 @@ export function apply(ctx: any): void {
           rate: o.rate,
         });
         if (!d.ok) return { kind: 'json', status: 200, obj: { ok: false, reason: d.reason, message: d.message } };
-        // 显示端对齐：不满足 → pet-not-displayed（+ 实际 display），早于锁门禁
-        const noSurface = surfaceBlocked(cfg, d.petId, url.searchParams);
-        if (noSurface) return noSurface;
         // 占用门禁：持锁者自己的点播照放行（那是它的演出），别人一律拒
         const blocked = lockBlocked(d.petId, url.searchParams);
         if (blocked) return blocked;
@@ -1941,8 +1745,6 @@ export function apply(ctx: any): void {
             duration: o.duration,
           });
           if (!d.ok) return { kind: 'json', status: 200, obj: { ok: false, reason: d.reason, message: d.message } };
-          const noSurface = surfaceBlocked(cfg, d.petId, url.searchParams);
-          if (noSurface) return noSurface;
           const blocked = lockBlocked(d.petId, url.searchParams);
           if (blocked) return blocked;
           // 叶子按模式收敛成最小形状：非 line 模式不带 duration（见 positionLeafData）
@@ -1952,8 +1754,6 @@ export function apply(ctx: any): void {
         }
         const d = decideThrow({ cfg, requested, angle: o.angle, power: o.power });
         if (!d.ok) return { kind: 'json', status: 200, obj: { ok: false, reason: d.reason, message: d.message } };
-        const noSurface = surfaceBlocked(cfg, d.petId, url.searchParams);
-        if (noSurface) return noSurface;
         const blocked = lockBlocked(d.petId, url.searchParams);
         if (blocked) return blocked;
         state.writePet(d.petId, 'throw', { angle: d.angle, power: d.power });
@@ -1971,16 +1771,9 @@ export function apply(ctx: any): void {
     // 实况：/dsh-pet-7340/pose?pet=<id>        （GET  = 第三方读**桌面端**的实况快照）
     //       /dsh-pet-7340/pose/report?pet=<id> （POST = **桌面渲染端**上报，内部通道）
     //
-    // 为什么只有桌面端走这条路：桌面宠物**一窗一只**，位置全局唯一一份 → 宿主快照语义干净；
-    // 而网页端的位置**天生每个页面一份**（开两个标签页时两边本来就不同），塞进宿主快照必然是
-    // 错的（后写者覆盖先写者）。所以网页端走**页面内**的 Cordis 只读服务 `petApi7340`
-    // （src/client/pose.ts）——两边**字段名与坐标口径完全一致**（中心点归一化 0~1，与 /position
-    // 同源），只是"取"的方式不同。
+    // 桌面宠物**一窗一只**，位置全局唯一一份 → 宿主快照语义干净。
     //
     // 上报是**变化时推 + 节流**（拖拽 / 走位 / 抛掷 / position 指令 / turn 转身），不是轮询。
-    //
-    // 本端点**不要求 `surface`**：它是**读**端点（`GET /chat`、`GET /playback` 同样不带），而且它
-    // 的定义域本身只有一个面。宠物配置上就不在桌面显示时用 `pet-not-displayed` 明说。
     if (rest === 'pose' || rest === 'pose/report') {
       const isReport = rest === 'pose/report';
       if (isReport && method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
@@ -2002,20 +1795,6 @@ export function apply(ctx: any): void {
           if (!p.ok) return { kind: 'json', status: 200, obj: { ok: false, reason: p.reason, message: p.message } };
           pose.set(who.petId, p.pose);
           return { kind: 'json', status: 200, obj: { ok: true } };
-        }
-        // 桌面端实况只对"显示在桌面"的宠物有意义：配置上就不在桌面 → 明确不可用（附实际 display）
-        const display = String(who.pet.display ?? '');
-        if (!displayCovers('desktop', display)) {
-          return {
-            kind: 'json',
-            status: 200,
-            obj: {
-              ok: false,
-              reason: 'pet-not-displayed',
-              message: who.petId + ' 的显示模式是 ' + display + '；桌面端实况只对 display 含 desktop 的宠物有',
-              display,
-            },
-          };
         }
         const snap = pose.get(who.petId);
         if (snap === undefined) {
@@ -2156,7 +1935,7 @@ export function apply(ctx: any): void {
       }
       try {
         // `?rounds=`：GET 专属的查看参数——只决定这次读多少轮（不写记忆，也不改变后续对话
-        // 往上下文里带多少，所以 POST 不认它）。与 surface 同一处境：参数级校验放在读盘之前。
+        // 往上下文里带多少，所以 POST 不认它）。参数级校验放在读盘之前。
         const roundsRaw = method === 'GET' ? url.searchParams.get('rounds') : null;
         let roundsOverride: number | null = null;
         if (roundsRaw !== null && roundsRaw.trim() !== '') {
@@ -2175,8 +1954,7 @@ export function apply(ctx: any): void {
         // 惰性 + 记忆化：pet 空串时完全不读配置；GET 分支复用同一次读取。
         let cfgCache: Record<string, Record<string, unknown>> | undefined;
         const cfg = (): Record<string, Record<string, unknown>> => (cfgCache ??= readAllConfig(configPaths));
-        // surface 只对 POST 校验：GET 是读记忆，跟宠物显示在哪一端无关
-        const who = requirePet(url.searchParams, cfg, { surface: method === 'POST' });
+        const who = requirePet(url.searchParams, cfg);
         if (!who.ok) return who.res;
         const petId = who.petId;
         if (method === 'GET') {

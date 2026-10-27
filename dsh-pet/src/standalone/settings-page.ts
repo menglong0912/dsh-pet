@@ -40,7 +40,7 @@ export const settingsPage = `<!doctype html>
 <label class="check"><input id="chatImageEnabled" type="checkbox">对话时配表情包</label>
 <label for="chatMemoryRounds">对话记住最近几轮</label><input id="chatMemoryRounds" type="number" min="0" max="50" step="1" value="5" aria-describedby="memory-note">
 <p id="memory-note" class="hint">一问一答算一轮，带进每次对话；越多越费 token，0 = 不记。</p>
-<p class="hint">多只宠物时这里改的是第一只桌面宠物。物理手感、字体、表情包、贴哪个角等更多选项在 <code id="petConfigFile"></code> 里，改完右键「重载配置」。</p>
+<p class="hint">多只宠物时这里改的是 main 宠物（没有就取第一只）。物理手感、字体、表情包、贴哪个角等更多选项在 <code id="petConfigFile"></code> 里，改完右键「重载配置」。</p>
 </fieldset>
 <fieldset id="app-settings" hidden><legend>陪伴与提醒</legend>
 <label class="check"><input id="screenEnabled" type="checkbox" aria-describedby="screen-note">定时看屏幕吐槽</label>
@@ -294,7 +294,7 @@ export const settingsScript = `
     row('战绩：胜 ' + view.record.wins + ' · 负 ' + view.record.losses);
     box.hidden = false;
   }
-  // 「宠物」一节改插件配置（main-config.jsonc）里的第一只桌面宠物：/standalone-ai/pet-settings 转给插件的 /config，
+  // 「宠物」一节改插件配置（main-config.jsonc）里的 main 宠物（没有就取第一只）：/standalone-ai/pet-settings 转给插件的 /config，
   // 其余宠物与没在这里的字段原样保留；只有独立应用有，CLI 里是 404
   let petConfig = null;
   async function petRequest(method, body) {
@@ -312,7 +312,7 @@ export const settingsScript = `
   }
   function targetPet(config) {
     const pets = config && config.main && Array.isArray(config.main.pets) ? config.main.pets : [];
-    return pets.find(pet => pet.display === 'desktop' || pet.display === 'both') || pets[0] || null;
+    return pets.find(pet => pet.id === 'main') || pets[0] || null;
   }
   function populatePet(data) {
     const pet = targetPet(data.config);

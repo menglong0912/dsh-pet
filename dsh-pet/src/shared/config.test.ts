@@ -94,10 +94,10 @@ describe('flattenConfigPets —— 成品 → 渲染列表的唯一填充点', (
   test('源码守卫：host 的写接口返回成品聚合，保存用与读取侧同一套校验', () => {
     const host = readSource('../host/index.ts');
 
-    // ③ host 的 GET / PUT / POST /config 与 POST /pet-display 都返回成品聚合——调用方拿写接口的
+    // ③ host 的 GET / PUT / POST /config 都返回成品聚合——调用方拿写接口的
     //    响应直接拍平，不自己拼字段，也不再补一次 GET（补拉的那一次可能拿到陈旧配置）
     const returns = host.match(/obj: readAllConfig\(configPaths\)/g) ?? [];
-    assert.equal(returns.length, 4, 'GET / PUT / POST /config 与 POST /pet-display 都应返回成品聚合');
+    assert.equal(returns.length, 3, 'GET / PUT / POST /config 都应返回成品聚合');
     // 只扫 /config 那一段：动作端点（POST /whisper 等）返回 { ok: true } 是**对的**（动作不带数据，
     // 数据只有 /state 一个出口），全文件扫描会把它们误判成"config 写接口返回了 ok:true"。
     const configBlock = /if \(rest === 'config'\) \{([\s\S]*?)\n {4}\}/.exec(host)?.[1] ?? '';

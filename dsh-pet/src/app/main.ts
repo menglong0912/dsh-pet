@@ -211,15 +211,12 @@ async function boot(): Promise<void> {
 }
 
 /**
- * 桌面可见宠物清单（[{id,size}]）。
- * 与 `src/host/index.ts` 的 isDesktopVisible 同口径：display 含 desktop/both 才建窗。
+ * 桌面宠物清单（[{id,size}]）：配置里的每只宠物都显示在桌面上，每只建一个窗口。
  */
 function desktopPets(): Array<{ id: string; size: number }> {
   try {
     const pets = flattenPetList(readAllConfig(configPathsFor(packageRoot, dshHomeDir())));
-    const desktop = pets
-      .filter((pet) => pet.display === 'desktop' || pet.display === 'both')
-      .map((pet) => ({ id: String(pet.id), size: Number(pet.size) }));
+    const desktop = pets.map((pet) => ({ id: String(pet.id), size: Number(pet.size) }));
     log(`桌面宠物 ${JSON.stringify(desktop)}`);
     return desktop;
   } catch (error) {
@@ -229,7 +226,7 @@ function desktopPets(): Array<{ id: string; size: number }> {
 }
 
 /**
- * 窗口与托盘依据的那部分配置（托盘列出全部宠物的名字与显示勾选，还受 trayEnabled 开关）。
+ * 窗口与托盘依据的那部分配置（宠物清单 / size + trayEnabled 开关）。
  * 读不到配置时返回 null：不因为一次读坏就重启应用。
  */
 function desktopLayout(): string | null {
@@ -237,7 +234,7 @@ function desktopLayout(): string | null {
     const merged = readAllConfig(configPathsFor(packageRoot, dshHomeDir()));
     return JSON.stringify({
       tray: merged.main?.trayEnabled !== false,
-      pets: flattenPetList(merged).map((pet) => [pet.id, pet.name, pet.display, pet.size]),
+      pets: flattenPetList(merged).map((pet) => [pet.id, pet.name, pet.size]),
     });
   } catch (error) {
     log(`读配置失败（不重启）：${error instanceof Error ? error.message : String(error)}`);
@@ -395,7 +392,7 @@ function status(port: number): Record<string, unknown> {
     port,
     pluginRoot: packageRoot,
     configFile: paths.userFile,
-    pets: pets.map((pet) => ({ id: pet.id, name: pet.name, display: pet.display })),
+    pets: pets.map((pet) => ({ id: pet.id, name: pet.name })),
   };
 }
 
@@ -404,7 +401,7 @@ function landingPage(port: number): string {
   const info = status(port);
   const pets = (info.pets as Array<Record<string, unknown>>) ?? [];
   const petLines = pets.length
-    ? pets.map((pet) => `<li>${escapeHtml(String(pet.name ?? pet.id))}（${escapeHtml(String(pet.display))}）</li>`).join('')
+    ? pets.map((pet) => `<li>${escapeHtml(String(pet.name ?? pet.id))}</li>`).join('')
     : '<li>（未读到宠物，检查配置文件）</li>';
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>dsh-pet</title>

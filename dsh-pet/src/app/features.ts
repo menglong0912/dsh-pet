@@ -397,12 +397,12 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   // ---------- 桌宠路由 ----------
 
-  /** 当前目标宠物：第一只在桌面显示的；配置读不到时按 main */
+  /** 当前目标宠物：main（没有就取第一只）；配置读不到时按 main */
   function petId(): string {
     try {
       const pets = flattenPetList(readAllConfig(deps.configPaths));
-      const desktop = pets.find((pet) => pet.display === 'desktop' || pet.display === 'both') ?? pets[0];
-      return desktop ? String(desktop.id) : 'main';
+      const target = pets.find((pet) => String(pet.id) === 'main') ?? pets[0];
+      return target ? String(target.id) : 'main';
     } catch {
       return 'main';
     }
@@ -436,7 +436,6 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   ): Promise<Record<string, unknown>> {
     const url = new URL(deps.petBase + path);
     url.searchParams.set('pet', petId());
-    url.searchParams.set('surface', 'any');
     if (lockId !== null) url.searchParams.set('lock', lockId);
     const response = await fetch(url, {
       method,
@@ -731,7 +730,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       );
       if (!text) return { ok: false, reason: 'empty' };
       const meme = await memeFor(text);
-      // 宠物被隐藏时插件不让说（pet-not-displayed）：如实报失败，别让调用方以为说出来了
+      // 插件拒绝说话（生成失败等）：如实报失败，别让调用方以为说出来了
       // 正在演一场（心魔）时也不联动说话动画：手动看屏幕照样能看，只是别顶掉演出的动画
       if (!(await say(text, { image: meme?.name, ...(battle ? { anim: false } : {}) })))
         return { ok: false, text, reason: 'say-failed' };

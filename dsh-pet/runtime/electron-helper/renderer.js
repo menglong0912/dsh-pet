@@ -80,18 +80,18 @@ async function boot() {
     // 宠物根容器，只能走全局变量；气泡与提示也一并从这里继承（与浏览器端同一套变量名）。
     // 放在这里而不是 injectAssets()：字体族来自配置，必须等 /config 拉回来之后才有效。
     document.documentElement.style.setProperty('--dsh-pet-font-family', S.fontStackOf(cfg.font.family));
-    const pets = cfg.pets.filter((p) => S.isDesktopVisible(p.display));
+    const pets = cfg.pets;
     if (pets.length === 0) {
-      // **全部宠物只在网页显示是合法状态，不是配置错误**（issue #130）。
+      // **配置里没有任何宠物是合法状态，不是配置错误**。
       // 本窗口是主进程按 DSH_PET_PETS 建的：宿主流下窗口数与该列表必然一致
-      // （全 web 时宿主传 []，main.js 建 0 个窗口，本函数根本不会跑）；
+      // （没有宠物时宿主传 []，main.js 建 0 个窗口，本函数根本不会跑）；
       // 只有手动 start-desktop（没有 DSH_PET_PETS）会回落出一只默认窗口而与配置脱钩。
-      // 脱钩不该报错——没有桌面宠物就表示这个窗口没活儿干：安静关掉，不弹条、不重试。
+      // 脱钩不该报错——没有宠物就表示这个窗口没活儿干：安静关掉，不弹条、不重试。
       // 托盘是否还在看 main 条目的 trayEnabled：开着且桌面模式曾启用过，宿主持久保留 Helper
-      // （托盘因此还在）；关掉则宿主不再为它常驻，宠物全下线时 Helper 一起退出。
+      // （托盘因此还在）；关掉则宿主不再为它常驻。
       // 宿主流由 syncDesktop() 在配置变化时重建 helper，手动流则需自行重启。
       hideError();
-      console.info('[dsh-pet] no desktop pets; closing this helper window (tray kept only if trayEnabled)');
+      console.info('[dsh-pet] no pets; closing this helper window (tray kept only if trayEnabled)');
       window.close();
       return;
     }

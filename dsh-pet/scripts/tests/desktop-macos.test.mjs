@@ -27,7 +27,6 @@ test(
         fixedEnabled: true,
         whisperEnabled: false,
         workStatusEnabled: false,
-        display: 'desktop',
         position: { corner: 'top-left', marginX: 200, marginY: 0 },
       },
     ];

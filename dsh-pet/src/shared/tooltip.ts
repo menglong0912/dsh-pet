@@ -3,9 +3,9 @@
 // 为什么不继续用原生 title：它的样式、字体、延迟全由浏览器/系统决定，改不动，也跟宠物观感无关；
 // 它要显示的内容只是宠物显示名（host 已保证 name = rawName || id，见 host/config.ts，不会空）。
 //
-// 为什么放 src/shared：display: both 时同一只宠物在网页与桌面各显一只，两端提示必须同一个样、
-// 同一个摆法（与 MENU_CSS / CHAT_CSS / SCORE_POPUP_CSS 同一条约定）。本模块给常量、class、
-// 样式与**摆位纯函数**；节点构造与宽高实测留在两端各自的壳里（浏览器 React、桌面 DOM）。
+// 为什么放 src/shared：提示与菜单/弹窗共用同一套样式与摆法（与 MENU_CSS / CHAT_CSS / SCORE_POPUP_CSS 同一条约定）。
+// 本模块给常量、class、
+// 样式与**摆位纯函数**；节点构造与宽高实测留在渲染端的壳里。
 //
 // 坐标口径：定位用 position:fixed，坐标一律是「各端自己的视口坐标」——
 //   浏览器 = 页面视口（clientX/clientY 直接用）；

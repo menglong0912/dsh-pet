@@ -16,15 +16,6 @@ export interface Rect {
   height: number;
 }
 
-/**
- * 宠物的显示位置（四个值，必填）：
- * - web     = 只显示在浏览器 overlay
- * - desktop = 只显示在桌面模式（Electron 透明窗）
- * - both    = 两者都显示
- * - none    = 都不显示（保留配置但不参与显示）
- */
-export type PetDisplay = 'web' | 'desktop' | 'both' | 'none';
-
 /** 移动动作：一个动作名 + 可选覆盖参数（未写字段取 moves.default） */
 export interface MoveSpec {
   name: string;
@@ -106,8 +97,6 @@ export interface Pet {
    *  （碎碎念/工作状态）、点击回应与拖拽一律照常——用户主动触发的不受此限制。
    *  缺失默认 false（保持原行为：会自己走、会自己翻） */
   fixedEnabled: boolean;
-  /** 显示位置（web/desktop/both/none，必填）：缺失即配置错误，代码不做兜底 */
-  display: PetDisplay;
   position: { corner: Corner; marginX: number; marginY: number };
   /** **实例级人设**（可选，`pets[].whisperPrompt`）：碎碎念与对话共用的系统提示词正文。
    *  写了就**取代**所属条目顶层那一份（替换，不是拼接）；没写/空串 = 回落条目。回落发生在
@@ -188,10 +177,8 @@ export interface FontConfig {
 export interface ClientConfig {
   /** 系统通知总开关：true=对话完成/生成失败/输出截断/权限申请/用户选择时弹出系统通知；缺失即配置错误 */
   notificationsEnabled: boolean;
-  /** 桌面模式系统托盘开关：true=桌面端启动后在通知区域（macOS 为菜单栏）建托盘——列出配置里
-   *  **全部**宠物（含 display 为 web/none 的），勾选即可切回桌面；false=不建。
-   *  缺失默认 true（内置默认开启）。仅影响桌面模式；关掉后「把不在桌面的宠物叫回桌面」在桌面侧
-   *  没有入口，只能开浏览器用设置页或网页端宠物的右键菜单。 */
+  /** 桌面模式系统托盘开关：true=桌面端启动后在通知区域（macOS 为菜单栏）建托盘（开机自启 / 退出）；
+   *  false=不建。缺失默认 true（内置默认开启）。仅影响桌面模式。 */
   trayEnabled: boolean;
   /** 碎碎念配图开关：true=碎碎念每次从表情包池随机抽 1 张连同文本显示（碎碎念无上下文，故随机） */
   whisperImageEnabled: boolean;

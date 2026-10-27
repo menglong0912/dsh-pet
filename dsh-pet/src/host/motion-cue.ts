@@ -50,7 +50,7 @@ const positionMode = (v: unknown): PositionMode | null =>
  *
  * 收紧前这里是 `requested || active || 'main'`：`active` 是"当前桌宠" = **有效宠物列表第一只**，
  * 而那个落点是用户 /pet 操作的函数——同一句不带 pet 的调用，落点会随用户操作而变，调用方无从
- * 预期。所以整条缺省链已删除，pet 与 /pet-display 的 `id` 一样是必填项。
+ * 预期。所以整条缺省链已删除，pet 必填。
  */
 function resolvePet(
   cfg: Record<string, Record<string, unknown>>,

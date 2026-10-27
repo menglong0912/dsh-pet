@@ -77,22 +77,8 @@ export function configPathsFor(root: string, home: string): ConfigPaths {
   };
 }
 
-/** 宠物列表的展示串：`display` 原样打印，由用户确认（独立模式不替用户改配置） */
+/** 宠物列表的展示串：id + size 原样打印，由用户确认（独立模式不替用户改配置） */
 export function describePets(pets: Record<string, unknown>[]): string {
   if (pets.length === 0) return '（没有宠物：配置里 pets 为空）';
-  return pets
-    .map((pet) => `${String(pet.id ?? '?')}(size=${String(pet.size ?? '?')}, display=${String(pet.display ?? '?')})`)
-    .join('  ');
-}
-
-/**
- * 该实例是否会出现在桌面（`display` 含 desktop/both）。
- *
- * 口径来源是 `src/host/index.ts` 的 `isDesktopVisible`（那里是模块内 const、未导出），
- * 独立模式只是为了**打印提示**才知道这条规则，不参与渲染决策（渲染由插件自己判断），
- * 因此这里保留一份最小镜像；规则若变，测试与提示文案会露出来。
- */
-export function isDesktopVisible(pet: Record<string, unknown>): boolean {
-  const display = pet.display;
-  return display === 'desktop' || display === 'both';
+  return pets.map((pet) => `${String(pet.id ?? '?')}(size=${String(pet.size ?? '?')})`).join('  ');
 }

@@ -149,8 +149,8 @@ function emitPetBounds(payload: Record<string, number>): void {
 function petNameIn(home: string): string {
   try {
     const pets = flattenPetList(readAllConfig(configPathsFor(packageRoot, home)));
-    const desktop = pets.find((pet) => pet.display === 'desktop' || pet.display === 'both') ?? pets[0];
-    return String(desktop?.name ?? '') || '桌宠';
+    const target = pets.find((pet) => String(pet.id) === 'main') ?? pets[0];
+    return String(target?.name ?? '') || '桌宠';
   } catch {
     return '桌宠';
   }
@@ -381,17 +381,14 @@ test('看屏幕：说出来的话记进今天的宠物日记，没说出来的�
     await features.lookAtScreen(true);
     assert.deepEqual(screenEvents(home), ['看了一眼主人的屏幕，说：「主人在写代码呀」']);
   });
-  await withFeatures(
-    { broadcast: { ok: false, reason: 'pet-not-displayed' } },
-    async (features, _said, _bodies, home) => {
-      await features.lookAtScreen(true);
-      assert.deepEqual(screenEvents(home), []);
-    },
-  );
+  await withFeatures({ broadcast: { ok: false, reason: 'generate-error' } }, async (features, _said, _bodies, home) => {
+    await features.lookAtScreen(true);
+    assert.deepEqual(screenEvents(home), []);
+  });
 });
 
-test('看屏幕：宠物被隐藏、插件拒绝说话时如实报失败', async () => {
-  await withFeatures({ broadcast: { ok: false, reason: 'pet-not-displayed' } }, async (features) => {
+test('看屏幕：插件拒绝说话时如实报失败', async () => {
+  await withFeatures({ broadcast: { ok: false, reason: 'generate-error' } }, async (features) => {
     assert.deepEqual(await features.lookAtScreen(true), { ok: false, text: '主人在写代码呀', reason: 'say-failed' });
   });
 });

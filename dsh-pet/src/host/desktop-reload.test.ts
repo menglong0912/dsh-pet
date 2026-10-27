@@ -6,7 +6,7 @@
  * 菜单项「重载配置」把这条路径显式暴露出来（重载是桌面专属）。
  *
  * 为什么必须走「宿主重启 Helper」而不是渲染端就地重拉配置：
- *   ① 每只桌面宠物一个窗口，是宿主启动时按 DSH_PET_PETS 建的——就地重拉改不了宠物数量 / display / size；
+ *   ① 每只桌面宠物一个窗口，是宿主启动时按 DSH_PET_PETS 建的——就地重拉改不了宠物数量 / size；
  *   ② 本页的工作状态等全局轮询由 events.js 的 loopsStarted 一次性启动，
  *      就地重建 sprite 会漏启新循环（新宠物没有碎碎念/广播轮询）或留下旧定时器。
  * 因此「重载」必须复用 syncDesktop()（串行队列 + 等旧进程真正退出），不得自己实现一套停/起。
@@ -54,9 +54,9 @@ describe('桌面端「重载配置」—— 菜单 → 宿主重启 Helper', () 
     );
   });
 
-  test('syncDesktop 是唯一的重启入口：两个 /config 写接口、/reload 与 /pet-display 都走它', () => {
+  test('syncDesktop 是唯一的重启入口：两个 /config 写接口与 /reload 都走它', () => {
     const calls = host.match(/void syncDesktop\(\)/g) ?? [];
-    assert.equal(calls.length, 4, 'PUT /config、POST /config、POST /reload、POST /pet-display 都应走 syncDesktop()');
+    assert.equal(calls.length, 3, 'PUT /config、POST /config、POST /reload 都应走 syncDesktop()');
   });
 
   test('shared 菜单契约放行 reload（桌面壳注入该动作，类型必须包含它）', () => {

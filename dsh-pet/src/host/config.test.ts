@@ -35,7 +35,6 @@ const BASE = {
       whisperEnabled: false,
       workStatusEnabled: false,
       fixedEnabled: false,
-      display: 'web',
       position: { corner: 'bottom-right', marginX: 40, marginY: 40 },
     },
   ],
@@ -535,7 +534,7 @@ describe('readAllConfig —— 实例级人设 whisperPrompt（实例覆盖 / �
   });
 
   test('没写 → 结果里**没有**该键（回落条目由消费端做，合并器不填生效值）', () => {
-    // 合并器一旦把条目人设填进每只实例，/pet-display（拿合并结果回调 saveUserConfig 写盘）
+    // 合并器一旦把条目人设填进每只实例，设置页保存（拿合并结果回调 saveUserConfig 写盘）
     // 就会把"跟随条目"固化成显式覆盖，之后改条目人设这些实例不再跟着变——这条钉住它。
     const pet = petAt(readAllConfig(withBase({})));
     assert.equal('whisperPrompt' in pet, false);
@@ -600,7 +599,7 @@ describe('saveUserConfig —— 实例级人设 whisperPrompt（白名单 + 清�
     assert.equal(saveOnce({ pets: [{ ...PETS[0], whisperPrompt: 42 }] }), null);
   });
 
-  test('/pet-display 式往返：合并结果直接喂回 save，人设不丢（也不会被写成空串）', () => {
+  test('设置页保存式往返：合并结果直接喂回 save，人设不丢（也不会被写成空串）', () => {
     const merged = readAllConfig(withBase({}, { pets: [{ ...BASE.pets[0], whisperPrompt: '我是猫娘' }] }));
     const layerPets = merged.main.pets as Record<string, unknown>[];
     assert.equal(petAt(saveOnce({ pets: layerPets })).whisperPrompt, '我是猫娘');
@@ -955,7 +954,6 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
         id: 'pig1',
         name: '小猪',
         size: 300,
-        display: 'web',
         position: { corner: 'top-left', marginX: 10, marginY: 10 },
       },
     ],
@@ -1133,7 +1131,6 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
       whisperEnabled: true,
       workStatusEnabled: false,
       fixedEnabled: false,
-      display: 'web',
       position: { corner: 'bottom-right', marginX: 40, marginY: 40 },
       ...extra,
     });
@@ -1141,7 +1138,6 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
       id: 'pig1',
       name: '小猪',
       size: 300,
-      display: 'web',
       position: { corner: 'top-left', marginX: 10, marginY: 10 },
       ...extra,
     });
@@ -1185,6 +1181,37 @@ describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类
       const onlyOld = merged({ overlay: { eventsRefreshSec: { balance: 900 } }, pack: PACK });
       assert.deepEqual(onlyOld.main.eventsRefreshSec, {});
       assert.deepEqual(onlyOld.pig.eventsRefreshSec, {});
+    });
+  });
+
+  // ---- D3 旧配置兼容（任务书 §3.3）：删掉的 display 字段照常加载、直接忽略 ----
+  describe('D3 已删的 display 字段 —— 旧配置照常加载', () => {
+    const OLD_DISPLAYS = ['web', 'desktop', 'both', 'none'] as const;
+    const packPet: Record<string, unknown> = {
+      id: 'pig1',
+      name: '小猪',
+      size: 300,
+      position: { corner: 'top-left', marginX: 10, marginY: 10 },
+    };
+
+    for (const value of OLD_DISPLAYS) {
+      test(`pets[].display: '${value}'：用户层照常加载、直接忽略（结果与不写时一致）`, () => {
+        const without = merged({ overlay: { pets: [{ ...BASE.pets[0] }] }, pack: PACK });
+        const withOld = merged({ overlay: { pets: [{ ...BASE.pets[0], display: value }] }, pack: PACK });
+        assert.deepEqual(withOld, without);
+        const mainPets = withOld.main.pets as Record<string, unknown>[];
+        assert.equal('display' in rec(mainPets[0]), false, '成品里不得出现已删字段');
+      });
+    }
+
+    test('文件宠物（pet/<名>-config.json）里带旧 display 也照常加载、直接忽略', () => {
+      const without = merged({ pack: { pets: [{ ...packPet }] } });
+      for (const value of OLD_DISPLAYS) {
+        const withOld = merged({ pack: { pets: [{ ...packPet, display: value }] } });
+        assert.deepEqual(withOld, without, value);
+        const pigPets = withOld.pig.pets as Record<string, unknown>[];
+        assert.equal('display' in rec(pigPets[0]), false, '成品里不得出现已删字段');
+      }
     });
   });
 });

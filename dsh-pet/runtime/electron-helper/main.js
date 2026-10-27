@@ -375,9 +375,9 @@ const offBodyMs = new Map();
  * 桌面宠物列表（[{id,size}]）：宿主经 DSH_PET_PETS 透传（每只宠物一个窗口）。
  * 解析失败/未透传（手动 start-desktop）时回落到单个默认宠物窗口；renderer 首帧发来的
  * set-bounds 会按真实配置自校正尺寸与位置。
- * **空数组是合法输入，不等于「未透传」**：宿主在「桌面宠物被全部关掉、但 Helper 仍需活着
+ * **空数组是合法输入，不等于「未透传」**：宿主在「配置里没有宠物、但 Helper 仍需活着
  * 托住托盘」时会明确传 []（见 src/host/index.ts 的 desktopModeEverActive），此时必须建
- * 0 个窗口——回落成默认窗口会让渲染端读到「没有 desktop/both 宠物」并弹出红色错误条。
+ * 0 个窗口——回落成默认窗口会让渲染端读到「没有宠物」并弹出红色错误条。
  */
 function petsFromEnv() {
   try {
@@ -673,16 +673,12 @@ async function handleBridgeRequest(request) {
   return new Response(resp.body ?? '', { status: resp.status || 200, headers });
 }
 
-// ---------- 系统托盘：桌面端显示开关 ----------
-// 为什么托盘放在本进程：它是桌面模式唯一「不进浏览器」的入口。某只宠物的 display 被改成
-// web/none 之后，它在桌面上就没有窗口了，**它自己的右键菜单也跟着消失**；托盘是此时唯一还能
-// 在桌面侧把它切回桌面的地方（宿主的设置页要开浏览器，网页端宠物的右键菜单也得先开浏览器）。
+// ---------- 系统托盘（开机自启 / 退出） ----------
+// 为什么托盘放在本进程：它是桌面模式唯一「不进浏览器」的入口（退出应用、开机自启）。
 // 但它不是非有不可：main 条目的 `trayEnabled` 为 false 时不建托盘（默认 true，见下 startTray）。
 // 这种情况下宿主也不会为它常驻——判据是 desktopModeEverActive && trayEnabled（src/host/index.ts）：
 // 托盘关掉后已经没有需要保住的东西，让本进程活着只是白烧一个空进程。
-// 数据不新增任何通道：读配置与写回都走渲染端在用的同一条 bridge（手动 start-desktop 流退回 HTTP）。
-// 菜单是静态的，但每次切换 display 都会让宿主重启本进程（syncDesktop），新进程按新配置重建菜单，
-// 所以这里不需要任何「重建菜单刷新勾选」的逻辑。
+// 数据不新增任何通道：读配置走渲染端在用的同一条 bridge（手动 start-desktop 流退回 HTTP）。
 
 const PET_ROUTE = '/dsh-pet-7340';
 const ORIGIN = new URL(process.env.DSH_PET_CONFIG_URL || 'http://127.0.0.1:3080/dsh-pet-7340/config').origin;
@@ -699,20 +695,7 @@ async function hostRequest(method, url, body) {
   return { status: resp.status, body: await resp.text() };
 }
 
-const isDesktopDisplay = (display) => display === 'desktop' || display === 'both';
-
-/** 翻转「桌面位」：both↔web、desktop↔none——浏览器位保持不动，因此不制造新的单向门 */
-const toggleDisplay = (display) =>
-  display === 'both' ? 'web' : display === 'web' ? 'both' : display === 'desktop' ? 'none' : 'desktop';
-
 let tray = null;
-
-/** 写回某只宠物的 display：宿主写完配置会重启本进程，响应可能永远不回（同 sprite.js 的 setPetDisplay） */
-function traySetPetDisplay(id, display) {
-  hostRequest('POST', PET_ROUTE + '/pet-display', JSON.stringify({ id, display })).catch((e) => {
-    console.error('[dsh-pet-desktop-helper] tray pet-display failed:', String(e && e.message ? e.message : e));
-  });
-}
 
 /** 托盘图标：包内 logo 缩到 16×16（macOS 要模板图，否则深色菜单栏下看不见） */
 function trayIcon() {
@@ -729,8 +712,7 @@ function trayIcon() {
 }
 
 /**
- * 建托盘：列出**配置里全部**宠物（含 display 为 web/none 的——它们当前不在桌面上、勾是空的，
- * 点一下就能送回来，这是托盘相对宠物右键菜单的增量）。勾 = 当前 display 含 desktop/both。
+ * 建托盘：只放全局开关（开机自启 / 退出），不再列宠物——每只宠物都显示在桌面上，没有「显示位置」可切。
  */
 async function startTray() {
   try {
@@ -742,35 +724,13 @@ async function startTray() {
     const merged = JSON.parse(resp.body || '{}');
     // 托盘开关（main 条目的 trayEnabled）：只有**显式 false** 才不建——缺失或写坏时保持建，
     // 免得一份老配置/一个错值让托盘无声消失（非法值的告警由宿主读取侧统一报）。
-    // 与下面的 pets 取自同一份成品配置，不新增任何通道。
     if (merged && merged.main && merged.main.trayEnabled === false) return;
-    // 成品聚合的形状是 { <条目>: <整份配置文档> }——**顶层键不是宠物**，宠物在各条目的
-    // `pets` 数组里。与渲染端同一契约（renderer.js 的 loadConfig → S.flattenConfigPets，
-    // 规则源码见 src/shared/config.ts:26）。托盘只要 id/name/display，故不吹条目级字段。
-    // 踩过的坑：把条目本身当宠物读 → name/display 恒为 undefined → 标题回落成 id（菜单只剩
-    // 一个条目）、勾选恒为未选中、点击恒提交 desktop（现象就是「显示与不显示没区别」）。
-    const pets = Object.values(merged)
-      .flatMap((conf) => (conf && Array.isArray(conf.pets) ? conf.pets : []))
-      .map((pet) => ({
-        id: String((pet && pet.id) || ''),
-        name: String((pet && pet.name) || '').trim(), // host 已保证 name 缺失时回落 id
-        display: String((pet && pet.display) || ''),
-      }))
-      .filter((pet) => pet.id);
-    if (!pets.length) return; // 配置里没有任何宠物：没有可切换的对象，不建托盘
     tray = new Tray(trayIcon());
     tray.setToolTip('dsh-pet 桌面宠物');
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        ...pets.map((pet) => ({
-          label: pet.name || pet.id,
-          type: 'checkbox',
-          checked: isDesktopDisplay(pet.display),
-          click: () => traySetPetDisplay(pet.id, toggleDisplay(pet.display)),
-        })),
         ...(APP_MODE
           ? [
-              { type: 'separator' },
               // 开机自启 = 系统登录项；勾选状态每次建菜单时从系统读，用户在系统设置里删掉也能如实反映
               {
                 label: '开机自启',
@@ -1254,7 +1214,7 @@ app.whenReady().then(() => {
 });
 
 // 退出时销毁托盘图标：不销毁会在 Windows 通知区留下「幽灵图标」（鼠标划过才消失）。
-// 注意宿主改 display 时是 SIGTERM/SIGKILL 硬杀（helper-process.ts），Windows 上那是
+// 注意宿主改配置时是 SIGTERM/SIGKILL 硬杀（helper-process.ts），Windows 上那是
 // TerminateProcess、拦不到，所以这条只覆盖优雅退出（窗口全关、宿主存活探测判定退出等）。
 app.on('before-quit', () => {
   if (!tray) return;

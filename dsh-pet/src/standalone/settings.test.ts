@@ -314,7 +314,7 @@ test('settings browser script shows and saves the app section when the app serve
   assert.equal(saved(), before, '超过 20 项也没有发出去');
 });
 
-test('settings browser script edits the first desktop pet and shows one automatic-whisper switch', async () => {
+test('settings browser script edits the main pet and shows one automatic-whisper switch', async () => {
   const { runInNewContext } = await import('node:vm');
   type Element = Record<string, unknown> & {
     value: string;
@@ -346,7 +346,7 @@ test('settings browser script edits the first desktop pet and shows one automati
     return elements.get(id)!;
   };
   const position = { corner: 'top-left', marginX: 24, marginY: 100 };
-  const webPet = { id: 'web1', name: '网页', size: 300, display: 'web', position };
+  const webPet = { id: 'web1', name: '网页', size: 300, position };
   const config = {
     main: {
       whisperPrompt: '默认人设',
@@ -359,7 +359,6 @@ test('settings browser script edits the first desktop pet and shows one automati
           id: 'main',
           name: '吃白饭的',
           size: 500,
-          display: 'desktop',
           whisperEnabled: false,
           workStatusEnabled: true,
           fixedEnabled: false,
@@ -390,7 +389,7 @@ test('settings browser script edits the first desktop pet and shows one automati
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(element('pet-settings').hidden, false);
-  // 改的是第一只桌面宠物，不是列表里的第一只
+  // 改的是 id=main 的那只，不是列表里的第一只
   assert.equal(element('petName').value, '吃白饭的');
   assert.equal(element('petSize').value, '500');
   assert.equal(element('petPersona').value, '', '没有自己的人设：框里留空，灰字是默认人设');
