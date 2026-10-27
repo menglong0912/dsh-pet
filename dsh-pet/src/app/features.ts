@@ -1916,6 +1916,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
           bounds: parked,
         }),
       fight: adventureShows.fight,
+      // 高光客串（Y5）：只开对手窗口，不打架
+      cameo: adventureShows.cameo,
       skipFight: skipTrial,
       play: (anim) => void playExtra(anim),
       say: (text, options) => void say(text, options),

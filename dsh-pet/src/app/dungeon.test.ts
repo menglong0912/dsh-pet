@@ -420,3 +420,74 @@ test('Y0 数据：runSchema 能校验走了一趟的状态', () => {
   assert.ok(parsed.decisions.length > 0);
   assert.ok(parsed.seed.length === 64);
 });
+
+test('Y5 高光：改炼定仙游的 outcome 带过场和客串，结算和状态不变', () => {
+  const { pet, run } = fresh(41);
+  run.layer = 4;
+  run.step = 3;
+  run.attempt = 2;
+  run.readyAt = 0;
+  run.flags = { ...run.flags, road: 'dog', dogs: 4, remember: true };
+  run.pending = { node: 'ask-smelt', need: 'choice', options: [] };
+  run.snapshot = null;
+  const step = advance(DEF, run, pet, { kind: 'choice', node: 'ask-smelt', index: 0 }, 0);
+  assert.equal(step.outcome.result.kind, 'event');
+  if (step.outcome.result.kind !== 'event') assert.fail('该是一个奇遇结果');
+  assert.equal(step.outcome.result.cutscene?.video, '过场-天瀑光河.mp4');
+  assert.ok(step.outcome.result.cutscene?.lines[1].includes(pet.name), '原著里的「方源」换成宠物的名字');
+  assert.equal(step.outcome.result.cameo?.foe, 'feng-tianyu');
+  assert.equal(step.outcome.result.cameo?.art, '奇遇-风天语.png');
+  assert.equal(step.outcome.result.cameo?.lines.length, 3);
+  assert.equal(step.run.flags.smelt, 'dingxian');
+
+  // 把这两个字段摘掉再推进一步：状态和结算不该有任何变化
+  const node = SANWANG.nodes['ask-smelt'];
+  const choices = node.event?.choices ?? [];
+  const plain: DungeonDef = {
+    ...SANWANG,
+    nodes: {
+      ...SANWANG.nodes,
+      'ask-smelt': {
+        ...node,
+        event: {
+          ...node.event,
+          choices: choices.map((choice, index) =>
+            index === 0 ? { ...choice, outcome: { ...choice.outcome, cutscene: undefined, cameo: undefined } } : choice,
+          ),
+        },
+      },
+    },
+  };
+  const plainStep = advance(plain, structuredClone(run), pet, { kind: 'choice', node: 'ask-smelt', index: 0 }, 0);
+  assert.equal(JSON.stringify(plainStep.run), JSON.stringify(step.run), '过场只影响演出，不进状态');
+  assert.equal(plainStep.outcome.result.kind, 'event');
+});
+
+test('Y5 高光：定仙游结局带结局过场，第二空窍没有', () => {
+  const pet: Fighter = {
+    name: '小鱼',
+    hp: 100_000,
+    power: 100_000,
+    agility: 100_000,
+    speed: 100_000,
+    weapons: [],
+    skills: [],
+  };
+  const base = startRun(DEF, { pet, stage: 9, suppressed: false, nonce: 'ending', now: 0 });
+  base.layer = 5;
+  base.step = 0;
+  base.readyAt = 0;
+  base.flags = { ...base.flags, road: 'dog', dogs: 4, seen: true, smelt: 'dingxian' };
+  base.snapshot = null;
+  const ding = advance(DEF, base, pet, { kind: 'node', node: 'collapse' }, 0);
+  assert.equal(ding.outcome.result.kind, 'fight');
+  assert.equal(ding.outcome.end?.ending?.id, 'ding-xian-you');
+  assert.equal(ding.outcome.end?.ending?.cutscene?.video, '过场-定仙游.mp4');
+  assert.equal(ding.outcome.end?.ending?.cutscene?.lines.length, 3);
+
+  const second = structuredClone(base);
+  second.flags = { ...second.flags, seen: true, smelt: 'second' };
+  const done = advance(DEF, second, pet, { kind: 'node', node: 'collapse' }, 0);
+  assert.equal(done.outcome.end?.ending?.id, 'second-void');
+  assert.equal(done.outcome.end?.ending?.cutscene, undefined, '第二空窍没有过场');
+});

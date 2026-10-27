@@ -1,18 +1,23 @@
 /**
  * 历练小窗（历练路线 Y3）：右键「修炼/历练」打开，从选秘境、压境入关、走五层、倒带、结局到入账都在这里点完。
  *
- * 窗口照 `note-window.ts`：能拿焦点（主人主动点出来的），约 420×600，页面走本机服务的 `GET /app/adventure`。
+ * 窗口照 `note-window.ts`：能拿焦点（主人主动点出来的），约 760×520（工作区装不下按等比缩小），
+ * 页面走本机服务的 `GET /app/adventure`。
  * 主进程用 `executeJavaScript('adv.render(<JSON 字面量>)')` 送数据、`adv.wait()` 等主人点——
  * 页面只认一个答案，窗口关掉时当没选。页面显示一律 `textContent`；图片地址由主进程按数据里的名字拼成
  * `/pic/adventure/…`（逐段 `encodeURIComponent`），页面不拼路径。
+ *
+ * 版面（Y5）：左右两栏，左栏场景图 → 场景文字 → 选项，右栏地图 → 气血 → 加持 → 战利品；整页不滚，
+ * 只有选项特别多时选项区自己滚。等奇遇 / 加持 / 法宝 / 春秋蝉 / 两问时地图不接点击。
+ * 过场（Y5）：场景图位置播视频，原话一句一句淡入，播完或者主人点一下跳过再往下走。
  *
  * 位置在宠物旁边，和对手窗口相反的那一边；打起来时缩成屏顶一条（名字、气血、快进），打完再展开。
  * 标题栏可拖动（Y4）：拖过以后这次打开 app 期间都停在拖到的位置；拖出屏幕至少留标题栏可见。
  */
 import type { PetBox, Rect, WindowElectron, WindowLike } from './visit-windows';
 
-export const ADVENTURE_WIDTH = 420;
-export const ADVENTURE_HEIGHT = 600;
+export const ADVENTURE_WIDTH = 760;
+export const ADVENTURE_HEIGHT = 520;
 /** 打起来缩成的那一条 */
 export const ADVENTURE_COMPACT_WIDTH = 320;
 export const ADVENTURE_COMPACT_HEIGHT = 88;
@@ -105,6 +110,10 @@ export interface AdventureRunView {
   day: { label: string; cracks: number } | null;
   text: string[];
   choices: AdventureChoiceView[];
+  /** 只有在选下一个节点时地图才亮成能点的；等奇遇、加持、法宝、春秋蝉、两问时不接点击（Y5） */
+  mapClickable: boolean;
+  /** 小窗正在播过场：场景图位置播视频，原话一句一句淡入（Y5） */
+  cutscene: { lines: string[] } | null;
   loadout: AdventureLoadoutView | null;
   fullShow: boolean;
   /** 有能完整演的小怪 / 精英时，才给这个开关 */
@@ -158,7 +167,9 @@ export type AdventureAnswer =
   | { kind: 'retreat' }
   | { kind: 'toggle-full'; on: boolean }
   | { kind: 'again' }
-  | { kind: 'skip' };
+  | { kind: 'skip' }
+  /** 过场播完了（页面发的，不算主人的点击） */
+  | { kind: 'cutscene-done' };
 
 export interface AdventureWindow {
   /** 送一页数据进页面（JSON 字面量） */
@@ -181,11 +192,12 @@ export interface AdventureWindow {
 
 /**
  * 小窗的位置：宠物旁边，优先 `prefer` 那一边（调用方传与对手窗口相反的一边）；放不下换另一边。
- * 纵向贴着宠物脚底，放不下就夹进工作区。
+ * 纵向贴着宠物脚底，放不下就夹进工作区。Y5 加宽到 760×520，工作区装不下时按等比缩小。
  */
 export function adventureBounds(home: PetBox | null, workArea: Rect, prefer: 'left' | 'right'): Rect {
-  const width = Math.min(ADVENTURE_WIDTH, workArea.width);
-  const height = Math.min(ADVENTURE_HEIGHT, workArea.height);
+  const scale = Math.min(1, workArea.width / ADVENTURE_WIDTH, workArea.height / ADVENTURE_HEIGHT);
+  const width = Math.max(1, Math.round(ADVENTURE_WIDTH * scale));
+  const height = Math.max(1, Math.round(ADVENTURE_HEIGHT * scale));
   const clampX = (x: number): number => Math.min(Math.max(x, workArea.x), workArea.x + workArea.width - width);
   const clampY = (y: number): number => Math.min(Math.max(y, workArea.y), workArea.y + workArea.height - height);
   if (!home)
@@ -442,32 +454,36 @@ export const adventurePage = `<!doctype html>
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden;background:#f7f2e7;color:#2b2a26;font-family:"ShangshouSoftCandy","PingFang SC",sans-serif;-webkit-app-region:no-drag;user-select:none}
 body{display:flex;flex-direction:column}
-#bar{display:flex;align-items:center;gap:8px;padding:10px 14px;background:linear-gradient(#3c4a44,#2f3a35);color:#f7f2e7;flex:none;-webkit-app-region:drag}
+#bar{display:flex;align-items:center;gap:8px;padding:8px 14px;background:linear-gradient(#3c4a44,#2f3a35);color:#f7f2e7;flex:none;-webkit-app-region:drag}
 #bar button{-webkit-app-region:no-drag}
 #head{flex:1;min-width:0}
 #title{font-size:15px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #subtitle{font-size:11px;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #hide,#close{flex:none;width:24px;height:24px;border:0;border-radius:12px;background:rgba(255,255,255,.14);color:#f7f2e7;font-size:16px;line-height:24px;padding:0;cursor:pointer}
 #hide:hover,#close:hover{background:rgba(255,255,255,.26)}
-#autoRow{flex:none;padding:7px 14px;background:#efe6d4;border-bottom:1px solid #d9cdb5}
+#autoRow{flex:none;padding:5px 14px;background:#efe6d4;border-bottom:1px solid #d9cdb5}
 #autoRow[hidden]{display:none}
 #autoRow .switch{margin:0;font-size:12.5px;color:#4c463b}
-.page{flex:1;min-height:0;overflow:auto;padding:12px 14px 16px}
-h2{margin:4px 0 2px;font-size:20px}
-.title{margin:0 0 10px;color:#8a6d3b;font-size:13px}
+.page{flex:1;min-height:0;overflow:hidden;padding:10px 14px 12px}
+#entry[hidden],#ending[hidden],#run[hidden]{display:none}
+h2{margin:2px 0 2px;font-size:20px}
+.title{margin:0 0 8px;color:#8a6d3b;font-size:13px}
 .cover{width:100%;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:#2f3a35}
 .cover img{width:100%;height:100%;object-fit:cover;display:block}
-.opening{font-size:13px;line-height:1.65;margin:10px 0;white-space:pre-line}
+.opening{font-size:13px;line-height:1.65;margin:8px 0 0;white-space:pre-line}
 .seal{display:inline-block;margin:2px 0 8px;padding:3px 9px;border:2px solid #b23b32;border-radius:5px;color:#b23b32;font-size:12px;letter-spacing:2px;transform:rotate(-3deg)}
-.best{margin:6px 0;color:#4a5b52;font-size:12px}
-.endings{list-style:none;margin:6px 0 10px;padding:0;display:flex;gap:10px;flex-wrap:wrap;font-size:12px}
+.best{margin:5px 0;color:#4a5b52;font-size:12px}
+.endings{list-style:none;margin:4px 0 8px;padding:0;display:flex;gap:10px;flex-wrap:wrap;font-size:12px}
 .endings .seen{color:#2f6b46}
 .endings .unseen{color:#9a9384}
-.switch{display:flex;align-items:center;gap:7px;font-size:13px;margin:8px 0}
-.hint{font-size:11px;line-height:1.5;color:#7b7466;margin:2px 0 10px}
+.switch{display:flex;align-items:center;gap:7px;font-size:13px;margin:7px 0}
+.hint{font-size:11px;line-height:1.5;color:#7b7466;margin:2px 0 9px}
 button{font-family:inherit}
 .primary{width:100%;padding:9px 12px;border:0;border-radius:9px;background:#3f7d5a;color:#fff;font-size:14px;cursor:pointer}
 .primary:hover{background:#356b4c}
+#entry{display:flex;gap:14px;align-items:flex-start}
+.entryLeft{flex:1.18;min-width:0}
+.entryRight{flex:.82;min-width:0}
 #entry button.primary{margin-top:6px}
 #scene{position:relative;width:100%;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:#2f3a35;flex:none}
 #scene img,#scene video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
@@ -478,62 +494,74 @@ button{font-family:inherit}
 #travel i{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.24);overflow:hidden;position:relative}
 #travel i::after{content:"";position:absolute;inset:0;background:#e9c46a;transform-origin:left;animation:travel 15s linear forwards}
 @keyframes travel{from{transform:scaleX(0)}to{transform:scaleX(1)}}
-#map{position:relative;margin:10px 0 4px;padding:18px 4px 22px;background-color:#eee5d3;background-size:cover;background-position:center;border:1px solid #d9cdb5;border-radius:10px;flex:none}
+#cutSkip{position:absolute;right:8px;bottom:8px;z-index:3;display:none;padding:4px 10px;border:0;border-radius:7px;background:rgba(20,28,24,.72);color:#f4eddb;font-size:12px;cursor:pointer}
+body.cutscene #cutSkip{display:block}
+body.cutscene #scene{cursor:pointer}
+body.cutscene #choices,body.cutscene #loadout,body.cutscene #fullShowRow,body.cutscene #travel,body.cutscene #autoRow{display:none}
+body.cutscene #sceneText{flex:1;min-height:0;max-height:none;overflow:hidden;margin-top:2px}
+.cutLine{display:block;opacity:0;transition:opacity .45s}
+.cutLine.on{opacity:1}
+#full{display:flex;gap:10px;flex:1;min-height:0}
+#left{flex:0 0 54%;min-width:0;min-height:0;display:flex;flex-direction:column;gap:5px}
+#right{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:3px;overflow:hidden}
+#map{position:relative;margin:0;padding:8px 2px 12px;background-color:#eee5d3;background-size:cover;background-position:center;border:1px solid #d9cdb5;border-radius:10px;flex:none}
 #map::before{content:"";position:absolute;inset:0;border-radius:10px;background:rgba(247,242,231,.66);pointer-events:none}
 #mapLayers{display:flex;align-items:flex-start;justify-content:space-between;position:relative;z-index:1}
 .layer{flex:1;min-width:0;text-align:center;position:relative}
-.layer .layerName{font-size:10px;color:#8d8472;margin-bottom:4px;white-space:nowrap}
+.layer .layerName{font-size:9.5px;color:#8d8472;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .layer.done .layerName{color:#3f7d5a}
 .layer.current .layerName{color:#b23b32;font-weight:600}
 .layer.hidden .layerName{opacity:.5}
-.icons{display:flex;flex-direction:column;align-items:center;gap:5px;min-height:46px}
-.icon{width:34px;height:34px;padding:0;border:2px solid transparent;border-radius:9px;background:rgba(255,255,255,.72);cursor:default;overflow:hidden}
+.icons{display:flex;flex-direction:column;align-items:center;gap:4px;min-height:38px}
+.icon{width:28px;height:28px;padding:0;border:2px solid transparent;border-radius:8px;background:rgba(255,255,255,.72);cursor:default;overflow:hidden}
 .icon img{width:100%;height:100%;object-fit:contain;display:block}
 .icon.done{border-color:#8fbf9f;opacity:.72}
 .icon.now{border-color:#b23b32;cursor:pointer;box-shadow:0 0 0 2px rgba(178,59,50,.16)}
 .icon.now:hover{transform:translateY(-1px)}
 .icon.next{border-color:#c9b891}
 .icon.revealed{border-style:dashed;border-color:#b8a986}
-.icon.hidden{display:flex;align-items:center;justify-content:center;background:transparent;border:1px dashed #b9ae98;color:#9a8f7a;font-size:15px}
-#avatar{position:absolute;left:0;bottom:2px;width:25px;height:25px;object-fit:contain;filter:drop-shadow(0 1px 2px rgba(0,0,0,.25));pointer-events:none}
-.hp{margin:6px 0 6px}
+.icon.hidden{display:flex;align-items:center;justify-content:center;background:transparent;border:1px dashed #b9ae98;color:#9a8f7a;font-size:14px}
+#avatar{position:absolute;left:0;bottom:2px;width:22px;height:22px;object-fit:contain;filter:drop-shadow(0 1px 2px rgba(0,0,0,.25));pointer-events:none}
+.hp{margin:1px 0}
 .hpline{display:flex;justify-content:space-between;font-size:11px;color:#5c5548;margin-bottom:3px}
-.hpbar{height:9px;border-radius:5px;background:#ddd2bd;overflow:hidden}
+.hpbar{height:8px;border-radius:5px;background:#ddd2bd;overflow:hidden}
 #hpFill{height:100%;width:100%;background:linear-gradient(#78c08a,#3f7d5a);transition:width .3s}
-.chips{display:flex;gap:5px;flex-wrap:wrap;margin:4px 0 6px;min-height:0}
-.chip{display:flex;align-items:center;gap:4px;padding:2px 6px 2px 2px;border-radius:13px;background:#efe6d4;font-size:11px;color:#5c5548}
-.chip img{width:20px;height:20px;border-radius:5px;object-fit:cover}
-.rows{font-size:12px;color:#4c463b}
-.rows>div{display:flex;gap:7px;line-height:1.55}
-.rows .k{flex:none;color:#8d8472;min-width:44px}
+.chips{display:flex;gap:4px;flex-wrap:wrap;min-height:0}
+.chip{display:flex;align-items:center;gap:3px;padding:1px 5px 1px 1px;border-radius:12px;background:#efe6d4;font-size:10.5px;color:#5c5548}
+.chip img{width:18px;height:18px;border-radius:5px;object-fit:cover}
+.rows{font-size:11.5px;color:#4c463b;min-height:0}
+.rows>div{display:flex;gap:6px;line-height:1.45}
+.rows .k{flex:none;color:#8d8472;min-width:40px}
 .rows .v{flex:1;min-width:0;word-break:break-all}
-#ops{margin-top:8px}
-.cracks{display:flex;gap:3px;height:5px;margin-bottom:6px}
+.cracks{display:flex;gap:3px;height:4px;flex:none}
 .cracks span{flex:1;height:4px;border-radius:2px;background:#c9b891;transform:skewX(-18deg)}
-.sceneText{font-size:12.5px;line-height:1.6;margin:4px 0 8px;white-space:pre-line;min-height:2.4em}
-.choices{display:flex;flex-direction:column;gap:6px}
-.choices .choice{display:flex;align-items:center;gap:8px;width:100%;padding:7px 9px;border:1px solid #cdbfa6;border-radius:9px;background:#fffaf0;color:#332f28;font-size:13px;line-height:1.35;text-align:left;cursor:pointer}
+.sceneText{font-size:12.5px;line-height:1.55;margin:0;white-space:pre-line;min-height:2.2em;max-height:3.8em;overflow:hidden}
+.choices{display:flex;flex-direction:column;gap:5px;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:3px}
+.choices .choice{display:flex;align-items:center;gap:7px;width:100%;padding:6px 8px;border:1px solid #cdbfa6;border-radius:9px;background:#fffaf0;color:#332f28;font-size:12.5px;line-height:1.35;text-align:left;cursor:pointer;flex:none}
 .choices .choice:hover{border-color:#3f7d5a;background:#fff}
-.choices .choice img{width:26px;height:26px;object-fit:contain;flex:none}
+.choices .choice img{width:24px;height:24px;object-fit:contain;flex:none}
 .choices .choice .label{flex:1;min-width:0}
 .choices .choice .note{display:block;color:#8a816f;font-size:11px;margin-top:1px}
 .choices .choice.rewind{border-color:#b23b32;color:#8c2f28;background:#fff3ef}
 .choices .choice.end{color:#6b6254}
-.card{display:flex;gap:8px;align-items:center;width:100%;padding:7px;border:1px solid #cdbfa6;border-radius:10px;background:#fffaf0;text-align:left;cursor:pointer}
-.card img{width:46px;height:34px;object-fit:cover;border-radius:6px;flex:none}
-.card .label{font-size:12.5px}
-.card .note{display:block;color:#8a816f;font-size:11px;line-height:1.4;margin-top:2px}
-.loadout{margin:8px 0;padding:9px;border:1px solid #cdbfa6;border-radius:10px;background:#fffaf0}
+.card{display:flex;gap:8px;align-items:center;width:100%;padding:6px;border:1px solid #cdbfa6;border-radius:10px;background:#fffaf0;text-align:left;cursor:pointer;flex:none}
+.card img{width:42px;height:30px;object-fit:cover;border-radius:6px;flex:none}
+.card .label{font-size:12px}
+.card .note{display:block;color:#8a816f;font-size:10.5px;line-height:1.4;margin-top:2px}
+.loadout{margin:0;padding:8px;border:1px solid #cdbfa6;border-radius:10px;background:#fffaf0;max-height:100%;overflow:auto}
 #loadout[hidden]{display:none}
-.tactics{font-size:12px;line-height:1.5;color:#6b4b3a;margin:0 0 7px}
+.tactics{font-size:12px;line-height:1.5;color:#6b4b3a;margin:0 0 6px}
 .weapon{display:flex;align-items:center;gap:6px;font-size:12.5px;padding:3px 0}
 .weapon input{accent-color:#3f7d5a}
 .loadout .primary{margin-top:7px;font-size:13px;padding:7px}
-#fullShowRow{margin-top:8px}
+#fullShowRow{margin-top:2px;flex:none}
 .buttons{display:flex;gap:8px;margin-top:14px}
 .buttons button{flex:1;padding:9px 12px;border-radius:9px;border:1px solid #cdbfa6;background:#fffaf0;color:#332f28;font-size:13px;cursor:pointer}
 .buttons button.primary{background:#3f7d5a;border-color:#3f7d5a;color:#fff}
 .loot{list-style:none;margin:4px 0 0;padding:0;font-size:12.5px;line-height:1.8}
+#ending{display:flex;gap:16px;align-items:flex-start}
+.endingLeft{flex:1.1;min-width:0}
+.endingRight{flex:.9;min-width:0;display:flex;flex-direction:column}
 #compactbar{display:none;align-items:center;gap:8px;padding:8px 12px;background:#2f3a35;color:#f7f2e7;font-size:12.5px}
 #compactTitle{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #compactHp{flex:none;color:#e9c46a}
@@ -548,30 +576,24 @@ body.compact #full{display:none}
 <header id="bar"><div id="head"><div id="title"></div><div id="subtitle"></div></div><button id="hide" type="button" aria-label="收起">—</button><button id="close" type="button" aria-label="关掉">×</button></header>
 <div id="autoRow"><label class="switch"><input id="autoWalk" type="checkbox"> 自动走（每步替你选）</label></div>
 <div id="entry" class="page" hidden>
-  <div class="cover"><img id="cover" alt=""></div>
-  <p id="opening" class="opening"></p>
-  <div id="sealed" class="seal" hidden>原著印章</div>
-  <p id="best" class="best"></p>
-  <ul id="endings" class="endings"></ul>
-  <label class="switch"><input id="suppressed" type="checkbox"> 压境入内（修为 ×1.5）</label>
-  <p class="hint">照原著把法宝和招式全封住，只用这一王的一转蛊；四项属性最多到原著境界。</p>
-  <button id="enter" class="primary" type="button">进入</button>
+  <div class="entryLeft">
+    <div class="cover"><img id="cover" alt=""></div>
+    <p id="opening" class="opening"></p>
+  </div>
+  <div class="entryRight">
+    <div id="sealed" class="seal" hidden>原著印章</div>
+    <p id="best" class="best"></p>
+    <ul id="endings" class="endings"></ul>
+    <label class="switch"><input id="suppressed" type="checkbox"> 压境入内（修为 ×1.5）</label>
+    <p class="hint">照原著把法宝和招式全封住，只用这一王的一转蛊；四项属性最多到原著境界。</p>
+    <button id="enter" class="primary" type="button">进入</button>
+  </div>
 </div>
 <div id="run" class="page" hidden>
   <div id="compactbar"><span id="compactTitle"></span><span id="compactHp"></span><button id="skip" type="button">快进</button></div>
   <div id="full">
-    <div id="scene"><img id="sceneImg" alt=""><video id="sceneVideo" muted playsinline autoplay></video><div id="travel" hidden><span id="travelText">赶路中…</span><i></i></div></div>
-    <div id="map"><div id="mapLayers"></div><img id="avatar" alt=""></div>
-    <div class="hp"><div class="hpline"><span>气血</span><span id="hpText"></span></div><div class="hpbar"><div id="hpFill"></div></div></div>
-    <div id="blessings" class="chips"></div>
-    <div class="rows">
-      <div><span class="k">战利品</span><span id="loot" class="v"></span></div>
-      <div><span class="k">一转蛊</span><span id="gu" class="v"></span></div>
-      <div><span class="k">春秋蝉</span><span id="cicada" class="v"></span></div>
-      <div><span class="k">福地</span><span id="day" class="v"></span></div>
-    </div>
-    <div id="ops">
-      <div id="cracks" class="cracks"></div>
+    <div id="left">
+      <div id="scene"><img id="sceneImg" alt=""><video id="sceneVideo" muted playsinline autoplay></video><div id="travel" hidden><span id="travelText">赶路中…</span><i></i></div><button id="cutSkip" type="button">跳过</button></div>
       <p id="sceneText" class="sceneText"></p>
       <div id="choices" class="choices"></div>
       <div id="loadout" class="loadout" hidden>
@@ -581,20 +603,40 @@ body.compact #full{display:none}
       </div>
       <label class="switch" id="fullShowRow"><input id="fullShow" type="checkbox"> 完整演出（小怪、精英）</label>
     </div>
+    <div id="right">
+      <div id="cracks" class="cracks"></div>
+      <div id="map"><div id="mapLayers"></div><img id="avatar" alt=""></div>
+      <div class="hp"><div class="hpline"><span>气血</span><span id="hpText"></span></div><div class="hpbar"><div id="hpFill"></div></div></div>
+      <div id="blessings" class="chips"></div>
+      <div class="rows">
+        <div><span class="k">战利品</span><span id="loot" class="v"></span></div>
+        <div><span class="k">一转蛊</span><span id="gu" class="v"></span></div>
+        <div><span class="k">春秋蝉</span><span id="cicada" class="v"></span></div>
+        <div><span class="k">福地</span><span id="day" class="v"></span></div>
+      </div>
+    </div>
   </div>
 </div>
 <div id="ending" class="page" hidden>
-  <h2 id="endingName"></h2>
-  <p id="endingTitle" class="title"></p>
-  <p id="endingText" class="opening"></p>
-  <p class="best">这一趟的收获</p>
-  <ul id="endingLoot" class="loot"></ul>
-  <div class="buttons"><button id="again" class="primary" type="button">再来一趟</button><button id="endingClose" type="button">关掉</button></div>
+  <div class="endingLeft">
+    <h2 id="endingName"></h2>
+    <p id="endingTitle" class="title"></p>
+    <p id="endingText" class="opening"></p>
+  </div>
+  <div class="endingRight">
+    <p class="best">这一趟的收获</p>
+    <ul id="endingLoot" class="loot"></ul>
+    <div class="buttons"><button id="again" class="primary" type="button">再来一趟</button><button id="endingClose" type="button">关掉</button></div>
+  </div>
 </div>
 <script>
 'use strict';
 var settle = null;
 var travelTimer = null;
+var cutLineTimer = null;
+var cutEndTimer = null;
+var cutGeneration = 0;
+var lastChoices = '';
 function byId(id){ return document.getElementById(id); }
 function setText(id, text){ byId(id).textContent = text === undefined || text === null ? '' : String(text); }
 function clear(node){ node.replaceChildren(); }
@@ -604,6 +646,19 @@ function show(which){
   byId('entry').hidden = which !== 'entry';
   byId('run').hidden = which !== 'run';
   byId('ending').hidden = which !== 'ending';
+}
+function stopCutscene(){
+  cutGeneration += 1;
+  if (cutLineTimer) { clearTimeout(cutLineTimer); cutLineTimer = null; }
+  if (cutEndTimer) { clearTimeout(cutEndTimer); cutEndTimer = null; }
+  document.body.classList.remove('cutscene');
+  var video = byId('sceneVideo');
+  video.onended = null;
+  video.onerror = null;
+  var skip = byId('cutSkip');
+  skip.hidden = true;
+  skip.onclick = null;
+  byId('scene').onclick = null;
 }
 function renderEntry(view){
   var entry = view.entry;
@@ -620,9 +675,9 @@ function renderEntry(view){
   }
   byId('suppressed').checked = entry.suppressed === true;
 }
-function renderMap(view){
-  var map = view.map;
-  byId('map').style.backgroundImage = view.mapArt ? 'url("' + view.mapArt + '")' : '';
+function renderMap(run, clickable){
+  var map = run.map;
+  byId('map').style.backgroundImage = run.mapArt ? 'url("' + run.mapArt + '")' : '';
   var wrap = byId('mapLayers'); clear(wrap);
   for (var i = 0; i < map.layers.length; i += 1) {
     var layer = map.layers[i];
@@ -633,11 +688,14 @@ function renderMap(view){
     for (var j = 0; j < layer.nodes.length; j += 1) {
       var node = layer.nodes[j];
       if (node.state === 'hidden') { icons.append(el('div', 'icon hidden', '？')); continue; }
-      var button = el('button', 'icon ' + node.state);
+      // 等选项的时候地图不亮成能点的样子，也不接点击（Y5）；只有真在选下一个节点时才亮
+      var canClick = node.state === 'now' && clickable;
+      var cls = 'icon ' + (node.state === 'now' && !clickable ? 'next' : node.state);
+      var button = el('button', cls);
       button.type = 'button';
       button.title = node.name;
       var img = el('img'); img.src = node.icon; img.alt = node.name; button.append(img);
-      if (node.state === 'now') {
+      if (canClick) {
         (function(id){ button.addEventListener('click', function(){ answer({ kind: 'node', node: id }); }); })(node.id);
       }
       icons.append(button);
@@ -646,7 +704,7 @@ function renderMap(view){
     wrap.append(box);
   }
   var avatar = byId('avatar');
-  avatar.src = view.avatar;
+  avatar.src = run.avatar;
   var layers = wrap.children;
   function centerOf(index){
     var mapBox = byId('map').getBoundingClientRect();
@@ -658,16 +716,16 @@ function renderMap(view){
     return 0;
   }
   var current = map.travel ? map.travel.to : map.current;
-  avatar.style.width = '25px'; avatar.style.height = '25px';
+  avatar.style.width = '22px'; avatar.style.height = '22px';
   if (map.travel && map.travel.ms > 0) {
     avatar.style.transition = 'none';
-    avatar.style.left = (centerOf(map.travel.from) - 12) + 'px';
+    avatar.style.left = (centerOf(map.travel.from) - 11) + 'px';
     void avatar.offsetWidth;
     avatar.style.transition = 'left ' + map.travel.ms + 'ms linear';
-    avatar.style.left = (centerOf(map.travel.to) - 12) + 'px';
+    avatar.style.left = (centerOf(map.travel.to) - 11) + 'px';
   } else {
     avatar.style.transition = 'none';
-    avatar.style.left = (centerOf(current) - 12) + 'px';
+    avatar.style.left = (centerOf(current) - 11) + 'px';
   }
 }
 function renderTravel(run){
@@ -684,8 +742,75 @@ function renderTravel(run){
     setText('travelText', '赶路中… ' + left + ' 秒');
   }, 1000);
 }
+function renderCutscene(run, cut){
+  var gen = ++cutGeneration;
+  var lines = cut.lines || [];
+  var video = byId('sceneVideo');
+  var img = byId('sceneImg');
+  var scene = byId('scene');
+  var skip = byId('cutSkip');
+  var text = byId('sceneText');
+  var shown = 0;
+  var videoDone = false;
+  var finished = false;
+  document.body.classList.add('cutscene');
+  clear(text);
+  if (run.scene.poster) {
+    img.src = run.scene.poster;
+    img.hidden = false;
+    img.classList.add('on');
+  } else img.hidden = true;
+  skip.hidden = false;
+  // 视频卡住也不把流程永远挂在过场里：30 秒后当播完
+  cutEndTimer = setTimeout(function(){ finish('cutscene-done'); }, 30000);
+  function finish(kind){
+    if (finished || gen !== cutGeneration) return;
+    finished = true;
+    if (cutLineTimer) { clearTimeout(cutLineTimer); cutLineTimer = null; }
+    if (cutEndTimer) { clearTimeout(cutEndTimer); cutEndTimer = null; }
+    answer({ kind: kind });
+  }
+  function maybeFinish(delay){
+    if (finished || gen !== cutGeneration) return;
+    if (!videoDone || shown < lines.length) return;
+    if (cutEndTimer) clearTimeout(cutEndTimer);
+    cutEndTimer = setTimeout(function(){ finish('cutscene-done'); }, delay);
+  }
+  function videoDoneNow(){
+    if (videoDone) return;
+    videoDone = true;
+    video.hidden = true;
+    maybeFinish(500);
+  }
+  function showNext(){
+    if (finished || gen !== cutGeneration) return;
+    if (shown >= lines.length) { maybeFinish(600); return; }
+    var line = el('span', 'cutLine', lines[shown]);
+    text.append(line);
+    requestAnimationFrame(function(){ line.classList.add('on'); });
+    shown += 1;
+    if (shown < lines.length) cutLineTimer = setTimeout(showNext, 1100);
+    else maybeFinish(700);
+  }
+  if (run.scene.video) {
+    video.hidden = false;
+    video.onended = function(){ if (gen !== cutGeneration) return; videoDoneNow(); };
+    video.onerror = function(){ if (gen !== cutGeneration) return; videoDoneNow(); };
+    video.src = run.scene.video;
+    video.play().catch(function(){ if (gen === cutGeneration) videoDoneNow(); });
+  } else {
+    video.pause();
+    video.removeAttribute('src');
+    videoDoneNow();
+  }
+  if (lines.length) cutLineTimer = setTimeout(showNext, 200);
+  else maybeFinish(200);
+  skip.onclick = function(event){ if (event) event.stopPropagation(); finish('skip'); };
+  scene.onclick = function(){ finish('skip'); };
+}
 function renderRun(view){
   var run = view.run;
+  stopCutscene();
   setText('compactTitle', view.title + (view.subtitle ? ' · ' + view.subtitle : ''));
   setText('compactHp', '气血 ' + run.hp.now + ' / ' + run.hp.max);
   byId('skip').hidden = !run.canSkip;
@@ -695,36 +820,41 @@ function renderRun(view){
   img.onerror = function(){
     if (run.scene.fallback && img.src !== run.scene.fallback) img.src = run.scene.fallback;
   };
-  video.onerror = function(){
-    video.hidden = true;
-    var poster = run.scene.poster || run.scene.fallback;
-    if (poster) { img.src = poster; img.hidden = false; img.classList.add('on'); }
-  };
-  if (run.scene.video) {
-    video.hidden = false;
-    video.onended = function(){
-      video.hidden = true;
-      if (run.scene.poster) { img.src = run.scene.poster; img.hidden = false; img.classList.add('on'); }
-    };
-    video.src = run.scene.video;
-    video.play().catch(function(){});
-    if (run.scene.poster) { img.src = run.scene.poster; img.hidden = false; img.classList.add('on'); }
-    else { img.hidden = true; }
+  if (run.cutscene) {
+    renderCutscene(run, run.cutscene);
   } else {
-    video.onended = null;
-    video.pause();
-    video.hidden = true;
-    video.removeAttribute('src');
-    img.hidden = !run.scene.art;
-    if (run.scene.art) {
-      if (img.getAttribute('src') !== run.scene.art) {
-        img.classList.remove('on');
-        img.src = run.scene.art;
-        requestAnimationFrame(function(){ img.classList.add('on'); });
-      } else img.classList.add('on');
+    video.onerror = function(){
+      video.hidden = true;
+      var poster = run.scene.poster || run.scene.fallback;
+      if (poster) { img.src = poster; img.hidden = false; img.classList.add('on'); }
+    };
+    if (run.scene.video) {
+      video.hidden = false;
+      video.onended = function(){
+        video.hidden = true;
+        if (run.scene.poster) { img.src = run.scene.poster; img.hidden = false; img.classList.add('on'); }
+      };
+      video.src = run.scene.video;
+      video.play().catch(function(){});
+      if (run.scene.poster) { img.src = run.scene.poster; img.hidden = false; img.classList.add('on'); }
+      else { img.hidden = true; }
+    } else {
+      video.onended = null;
+      video.pause();
+      video.hidden = true;
+      video.removeAttribute('src');
+      img.hidden = !run.scene.art;
+      if (run.scene.art) {
+        if (img.getAttribute('src') !== run.scene.art) {
+          img.classList.remove('on');
+          img.src = run.scene.art;
+          requestAnimationFrame(function(){ img.classList.add('on'); });
+        } else img.classList.add('on');
+      }
     }
+    setText('sceneText', run.text.join('\\n'));
   }
-  renderMap(run);
+  renderMap(run, run.mapClickable === true);
   renderTravel(run);
   setText('hpText', run.hp.now + ' / ' + run.hp.max);
   byId('hpFill').style.width = Math.max(0, Math.min(100, Math.round(run.hp.now / Math.max(1, run.hp.max) * 100))) + '%';
@@ -741,7 +871,6 @@ function renderRun(view){
   setText('day', run.day ? run.day.label : '');
   var cracks = byId('cracks'); clear(cracks);
   for (var c = 0; c < (run.day ? run.day.cracks : 0); c += 1) cracks.append(el('span'));
-  setText('sceneText', run.text.join('\\n'));
   var choices = byId('choices'); clear(choices);
   for (var q = 0; q < run.choices.length; q += 1) {
     var choice = run.choices[q];
@@ -771,6 +900,11 @@ function renderRun(view){
     })({ kind: choice.kind, id: choice.id, node: choice.node, index: choice.index });
     choices.append(row);
   }
+  // 新选项出现时自动滚到第一个（挑法宝这种选项特别多的才需要滚）
+  var signature = run.choices.map(function(item){
+    return item.kind + ':' + (item.id || '') + ':' + (item.node || '') + ':' + (item.index === undefined ? '' : item.index) + ':' + (item.blessing || '');
+  }).join('|');
+  if (signature !== lastChoices) { byId('choices').scrollTop = 0; lastChoices = signature; }
   var loadout = byId('loadout');
   if (run.loadout) {
     loadout.hidden = false;
@@ -814,11 +948,12 @@ window.adv = {
     setText('subtitle', view.subtitle || '');
     show(view.kind);
     document.body.classList.remove('compact');
+    stopCutscene();
     byId('autoRow').hidden = view.kind === 'ending';
     byId('autoWalk').checked = view.auto === true;
-    if (view.kind === 'entry') renderEntry(view);
+    if (view.kind === 'entry') { lastChoices = ''; renderEntry(view); }
     else if (view.kind === 'run') renderRun(view);
-    else renderEnding(view);
+    else { lastChoices = ''; renderEnding(view); }
   },
   wait: function(){ return new Promise(function(resolve){ settle = resolve; }); },
   cancel: function(){ settle = null; },

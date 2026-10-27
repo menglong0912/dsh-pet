@@ -132,6 +132,23 @@ export interface CheckDef {
   dcShare?: number;
 }
 
+/** 过场：小窗场景图位置播的视频，和一句一句淡入的原著原话（`{pet}` 换成宠物名） */
+export interface CutsceneDef {
+  /** 相对 `assets/pic/adventure/<秘境目录>/` 的视频名 */
+  video: string;
+  lines: string[];
+  /** 小窗开着播这段过场时，宠物在桌面上同时冒这一句（比如定场诗的最后一联）；收起着时台词本来就改成冒泡，不再另说 */
+  say?: string;
+}
+
+/** 客串：桌面上开一个不打架的对手窗口（`foe` 是名册编号），台词照它的气泡冒 */
+export interface CameoDef {
+  foe: string;
+  lines: string[];
+  /** 小窗这一拍换的场景图（相对 `assets/pic/adventure/<秘境目录>/`） */
+  art?: string;
+}
+
 /** 一个奇遇选项的结算：全是声明式字段，通用跑图照着执行，不认识「驭犬蛊」「定仙游」 */
 export interface EventOutcome {
   text: NodeText;
@@ -151,6 +168,10 @@ export interface EventOutcome {
   skip?: boolean;
   /** 按撤退结算 */
   retreat?: boolean;
+  /** 选了这个选项以后，小窗先播这段过场（只影响演出，不参与结算） */
+  cutscene?: CutsceneDef;
+  /** 同时让一个不打架的角色上桌面客串（只影响演出，不参与结算） */
+  cameo?: CameoDef;
 }
 
 /** 奇遇的一个选项 */
@@ -260,6 +281,8 @@ export interface EndingDef {
   scrolls?: number;
   /** 结局页的宠物动作（定仙游的碧芒一闪） */
   anim?: string;
+  /** 赢了这个结局，先播过场再进结局页（只影响演出，不参与结算） */
+  cutscene?: CutsceneDef;
 }
 
 /** 秘境自己的规则全挂在这几个钩子上：通用跑图里不出现具体秘境的名字 */
@@ -494,7 +517,17 @@ export type OutcomeResult =
   | FightResult
   | { kind: 'chest'; success: boolean; reward: Loot; hpLost: number; text: string[]; anim?: string }
   | { kind: 'spring'; healed: number; hp: number; anim?: string }
-  | { kind: 'event'; text: string[]; reward?: Loot; hpLost?: number; fought?: FightResult; anim?: string }
+  | {
+      kind: 'event';
+      text: string[];
+      reward?: Loot;
+      hpLost?: number;
+      fought?: FightResult;
+      anim?: string;
+      /** 选了这个选项以后要播的过场 / 客串（Y5；只影响演出） */
+      cutscene?: CutsceneDef;
+      cameo?: CameoDef;
+    }
   | { kind: 'blessing'; blessing: BlessingId; name: string; text: string; card: string; anim?: string }
   | { kind: 'rewind'; layer: number; text: string[]; video: string }
   | {
@@ -565,6 +598,24 @@ export function checkChance(stat: number, dc: number): number {
 
 export function resolveText(text: NodeText, run: Run): string[] {
   return typeof text === 'function' ? text(run) : text;
+}
+
+/** 过场 / 客串的原话：`{pet}` 换成这一趟领队的名字（三王高光里把「方源」换成宠物） */
+function resolveLines(lines: string[], run: Run): string[] {
+  const name = selfMember(run).name;
+  return lines.map((line) => line.split('{pet}').join(name));
+}
+
+function resolveCutscene(cutscene: CutsceneDef, run: Run): CutsceneDef {
+  return {
+    video: cutscene.video,
+    lines: resolveLines(cutscene.lines, run),
+    ...(cutscene.say ? { say: resolveLines([cutscene.say], run)[0] } : {}),
+  };
+}
+
+function resolveCameo(cameo: CameoDef, run: Run): CameoDef {
+  return { foe: cameo.foe, lines: resolveLines(cameo.lines, run), ...(cameo.art ? { art: cameo.art } : {}) };
 }
 
 function emptyLoot(): Loot {
@@ -1095,6 +1146,8 @@ function applyOutcome(
     ...(hasLoot(reward) ? { reward } : {}),
     ...(hpLost > 0 ? { hpLost } : {}),
     ...(node.anim ? { anim: node.anim } : {}),
+    ...(outcome.cutscene ? { cutscene: resolveCutscene(outcome.cutscene, run) } : {}),
+    ...(outcome.cameo ? { cameo: resolveCameo(outcome.cameo, run) } : {}),
   };
   if (outcome.fight) {
     const fought = runFight(def, run, { ...node, kind: 'elite', foe: outcome.fight }, pet, {

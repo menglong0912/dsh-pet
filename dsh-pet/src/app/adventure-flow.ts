@@ -10,6 +10,9 @@
  *
  * 自动走（Y4）：开着时每个要选的地方等赶路走完再停 1.5 秒，然后照 `dungeon.autoDecide` 挑；这 1.5 秒里
  * 主人自己点了就按主人的。小窗可以收起（只藏起来，流程不停）和拖动（拖过的位置这次打开 app 期间记住）。
+ *
+ * 高光（Y5）：选了带 `cutscene` / `cameo` 的选项，小窗先播过场、桌面同时让客串角色冒几句，再往下走；
+ * 结局的 `cutscene` 在结局页之前播。小窗收起着时不播过场，台词改成宠物冒泡。
  */
 import {
   BLESSINGS,
@@ -26,7 +29,9 @@ import {
 } from './dungeon';
 import type {
   BlessingId,
+  CameoDef,
   Choice,
+  CutsceneDef,
   Decision,
   DungeonDef,
   EndingDef,
@@ -64,8 +69,14 @@ export interface AdventureProgress {
 
 export interface AdventureFightRequest {
   result: FightResult;
-  /** 完整演出（守护必开；小怪、精英看开关） */
+  /** 完整演出（守护必开；小怪、精英看开关，Y5 起默认开） */
   full: boolean;
+}
+
+/** 桌面客串：不打架的角色只露立绘、冒几句（Y5） */
+export interface AdventureCameoRequest {
+  foe: string;
+  lines: string[];
 }
 
 /** 自动走在一个要选的地方停多久，让主人看清有哪些选项 */
@@ -78,6 +89,8 @@ export interface AdventureFlowDeps {
   openWindow: (parked: Rect | null) => AdventureWindow;
   /** 演一场（速战或完整；返回时窗口、擂台、特效层已经收好） */
   fight: (request: AdventureFightRequest) => Promise<void>;
+  /** 让一个不打架的角色在桌面上客串（只露立绘、冒几句，不开擂台） */
+  cameo: (request: AdventureCameoRequest) => Promise<void>;
   /** 菜单「修炼/快进」或小窗上的快进 */
   skipFight: () => void;
   /** 宠物播一段秘境动作（`秘境-*`） */
@@ -171,7 +184,8 @@ export class AdventureFlow {
 
   constructor(deps: AdventureFlowDeps) {
     this.deps = deps;
-    this.fullShow = false;
+    // Y5：小怪、精英也默认完整演出；开关还在，关掉就是速战
+    this.fullShow = true;
   }
 
   /** 小窗开着（入口页、一趟里、结局页都算；收起来了也算，流程没停） */
@@ -586,11 +600,24 @@ export class AdventureFlow {
         this.scene = { ...(art ? { art } : {}), text: [`调息，气血 +${result.healed}（${result.hp}）`] };
         if (result.anim) this.deps.play(result.anim);
         return;
-      case 'event':
-        this.scene = { ...(art ? { art } : {}), text: result.text };
+      case 'event': {
+        const base: AdventureSceneView = { ...(art ? { art } : {}), text: result.text };
+        this.scene = base;
+        // 过场和客串同时开始（Y5）：过场在小窗场景图位置播，客串在桌面上冒台词
+        const cutscene = result.cutscene
+          ? this.playCutscene(run, result.cutscene, result.cameo?.art)
+          : Promise.resolve();
+        const cameo = result.cameo ? this.playCameo(result.cameo) : Promise.resolve();
+        await Promise.all([cutscene, cameo]);
+        if (this.stopped()) return;
+        this.scene = {
+          ...base,
+          ...(result.cameo?.art ? { art: dungeonAsset(this.deps.def, result.cameo.art) } : {}),
+        };
         if (result.fought) await this.showFight(run, result.fought);
         if (result.anim) this.deps.play(result.anim);
         return;
+      }
       case 'blessing':
         this.scene = { ...(art ? { art } : {}), text: [`${result.name}：${result.text}`] };
         if (result.anim) this.deps.play(result.anim);
@@ -606,6 +633,59 @@ export class AdventureFlow {
         this.scene = { text: result.text };
         return;
     }
+  }
+
+  /**
+   * 过场（Y5）：小窗场景图位置播视频，原话一句一句淡入；播完或者主人点一下跳过再往下走。
+   * 小窗收起着时不播过场，台词改成宠物冒泡（同 §2.1 的兜底）。
+   */
+  private async playCutscene(run: Run, cutscene: CutsceneDef, poster?: string): Promise<void> {
+    if (this.collapsed) {
+      this.speakLines(cutscene.lines);
+      return;
+    }
+    const win = this.win;
+    if (!win) return;
+    const def = this.deps.def;
+    this.scene = {
+      video: dungeonAsset(def, cutscene.video),
+      poster: dungeonAsset(def, poster ?? def.cover),
+      fallback: dungeonAsset(def, def.map),
+      text: [],
+    };
+    win.render(this.runView(run, [], null, false, cutscene.lines));
+    if (cutscene.say) this.deps.say(cutscene.say, { anim: false });
+    let answer = await win.wait();
+    // 过场里切了自动走：记下状态，接着等这一段落演完
+    while (answer?.kind === 'toggle-auto' && !this.stopped()) {
+      this.auto = answer.on === true;
+      this.deps.onChange?.();
+      answer = await win.wait();
+    }
+    if (answer?.kind === 'hide') {
+      this.collapseWindow(win);
+      this.speakLines(cutscene.lines);
+      return;
+    }
+    if (answer === null || answer.kind === 'close') {
+      this.suspended = true;
+      return;
+    }
+  }
+
+  /** 桌面上让客串角色冒几句；窗口开不出来就把台词改成宠物冒泡（素材缺了不挡流程） */
+  private async playCameo(cameo: CameoDef): Promise<void> {
+    try {
+      await this.deps.cameo({ foe: cameo.foe, lines: cameo.lines });
+    } catch {
+      this.speakLines(cameo.lines);
+    }
+  }
+
+  /** 收起小窗 / 客串失败时：台词改成宠物冒泡，一句一行 */
+  private speakLines(lines: string[]): void {
+    if (lines.length === 0) return;
+    this.deps.say(lines.join('\n'), { anim: false });
   }
 
   /** 打一场：小窗缩成屏顶一条，快进按钮也能收场（结果早已记账） */
@@ -639,6 +719,9 @@ export class AdventureFlow {
     this.deps.onChange?.();
     const ending = end.ending ?? null;
     if (end.reason === 'clear' && ending) this.deps.play(ending.anim ?? '秘境-得宝');
+    // 定仙游结局：先播结局过场（和宠物的碧芒一闪同时开始），再进结局页（Y5）
+    if (ending?.cutscene) await this.playCutscene(run, ending.cutscene);
+    if (this.stopped()) return false;
     this.deps.play('秘境-出阵');
     win.render(this.endingView(run, end));
     // 藏着走完：小窗不自己弹出来，只在桌面上说一声
@@ -717,6 +800,7 @@ export class AdventureFlow {
     choices: Choice[],
     travel: { from: number; to: number; ms: number } | null,
     compact: boolean,
+    cutsceneLines: string[] | null = null,
   ): AdventureView {
     const def = this.deps.def;
     const self = run.members.find((member) => member.id === run.leader) ?? run.members[0];
@@ -728,7 +812,7 @@ export class AdventureFlow {
     const view: AdventureRunView = {
       scene: {
         ...this.scene,
-        ...(this.scene.art ? { fallback: dungeonAsset(def, def.map) } : {}),
+        ...(this.scene.art || this.scene.video ? { fallback: dungeonAsset(def, def.map) } : {}),
       },
       hp: { now: Math.max(0, self.hp), max: maxHp },
       map: {
@@ -745,6 +829,9 @@ export class AdventureFlow {
       day,
       text: this.scene.text,
       choices: choices.filter((choice) => choice.kind !== 'loadout').map((choice) => this.choiceView(def, choice)),
+      // 只有在选下一个节点时地图才亮成能点的；等奇遇、加持、法宝、春秋蝉、两问时不接点击（Y5）
+      mapClickable: choices.some((choice) => choice.kind === 'node'),
+      cutscene: cutsceneLines ? { lines: cutsceneLines } : null,
       loadout: loadout
         ? {
             node: loadout.node,

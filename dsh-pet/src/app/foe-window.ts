@@ -61,6 +61,8 @@ export interface FoeWindow {
   play(anim: string, rate?: number): void;
   /** 开演前把要播的动画取到页面里（同客人窗口的预热） */
   preload(anims: string[]): void;
+  /** 淡出（客串说完台词用；Y5） */
+  fade(): void;
   /** 过一会儿关掉（先让倒地淡出） */
   close(afterMs: number): void;
 }
@@ -166,6 +168,7 @@ export function openFoeWindow(
     say: (text, durationMs) => run(`foe.say(${JSON.stringify(text)}, ${Number(durationMs) || 10000})`),
     play: (anim, rate) => run(`foe.play(${JSON.stringify(anim)}, ${Number.isFinite(Number(rate)) ? Number(rate) : 1})`),
     preload: (anims) => run(`foe.preload(${JSON.stringify(anims)})`),
+    fade: () => run('foe.fade()'),
     close(afterMs) {
       setTimeout(() => {
         clearInterval(follow);
@@ -322,6 +325,9 @@ window.foe = {
         })
         .catch(() => undefined);
     }
+  },
+  fade() {
+    stage.classList.add('gone');
   },
 };
 </script></body></html>

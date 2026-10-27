@@ -45,6 +45,9 @@ test('foePage：名字只走 textContent，数据经 JSON 字面量；视频失�
   // 精英金边、换色滤镜都走 CSS filter
   assert.ok(foePage.includes('drop-shadow(0 0 5px #f5c542)'));
   assert.ok(foePage.includes("media.style.setProperty('--tint'"));
+  // 客串说完淡出（Y5）
+  assert.ok(foePage.includes('fade() {'));
+  assert.ok(foePage.includes("stage.classList.add('gone');"));
 });
 
 /** 假对手窗口：记录构造参数与 executeJavaScript 的调用 */
@@ -130,9 +133,11 @@ test('openFoeWindow：等大贴身（可放大）、鼠标穿透、不抢焦点�
   foe.play('对手-白凝冰-绝招', 2.5);
   foe.say('你演够了吗？');
   foe.preload(['对手-白凝冰-出手', '对手-白凝冰-受击']);
+  foe.fade();
   assert.ok(fake.executed.includes('foe.play("对手-白凝冰-绝招", 2.5)'));
   assert.ok(fake.executed.includes('foe.say("你演够了吗？", 10000)'));
   assert.ok(fake.executed.includes('foe.preload(["对手-白凝冰-出手","对手-白凝冰-受击"])'));
+  assert.ok(fake.executed.includes('foe.fade()'));
   foe.close(0);
   await new Promise((done) => setTimeout(done, 10));
   assert.equal(fake.destroyed, true);

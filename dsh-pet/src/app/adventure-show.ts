@@ -1,9 +1,11 @@
 /**
  * 历练的战斗演出（历练路线 Y3）：把 Y2 的对手窗口、现有的擂台和特效层接成 `AdventureFlow` 要的「演一场」。
  *
- * 小怪 / 精英默认速战（约 10 秒），守护和开了「完整演出」的走完整时间线；对手的皮用 `FoeDef.skin ?? prefix`，
- * 精英传 `elite`，开演前 `foe.preload(...)`。每一场自己开一组窗口，演完 `CLOSE_HOLD_MS` 收自己这组（§X14 那套）。
- * `features.ts` 只把这个工厂的 `fight` / `closeAll` 接进流程。
+ * 小怪 / 精英默认完整演出（Y5），关了开关才走速战；守护和开了「完整演出」的走完整时间线；对手的皮用
+ * `FoeDef.skin ?? prefix`，精英传 `elite`，开演前 `foe.preload(...)`。每一场自己开一组窗口，演完
+ * `CLOSE_HOLD_MS` 收自己这组（§X14 那套）。
+ * `cameo`（Y5）只开一扇对手窗口，让不打架的角色客串几句，不开擂台和特效层。
+ * `features.ts` 只把这个工厂的 `fight` / `cameo` / `closeAll` 接进流程。
  */
 import { rngFrom } from './battle';
 import type { SkillId } from './battle';
@@ -16,13 +18,17 @@ import { openFoeWindow } from './foe-window';
 import type { FoeWindow } from './foe-window';
 import type { FxWindow } from './fx-window';
 import type { PetBox, Rect, WindowElectron } from './visit-windows';
-import type { AdventureFightRequest } from './adventure-flow';
+import type { AdventureCameoRequest, AdventureFightRequest } from './adventure-flow';
 
 /** 一场历练战斗开的三扇窗（每场记一组，收摊只关自己这组） */
 interface FightWindows {
   foe: FoeWindow;
   arena: ArenaWindow;
   fx: FxWindow;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((done) => setTimeout(done, Math.max(0, ms)));
 }
 
 export interface AdventureShowDeps {
@@ -44,10 +50,14 @@ export interface AdventureShowDeps {
   stageLabel: () => string;
   disposed: () => boolean;
   closeHoldMs: number;
+  /** 客串台词之间隔多久（默认 2.5 秒；测试传小一点） */
+  cameoLineMs?: number;
 }
 
 export interface AdventureShows {
   fight(request: AdventureFightRequest): Promise<void>;
+  /** 桌面上让一个不打架的角色客串：只露立绘、冒几句（Y5） */
+  cameo(request: AdventureCameoRequest): Promise<void>;
   /** 关掉所有还没收完的历练窗口（0 = 立刻，CLOSE_HOLD_MS = 演完停一会儿） */
   closeAll(afterMs: number): void;
 }
@@ -59,6 +69,8 @@ function tierName(tier: 'mob' | 'elite' | 'boss'): string {
 
 export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
   const groups = new Set<FightWindows>();
+  /** 客串窗口：不打架，收摊 / 退出时也要关掉 */
+  const cameos = new Set<FoeWindow>();
   function closeOne(windows: FightWindows, afterMs: number): void {
     const close = (): void => {
       if (!groups.delete(windows)) return;
@@ -134,10 +146,53 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
     closeOne(windows, deps.closeHoldMs);
     deps.refreshMenu();
   }
+
+  /**
+   * 客串（Y5）：只开对手窗口，不打架、不开擂台和特效层。
+   * 只露立绘，先播一下 CSS 轻跳（`起手` 缺视频时就是兜底动作），台词每隔 2.5 秒冒一句，说完淡出关窗。
+   */
+  async function cameo(request: AdventureCameoRequest): Promise<void> {
+    const roster = SANWANG.foes[request.foe];
+    if (!roster) throw new Error(`名册里没有客串角色 ${request.foe}`);
+    const prefix = roster.skin ?? roster.prefix;
+    const foe = openFoeWindow(
+      deps.electron,
+      `${new URL(deps.petBase).origin}/app/foe`,
+      {
+        name: roster.name,
+        portrait: `${deps.petBase}/pic/adventure/${encodeURIComponent('三王传承')}/${encodeURIComponent(`${prefix}.png`)}`,
+        prefix,
+        ...(roster.filter ? { filter: roster.filter } : {}),
+      },
+      deps.home,
+    );
+    cameos.add(foe);
+    foe.play('起手');
+    const lineMs = Math.max(1, deps.cameoLineMs ?? 2_500);
+    for (let i = 0; i < request.lines.length; i += 1) {
+      if (!cameos.has(foe)) return;
+      foe.say(request.lines[i], lineMs + 400);
+      if (i < request.lines.length - 1) await wait(lineMs);
+    }
+    if (!cameos.has(foe)) return;
+    await wait(Math.min(1_500, lineMs));
+    if (!cameos.has(foe)) return;
+    foe.fade();
+    await wait(500);
+    cameos.delete(foe);
+    foe.close(0);
+  }
+
   return {
     fight: fight,
+    cameo: cameo,
     closeAll: (afterMs) => {
       for (const windows of [...groups]) closeOne(windows, afterMs);
+      for (const foe of [...cameos]) {
+        cameos.delete(foe);
+        if (afterMs <= 0) foe.close(0);
+        else setTimeout(() => foe.close(0), afterMs);
+      }
     },
   };
 }

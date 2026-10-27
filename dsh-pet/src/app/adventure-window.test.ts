@@ -36,13 +36,15 @@ const entryView: AdventureView = {
 };
 
 test('小窗位置：在宠物旁边、优先和对手相反的一边；放不下换另一边；打起来缩成屏顶一条', () => {
-  const middle = { ...home, left: 500 };
+  // 760 宽的小窗要放在宠物旁边，宠物得靠边一点才放得下
+  const middle = { ...home, left: 900 };
   const left = adventureBounds(middle, workArea, 'left');
   assert.equal(left.width, ADVENTURE_WIDTH);
   assert.equal(left.height, ADVENTURE_HEIGHT);
   assert.equal(left.x + left.width, middle.left - 12, '放在宠物左边');
-  const right = adventureBounds(middle, workArea, 'right');
-  assert.equal(right.x, middle.left + middle.size + 12, '放在宠物右边');
+  const rightSide = { ...home, left: 100 };
+  const right = adventureBounds(rightSide, workArea, 'right');
+  assert.equal(right.x, rightSide.left + rightSide.size + 12, '放在宠物右边');
   // 宠物贴着左边：prefer left 放不下，换右边
   const edge = adventureBounds({ ...home, left: 0 }, workArea, 'left');
   assert.ok(edge.x >= 0 && edge.x + edge.width <= workArea.width);
@@ -50,6 +52,10 @@ test('小窗位置：在宠物旁边、优先和对手相反的一边；放不�
   const unknown = adventureBounds(null, workArea, 'right');
   assert.equal(unknown.width, ADVENTURE_WIDTH);
   assert.ok(unknown.x + unknown.width <= workArea.x + workArea.width);
+  // 工作区装不下：按等比缩小
+  const small = adventureBounds(home, { x: 0, y: 0, width: 600, height: 300 }, 'right');
+  assert.ok(small.width <= 600 && small.height <= 300);
+  assert.ok(Math.abs(small.width / small.height - ADVENTURE_WIDTH / ADVENTURE_HEIGHT) < 0.02, '等比缩小');
   // 打起来那一条：屏顶、和对手相反的一侧
   const compact = adventureCompactBounds(workArea, 'left');
   assert.equal(compact.width, ADVENTURE_COMPACT_WIDTH);
@@ -90,6 +96,8 @@ test('素材地址逐段编码；图片、场景、地图、加持卡面都由�
       day: { label: '福地内第 2 天', cracks: 2 },
       text: ['土丘后面钻出野狗'],
       choices: [{ kind: 'node', id: 'dog-pack', label: '野狗群', icon: '通用/图标-妖兽.png' }],
+      mapClickable: true,
+      cutscene: null,
       loadout: null,
       fullShow: false,
       fullToggle: true,
@@ -302,6 +310,38 @@ test('拖动：至少留标题栏在可见范围里', () => {
   const far = clampAdventureBounds({ ...normal, x: 5_000, y: 5_000 }, workArea);
   assert.equal(far.x, workArea.x + workArea.width - ADVENTURE_BAR_MIN_WIDTH, '右边至少留一段');
   assert.ok(far.y + ADVENTURE_BAR_HEIGHT <= workArea.y + workArea.height, '标题栏留在屏幕里');
+});
+
+test('adventurePage：两栏版面、选项紧挨场景文字、地图只在选节点时可点、过场能跳过', () => {
+  const page = adventurePage;
+  assert.ok(page.includes('id="left"'));
+  assert.ok(page.includes('id="right"'));
+  // 左栏：场景图 → 场景文字 → 选项；右栏：地图 → 气血 → 加持 → 战利品
+  assert.ok(page.indexOf('id="scene"') < page.indexOf('id="sceneText"'));
+  assert.ok(page.indexOf('id="sceneText"') < page.indexOf('id="choices"'));
+  assert.ok(page.indexOf('id="left"') < page.indexOf('id="right"'));
+  assert.ok(page.indexOf('id="map"') > page.indexOf('id="right"'));
+  assert.ok(page.indexOf('id="map"') < page.indexOf('id="hpText"'));
+  assert.ok(page.indexOf('id="hpText"') < page.indexOf('id="blessings"'));
+  assert.ok(page.indexOf('id="blessings"') < page.indexOf('id="loot"'));
+  // 整页不滚：页面 overflow:hidden；选项区自己滚，新选项出现时回到第一个
+  assert.ok(page.includes('.page{flex:1;min-height:0;overflow:hidden;'));
+  assert.ok(
+    page.includes("if (signature !== lastChoices) { byId('choices').scrollTop = 0; lastChoices = signature; }"),
+  );
+  // 地图：只有选下一个节点时才亮、才接点击
+  assert.ok(page.includes("var canClick = node.state === 'now' && clickable;"));
+  assert.ok(page.includes("var cls = 'icon ' + (node.state === 'now' && !clickable ? 'next' : node.state);"));
+  assert.ok(page.includes('renderMap(run, run.mapClickable === true);'));
+  // 过场：场景图位置播视频，台词一句一句淡入，点一下跳过；播完发 cutscene-done
+  assert.ok(page.includes('body.cutscene #choices'));
+  assert.ok(page.includes("el('span', 'cutLine', lines[shown])"));
+  assert.ok(page.includes("finish('cutscene-done')"));
+  assert.ok(page.includes("finish('skip')"));
+  assert.ok(page.includes('id="cutSkip"'));
+  // 页面脚本能编译（不执行）
+  const script = page.slice(page.indexOf('<script>') + '<script>'.length, page.indexOf('</script>'));
+  assert.doesNotThrow(() => new Function(script));
 });
 
 test('openAdventureWindow：拖过以后重新渲染、展开都回到拖到的位置；再开窗也停在那儿', async () => {

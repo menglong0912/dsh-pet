@@ -118,6 +118,7 @@ interface Harness {
   stored: () => Run | null;
   saves: Run[];
   fights: Array<{ result: FightResult; full: boolean }>;
+  cameos: Array<{ foe: string; lines: string[] }>;
   done: Array<{ reason: FinishReason; loot: Loot }>;
   events: CultivationEvent[][];
   plays: string[];
@@ -134,6 +135,7 @@ function makeFlow(options: { fighter?: Fighter; run?: Run | null; gate?: boolean
   const clock = fakeClock();
   const window = new FakeAdventureWindow();
   const fights: Harness['fights'] = [];
+  const cameos: Harness['cameos'] = [];
   const saves: Run[] = [];
   const done: Harness['done'] = [];
   const events: CultivationEvent[][] = [];
@@ -157,6 +159,9 @@ function makeFlow(options: { fighter?: Fighter; run?: Run | null; gate?: boolean
     fight: async (request) => {
       fights.push({ result: request.result, full: request.full });
       if (gate) await gate.promise;
+    },
+    cameo: async (request) => {
+      cameos.push(request);
     },
     skipFight: () => undefined,
     play: (anim) => plays.push(anim),
@@ -195,6 +200,7 @@ function makeFlow(options: { fighter?: Fighter; run?: Run | null; gate?: boolean
     stored: () => stored,
     saves,
     fights,
+    cameos,
     done,
     events,
     plays,
@@ -253,6 +259,10 @@ async function drive(harness: Harness, options: { endingAnswer?: 'close' | 'agai
     }
     if (view.kind === 'run' && view.run?.map.travel) {
       await harness.clock.tick(view.run.map.travel.ms);
+      continue;
+    }
+    if (view.kind === 'run' && view.run?.cutscene) {
+      harness.window.answer({ kind: 'cutscene-done' });
       continue;
     }
     if (!harness.window.waiting) {
@@ -626,6 +636,10 @@ async function driveAuto(harness: Harness, endingAnswer: 'close' | 'again' = 'cl
       harness.window.answer({ kind: endingAnswer });
       return;
     }
+    if (view.kind === 'run' && view.run?.cutscene) {
+      harness.window.answer({ kind: 'cutscene-done' });
+      continue;
+    }
     if (!harness.window.waiting) {
       await harness.clock.tick(1_000);
       continue;
@@ -876,6 +890,128 @@ test('收起：菜单切自动走会把等主人点的那一头叫醒，按新�
   await harness.clock.tick(1);
   await flush();
   assert.equal(harness.saves.length, saves + 1, '菜单开了自动走以后按 autoDecide 走一步');
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+/** 造一趟在「改炼定仙游」那一问前等着的存档（Y5 高光） */
+function askSmeltRun(): Run {
+  const run = startRun(SANWANG, { pet: BIG, stage: 20, suppressed: false, nonce: 'smelt', now: 0 });
+  run.layer = 4;
+  run.step = 3;
+  run.attempt = 2;
+  run.readyAt = 0;
+  run.flags = { stage: 20, road: 'dog', dogs: 4, remember: true };
+  run.pending = { node: 'ask-smelt', need: 'choice', options: [] };
+  run.snapshot = null;
+  run.decisions = [];
+  return run;
+}
+
+test('Y5 版面：完整演出默认开；真在选节点时地图能点，等选项时不能点', async () => {
+  const first = makeFlow({ fighter: BIG });
+  const view = await toFirstChoice(first);
+  assert.equal(view.run?.fullShow, true, 'Y5 起默认完整演出');
+  assert.equal(view.run?.mapClickable, true, '选节点时地图能点');
+  first.dispose();
+  await first.open.catch(() => undefined);
+
+  const pending = makeFlow({ fighter: BIG, run: askSmeltRun() });
+  const waiting = await toFirstChoice(pending);
+  assert.equal(waiting.run?.mapClickable, false, '等奇遇选项时地图不接点击');
+  pending.dispose();
+  await pending.open.catch(() => undefined);
+});
+
+test('Y5 高光：改炼定仙游先播过场、客串冒三句，主人点跳过能提前结束', async () => {
+  const harness = makeFlow({ fighter: BIG, run: askSmeltRun() });
+  const before = await toFirstChoice(harness);
+  assert.ok(before.run?.choices.some((choice) => choice.kind === 'choice' && choice.index === 0));
+  harness.window.answer({ kind: 'choice', node: 'ask-smelt', index: 0 });
+  for (let step = 0; step < 80; step += 1) {
+    await flush();
+    if (harness.window.last?.run?.cutscene) break;
+    await harness.clock.tick(100);
+  }
+  const cut = harness.window.last;
+  assert.equal(cut?.kind, 'run');
+  assert.ok(cut?.run?.scene.video?.includes('过场-天瀑光河'), JSON.stringify(cut?.run?.scene));
+  assert.ok(cut?.run?.cutscene?.lines[1].includes('阿鱼'), '原著里的「方源」换成宠物名');
+  assert.equal(cut?.run?.mapClickable, false);
+  assert.equal(harness.stored()?.flags.smelt, 'dingxian', '先记账再演出');
+  assert.equal(harness.cameos.length, 1, '客串和过场同时开始');
+  assert.equal(harness.cameos[0].foe, 'feng-tianyu');
+  assert.equal(harness.cameos[0].lines.length, 3);
+  assert.ok(
+    cut?.run?.cutscene?.lines.some((line) => line.includes('千古地仙随风逝')),
+    '定场诗在过场台词里',
+  );
+  assert.ok(
+    harness.said.some((line) => line === '今日暂且展翼去，明朝登仙笞凤凰！'),
+    `小窗开着时宠物冒定场诗最后一联：${JSON.stringify(harness.said)}`,
+  );
+
+  // 主人点跳过：不用等视频播完，直接往下走
+  harness.window.answer({ kind: 'skip' });
+  for (let step = 0; step < 80; step += 1) {
+    await flush();
+    const view = harness.window.last;
+    if (view?.kind === 'run' && view.run?.map.travel) {
+      await harness.clock.tick(view.run.map.travel.ms);
+      continue;
+    }
+    if (view?.kind === 'run' && view.run && harness.window.waiting && !view.run.cutscene) break;
+    await harness.clock.tick(100);
+  }
+  const after = harness.window.last;
+  assert.equal(after?.kind, 'run');
+  assert.equal(after?.run?.map.current, 5, '跳到第五层福地崩溃');
+  assert.ok(after?.run?.choices.some((choice) => choice.kind === 'node' && choice.id === 'collapse'));
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+test('Y5 高光：定仙游结局先播结局过场，再进结局页', async () => {
+  const harness = makeFlow({
+    fighter: BIG,
+    run: layerFiveRun({ smelt: 'dingxian', seen: true, remember: true }),
+  });
+  await drive(harness);
+  await harness.open;
+  const views = harness.window.views;
+  const cutIndex = views.findIndex((view) => view.kind === 'run' && view.run?.cutscene);
+  const endingIndex = views.findIndex((view) => view.kind === 'ending');
+  assert.ok(cutIndex >= 0, '先播了结局过场');
+  assert.ok(endingIndex > cutIndex, '过场播完才进结局页');
+  assert.ok(views[cutIndex].run?.cutscene?.lines.some((line) => line.includes('定仙游')));
+  assert.ok(harness.plays.includes('秘境-定仙游'), '过场同时宠物播碧芒一闪');
+  assert.equal(harness.cameos.length, 0, '结局没有客串');
+  assert.equal(views[endingIndex].ending?.name, '定仙游');
+});
+
+test('Y5 高光：小窗收起着时不播过场，台词改成宠物冒泡', async () => {
+  const harness = makeFlow({ fighter: BIG, run: askSmeltRun() });
+  await toFirstChoice(harness);
+  harness.window.answer({ kind: 'hide' });
+  await flush();
+  assert.equal(harness.window.hiddenNow, true);
+  harness.flow.setAutoWalk(true);
+  await flush();
+  await harness.clock.tick(AUTO_PICK_MS);
+  for (let step = 0; step < 80 && harness.stored()?.flags.smelt !== 'dingxian'; step += 1) {
+    await flush();
+    await harness.clock.tick(100);
+  }
+  assert.equal(harness.stored()?.flags.smelt, 'dingxian');
+  assert.ok(
+    harness.said.some((line) => line.includes('天瀑光河')),
+    '台词改成冒泡',
+  );
+  assert.equal(
+    harness.window.views.some((view) => view.kind === 'run' && view.run?.cutscene),
+    false,
+    '藏着的时候不播过场',
+  );
   harness.dispose();
   await harness.open.catch(() => undefined);
 });
