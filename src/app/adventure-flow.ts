@@ -19,9 +19,11 @@ import {
   advance,
   autoDecide,
   choicesOf,
+  completeLiveFight,
   dayLabel,
   layerNodeIdsOf,
   maxHpOf,
+  prepareLiveFight,
   reachableNodes,
   resolveText,
   startRun,
@@ -41,10 +43,14 @@ import type {
   OutcomeResult,
   Run,
   StepOutcome,
+  StepResult,
 } from './dungeon';
 import { roadLabel } from './dungeon-sanwang';
 import { WEAPONS } from './battle';
-import type { Fighter, WeaponId } from './battle';
+import type { Action, BattleEvent, BattleView, Fighter, WeaponId } from './battle';
+import { legalChoices } from './battle-live';
+import type { TurnDecision } from './battle-live';
+import type { PanelView } from './action-panel-window';
 import type { CultivationEvent } from './cultivation';
 import type { Rect } from './visit-windows';
 import type {
@@ -54,6 +60,7 @@ import type {
   AdventureMapNodeState,
   AdventureRunView,
   AdventureSceneView,
+  AdventureTurnMode,
   AdventureView,
   AdventureWindow,
 } from './adventure-window';
@@ -79,6 +86,31 @@ export interface AdventureCameoRequest {
   lines: string[];
 }
 
+/** 守护的逐手局（X18）：窗口与演出在 `adventure-show.ts`，这里只把每一手怎么定交给它 */
+export interface AdventureLiveFightRequest {
+  a: Fighter;
+  b: Fighter;
+  seed: string;
+  /** 名册里的对手编号 */
+  foe: string;
+  mode: 'ai' | 'manual';
+  /** 已经记下的自家出手（中断续打 / 春秋蝉倒回）：照这串重放，不重新问 */
+  initialActions: readonly Action[];
+  decide: (view: BattleView, index: number, signal: AbortSignal) => Promise<TurnDecision | null>;
+  /** 每定下一手（含后备）就回调：流程立刻写进 run.decisions 并存盘 */
+  onDecision: (action: Action, index: number) => void;
+  /** 演完一段、AI 还在想：宠物头上「想一想…」 */
+  think: () => void;
+  log: (message: string) => void;
+}
+
+/** 本机接口（GET /app/battle、POST /app/battle/choose）看到的那一问 */
+export interface AdventureTurnQuestion {
+  state(): PanelView | null;
+  /** `pick` 从 1 数，和出招面板 / curl 同一口径 */
+  choose(pick: number): boolean;
+}
+
 /** 自动走在一个要选的地方停多久，让主人看清有哪些选项 */
 export const AUTO_PICK_MS = 1_500;
 
@@ -89,6 +121,8 @@ export interface AdventureFlowDeps {
   openWindow: (parked: Rect | null) => AdventureWindow;
   /** 演一场（速战或完整；返回时窗口、擂台、特效层已经收好） */
   fight: (request: AdventureFightRequest) => Promise<void>;
+  /** 守护的逐手局：演完回事件（收摊 / 退出回 null） */
+  liveFight: (request: AdventureLiveFightRequest) => Promise<BattleEvent[] | null>;
   /** 让一个不打架的角色在桌面上客串（只露立绘、冒几句，不开擂台） */
   cameo: (request: AdventureCameoRequest) => Promise<void>;
   /** 菜单「修炼/快进」或小窗上的快进 */
@@ -115,6 +149,19 @@ export interface AdventureFlowDeps {
   random: () => number;
   /** 小窗开关、忙闲变化（features 重新注册菜单） */
   onChange?: () => void;
+  /** 逐手出招（X18）：手动时把这一问挂到本机接口上，null = 收起来 */
+  exposeTurn?: (question: AdventureTurnQuestion | null) => void;
+  /** AI 出招：问模型这一手（模型没配好 / 超时 / 坏 JSON 回 null，按后备挑法出） */
+  askAi?: (options: {
+    view: BattleView;
+    names: [string, string];
+    signal: AbortSignal;
+  }) => Promise<{ pick: number; line?: string } | null>;
+  /** 模型配好了没有（「AI 出招」按钮灰不灰） */
+  aiReady?: () => boolean;
+  /** 手动一手 20 秒不点按后备（测试调短用） */
+  actionTimeoutMs?: number;
+  log?: (message: string) => void;
 }
 
 /** 秘境素材目录：名字都相对 `assets/pic/adventure/<目录>/` */
@@ -179,6 +226,14 @@ export class AdventureFlow {
   private autoTimer: unknown = null;
   /** 菜单切了自动走：把等主人点的那一头叫醒，重新按新状态等 */
   private nudgeResolve: (() => void) | null = null;
+  /** 上次选的出招方式（这次打开 app 期间记住；页面自己也记一份） */
+  private mode: AdventureTurnMode | null = null;
+  /** 现在挂在本机接口上的那一问（选方式 / 手动出招） */
+  private question: AdventureTurnQuestion | null = null;
+  /** 手动出招那一问的结算（超时 / 点了 / 收摊） */
+  private actionWait: ((pick: number | null) => void) | null = null;
+  /** 本机接口塞回来的一步（选方式以后直接带上法宝开打） */
+  private answerInject: ((answer: AdventureAnswer | null) => void) | null = null;
 
   private readonly deps: AdventureFlowDeps;
 
@@ -267,6 +322,8 @@ export class AdventureFlow {
     this.stopAuto();
     this.deps.skipFight();
     this.stopTravel();
+    this.actionWait = null;
+    this.setQuestion(null);
     this.win?.close(0);
     this.deps.onChange?.();
   }
@@ -284,6 +341,8 @@ export class AdventureFlow {
     this.suspended = true;
     this.stopAuto();
     this.stopTravel();
+    this.actionWait = null;
+    this.setQuestion(null);
     this.win?.close(0);
   }
 
@@ -324,6 +383,133 @@ export class AdventureFlow {
     if (this.autoTimer === null) return;
     this.deps.clearTimeout(this.autoTimer);
     this.autoTimer = null;
+  }
+
+  /** 换掉本机接口上挂着的那一问 */
+  private setQuestion(question: AdventureTurnQuestion | null): void {
+    this.question = question;
+    this.deps.exposeTurn?.(question);
+  }
+
+  /** 本机接口塞回来的一步：当主人点过这一下，页面那边就不用再等了 */
+  private injectAnswer(answer: AdventureAnswer): void {
+    const done = this.answerInject;
+    this.answerInject = null;
+    this.win?.cancelWait();
+    this.setQuestion(null);
+    done?.(answer);
+  }
+
+  /** 选方式（X18）：守护前挑法宝那一页等主人时，GET /app/battle 看得到这三个按钮 */
+  private exposeLoadoutMode(loadout: Extract<Choice, { kind: 'loadout' }>): void {
+    const aiReady = this.deps.aiReady?.() !== false;
+    const modes: Array<{ value: AdventureTurnMode; label: string; disabled?: boolean }> = [
+      { value: 'auto', label: '自动' },
+      { value: 'ai', label: 'AI 出招', ...(aiReady ? {} : { disabled: true }) },
+      { value: 'manual', label: '手动' },
+    ];
+    const view: PanelView = {
+      kind: 'mode',
+      title: '历练：选出招方式（选完就带上法宝开打）',
+      seconds: 0,
+      options: modes.map((mode, index) => ({
+        pick: index + 1,
+        label: mode.label,
+        ...(mode.disabled ? { disabled: true } : {}),
+      })),
+    };
+    this.setQuestion({
+      state: () => view,
+      choose: (pick) => {
+        const mode = modes[pick - 1];
+        if (!mode || mode.disabled) return false;
+        this.mode = mode.value;
+        // curl 选方式时顺手按「全带（最多 max 件）」确认，方便真机直接打到守护
+        this.injectAnswer({
+          kind: 'loadout',
+          node: loadout.node,
+          weapons: loadout.weapons.slice(0, loadout.max),
+          mode: mode.value,
+        });
+        return true;
+      },
+    });
+  }
+
+  /** 手动出一手：按钮画在历练小窗里（紧凑条下面），同时挂到本机接口上 */
+  private askAction(
+    win: AdventureWindow,
+    run: Run,
+    choices: ReturnType<typeof legalChoices>,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<number | null> {
+    const view: PanelView = {
+      kind: 'action',
+      title: '历练出招',
+      seconds: Math.max(1, Math.ceil(timeoutMs / 1000)),
+      options: choices.map((choice) => ({
+        pick: choice.pick,
+        label: choice.label,
+        ...(choice.note ? { note: choice.note } : {}),
+      })),
+    };
+    return new Promise<number | null>((resolve) => {
+      let done = false;
+      const finish = (pick: number | null, why?: string): void => {
+        if (done) return;
+        done = true;
+        this.deps.clearTimeout(timer);
+        signal.removeEventListener('abort', abort);
+        if (this.actionWait === finish) {
+          this.actionWait = null;
+          this.setQuestion(null);
+          win.setTurn(false);
+        }
+        if (why) this.deps.log?.(why);
+        resolve(pick);
+      };
+      const timer = this.deps.setTimeout(() => finish(null, '历练出招：手动没点，按后备挑法'), Math.max(1, timeoutMs));
+      const abort = (): void => finish(null);
+      if (signal.aborted) {
+        finish(null);
+        return;
+      }
+      signal.addEventListener('abort', abort, { once: true });
+      this.actionWait = finish;
+      win.setTurn(true);
+      this.setQuestion({
+        state: () => view,
+        choose: (pick) => {
+          if (pick < 1 || pick > choices.length) return false;
+          finish(pick - 1);
+          return true;
+        },
+      });
+      win.render(this.runView(run, [], null, true, null, view));
+    });
+  }
+
+  /** 打的时候：小窗只发「快进」和手动出招的点击；关窗当收摊，这一场按快进收尾 */
+  private watchFightAnswers(win: AdventureWindow): () => void {
+    let active = true;
+    void (async () => {
+      while (active && !this.stopped()) {
+        const answer = await win.wait();
+        if (!active) return;
+        if (answer === null || answer.kind === 'close') {
+          this.suspended = true;
+          this.deps.skipFight();
+          return;
+        }
+        if (answer.kind === 'skip') this.deps.skipFight();
+        else if (answer.kind === 'action') this.question?.choose(answer.pick);
+        else if (answer.kind === 'hide') this.collapseWindow(win);
+      }
+    })();
+    return () => {
+      active = false;
+    };
   }
 
   /** 小窗一开：存档里有一趟就接着走，否则先看入口页 */
@@ -415,6 +601,17 @@ export class AdventureFlow {
       const run = this.deps.getRun();
       if (!run || run.status === 'over') return;
       this.updatePendingScene(run);
+      // 守护的逐手局打到一半退出 / 倒回：照 run.decisions 里已经记下的手重放，接着打
+      if (run.pending?.need === 'fight') {
+        const step = await this.runLiveFight(win, run);
+        if (!step || this.stopped()) return;
+        const end = this.endOf(step.outcome);
+        if (!end) continue;
+        const again = await this.finish(step.run, end, win);
+        if (!again || this.stopped()) return;
+        this.beginRun(step.run.suppressed);
+        continue;
+      }
       const choices = choicesOf(def, run, this.deps.fighter());
       const remaining = run.readyAt - this.deps.now();
       if (remaining > 0) {
@@ -450,7 +647,13 @@ export class AdventureFlow {
         continue;
       }
       win.render(this.runView(run, choices, null, false));
+      const loadout = choices.find(
+        (choice): choice is Extract<Choice, { kind: 'loadout' }> => choice.kind === 'loadout',
+      );
+      if (loadout) this.exposeLoadoutMode(loadout);
+      else if (this.actionWait === null) this.setQuestion(null);
       const picked = await this.waitChoice(win);
+      if (this.actionWait === null) this.setQuestion(null);
       if (this.stopped()) return;
       if (picked === 'nudge') continue;
       let decision: Decision | null;
@@ -488,6 +691,17 @@ export class AdventureFlow {
         continue;
       }
       this.deps.saveRun(next.run);
+      if (next.run.pending?.need === 'fight') {
+        // 守护选了 AI / 手动（X18）：小窗缩起来，一手一手打；每定一手都写进 run.decisions
+        const step = await this.runLiveFight(win, next.run);
+        if (!step || this.stopped()) return;
+        const end = this.endOf(step.outcome);
+        if (!end) continue;
+        const again = await this.finish(step.run, end, win);
+        if (!again || this.stopped()) return;
+        this.beginRun(step.run.suppressed);
+        continue;
+      }
       if (next.run.readyAt > this.deps.now()) this.travelFrom = before.layer;
       await this.showOutcome(next.run, next.outcome, this.nodeOf(decision));
       if (this.stopped()) return;
@@ -500,22 +714,23 @@ export class AdventureFlow {
     }
   }
 
-  /** 等主人点一下或者自动走的时间到；菜单切了自动走（nudge）就回去重画重等 */
+  /**
+   * 等主人点一下或者自动走的时间到；菜单切了自动走（nudge）就回去重画重等。
+   * 本机接口塞回来的答案（curl 选了方式）也走这里，和页面点的是同一条路。
+   */
   private waitAnswer(win: AdventureWindow): Promise<AdventureAnswer | null | 'nudge'> {
     return new Promise((resolve) => {
       let done = false;
-      this.nudgeResolve = () => {
+      const settle = (value: AdventureAnswer | null | 'nudge'): void => {
         if (done) return;
         done = true;
         this.nudgeResolve = null;
-        resolve('nudge');
+        this.answerInject = null;
+        resolve(value);
       };
-      void win.wait().then((answer) => {
-        if (done) return;
-        done = true;
-        this.nudgeResolve = null;
-        resolve(answer);
-      });
+      this.nudgeResolve = () => settle('nudge');
+      this.answerInject = (answer) => settle(answer);
+      void win.wait().then((answer) => settle(answer));
     });
   }
 
@@ -538,6 +753,7 @@ export class AdventureFlow {
     const picked = await Promise.race([answered, due]);
     this.stopAuto();
     if (picked === 'auto' || picked === 'nudge') {
+      this.answerInject = null;
       win.cancelWait();
       return picked;
     }
@@ -575,6 +791,94 @@ export class AdventureFlow {
       art: dungeonAsset(this.deps.def, layer?.art ?? this.deps.def.map),
       text: layer ? [`第 ${run.layer} 层 · ${layer.name}`] : [this.deps.def.name],
     };
+  }
+
+  /** 自己这一边在某个守护节点已经记下的逐手出手（跨中断、跨倒回都照这串重放） */
+  private liveActions(run: Run, node: string): Action[] {
+    const out: Action[] = [];
+    for (const decision of run.decisions) {
+      if (decision.kind === 'action' && decision.node === node && decision.side === 0 && decision.live === true)
+        out.push(decision.action);
+    }
+    return out;
+  }
+
+  /**
+   * 守护的逐手局（X18）：配好双方 → 小窗缩起来 → 交给 `liveFight` 一段一段演；
+   * 自家每一手定下来就写进 `run.decisions` 并存盘。中断以后再进来会先照这串重放。
+   */
+  private async runLiveFight(win: AdventureWindow, run: Run): Promise<StepResult | null> {
+    const pending = run.pending;
+    if (!pending || pending.need !== 'fight') return null;
+    const node = this.deps.def.nodes[pending.node];
+    if (!node) return null;
+    this.scene = {
+      art: dungeonAsset(this.deps.def, node.art ?? this.layerArt(run.layer)),
+      text: resolveText(node.text, run),
+    };
+    const prepared = prepareLiveFight(this.deps.def, run, node, this.deps.fighter(), pending.weapons ?? []);
+    const mode: 'ai' | 'manual' = pending.mode === 'manual' ? 'manual' : 'ai';
+    const names: [string, string] = [prepared.party[0].name, prepared.foe.name];
+    const initialActions = this.liveActions(run, node.id);
+    this.fighting = true;
+    this.deps.onChange?.();
+    win.setCompact(true);
+    win.render(this.runView(run, [], null, true));
+    const stopAnswers = this.watchFightAnswers(win);
+    try {
+      const events = await this.deps.liveFight({
+        a: prepared.party[0],
+        b: prepared.foe,
+        seed: prepared.seed,
+        foe: prepared.foeId,
+        mode,
+        initialActions,
+        decide: (view, _index, signal) => this.decideLiveTurn(win, run, mode, view, names, signal),
+        onDecision: (action) => {
+          run.decisions = [...run.decisions, { kind: 'action', node: node.id, side: 0, action, live: true }];
+          this.deps.saveRun(run);
+        },
+        think: () => this.deps.say('想一想…', { anim: false }),
+        log: (message) => this.deps.log?.(message),
+      });
+      if (!events) return null;
+      const step = completeLiveFight(this.deps.def, run, node, prepared, events, this.deps.now());
+      this.deps.saveRun(step.run);
+      return step;
+    } finally {
+      stopAnswers();
+      this.actionWait = null;
+      this.setQuestion(null);
+      win.cancelWait();
+      win.setTurn(false);
+      win.setCompact(false);
+      this.fighting = false;
+      this.deps.onChange?.();
+    }
+  }
+
+  /** 逐手局的一手：手动等小窗 / 本机接口，AI 问模型；定不了回 null，由 `startLiveBattle` 按后备挑法出 */
+  private async decideLiveTurn(
+    win: AdventureWindow,
+    run: Run,
+    mode: 'ai' | 'manual',
+    view: BattleView,
+    names: [string, string],
+    signal: AbortSignal,
+  ): Promise<TurnDecision | null> {
+    const choices = legalChoices(view);
+    if (mode === 'manual') {
+      const pick = await this.askAction(win, run, choices, this.deps.actionTimeoutMs ?? 20_000, signal);
+      if (pick === null) return null;
+      const choice = choices[pick];
+      return choice ? { action: choice.action } : null;
+    }
+    if (!this.deps.askAi) return null;
+    const reply = await this.deps.askAi({ view, names, signal });
+    if (!reply) return null;
+    const choice = choices[reply.pick - 1];
+    if (!choice) return null;
+    return { action: choice.action, ...(reply.line ? { line: reply.line } : {}) };
   }
 
   /** 这一步要演什么：换场景、播宠物动作、打一场 */
@@ -702,6 +1006,7 @@ export class AdventureFlow {
       await this.deps.fight({ result, full: this.fullShow });
     } finally {
       win.cancelWait();
+      win.setTurn(false);
       win.setCompact(false);
       this.fighting = false;
       this.deps.onChange?.();
@@ -800,6 +1105,7 @@ export class AdventureFlow {
     travel: { from: number; to: number; ms: number } | null,
     compact: boolean,
     cutsceneLines: string[] | null = null,
+    turn: PanelView | null = null,
   ): AdventureView {
     const def = this.deps.def;
     const self = run.members.find((member) => member.id === run.leader) ?? run.members[0];
@@ -842,6 +1148,27 @@ export class AdventureFlow {
               tactics: loadout.foe.tactics,
               moves: loadout.foe.moves,
             },
+            ...(this.mode ? { mode: this.mode } : {}),
+            modes: [
+              { value: 'auto', label: '自动' },
+              {
+                value: 'ai',
+                label: 'AI 出招',
+                ...(this.deps.aiReady?.() === false ? { disabled: true } : {}),
+              },
+              { value: 'manual', label: '手动' },
+            ],
+          }
+        : null,
+      turn: turn
+        ? {
+            title: turn.title,
+            seconds: turn.seconds,
+            options: turn.options.map((option) => ({
+              pick: option.pick,
+              label: option.label,
+              ...(option.note ? { note: option.note } : {}),
+            })),
           }
         : null,
       fullShow: this.fullShow,
@@ -961,7 +1288,15 @@ export class AdventureFlow {
       if (!found || found.kind !== 'loadout') return null;
       const allowed = found.weapons as string[];
       const weapons = answer.weapons.filter((id) => allowed.includes(id)).slice(0, found.max) as WeaponId[];
-      return { kind: 'loadout', node: answer.node, weapons };
+      // 模型没配好时「AI 出招」点不上（页面灰掉）；万一从接口塞进来也退回自动
+      const mode: AdventureTurnMode =
+        answer.mode === 'ai' && this.deps.aiReady?.() === false
+          ? 'auto'
+          : answer.mode === 'ai' || answer.mode === 'manual'
+            ? answer.mode
+            : 'auto';
+      this.mode = mode;
+      return { kind: 'loadout', node: answer.node, weapons, mode };
     }
     if (answer.kind === 'rewind') return choices.some((choice) => choice.kind === 'rewind') ? { kind: 'rewind' } : null;
     if (answer.kind === 'end') return choices.some((choice) => choice.kind === 'end') ? { kind: 'end' } : null;

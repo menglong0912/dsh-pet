@@ -21,6 +21,8 @@ export const ADVENTURE_HEIGHT = 520;
 /** 打起来缩成的那一条 */
 export const ADVENTURE_COMPACT_WIDTH = 320;
 export const ADVENTURE_COMPACT_HEIGHT = 88;
+/** 手动出招时小窗临时长高，够放下按钮（还是屏顶那一条，不展开整页） */
+export const ADVENTURE_TURN_HEIGHT = 300;
 /** 拖出屏幕时至少留在可见范围里的标题栏尺寸 */
 export const ADVENTURE_BAR_HEIGHT = 44;
 export const ADVENTURE_BAR_MIN_WIDTH = 120;
@@ -88,11 +90,25 @@ export interface AdventureChoiceView {
   card?: string;
 }
 
+/** 出招方式（X18）：和出招面板同一套 */
+export type AdventureTurnMode = 'auto' | 'ai' | 'manual';
+
 export interface AdventureLoadoutView {
   node: string;
   max: number;
   weapons: Array<{ id: string; name: string }>;
   foe: { name: string; tactics: string; moves: string[] };
+  /** 上次选的出招方式；没选过就不给，页面用自己记住的那个 */
+  mode?: AdventureTurnMode;
+  /** 出招方式的按钮（「AI 出招」在模型没配好时灰掉） */
+  modes: Array<{ value: AdventureTurnMode; label: string; disabled?: boolean }>;
+}
+
+/** 逐手出招的一问（X18，手动时显示在历练小窗里，不另开出招面板） */
+export interface AdventureTurnView {
+  title: string;
+  seconds: number;
+  options: Array<{ pick: number; label: string; note?: string }>;
 }
 
 export interface AdventureRunView {
@@ -115,6 +131,8 @@ export interface AdventureRunView {
   /** 小窗正在播过场：场景图位置播视频，原话一句一句淡入（Y5） */
   cutscene: { lines: string[] } | null;
   loadout: AdventureLoadoutView | null;
+  /** 手动出招轮到自家：按钮在这一页里（X18） */
+  turn: AdventureTurnView | null;
   fullShow: boolean;
   /** 有能完整演的小怪 / 精英时，才给这个开关 */
   fullToggle: boolean;
@@ -161,7 +179,8 @@ export type AdventureAnswer =
   | { kind: 'node'; node: string }
   | { kind: 'choice'; node: string; index: number }
   | { kind: 'blessing'; node: string; blessing: string }
-  | { kind: 'loadout'; node: string; weapons: string[] }
+  | { kind: 'loadout'; node: string; weapons: string[]; mode?: AdventureTurnMode }
+  | { kind: 'action'; pick: number }
   | { kind: 'rewind' }
   | { kind: 'end' }
   | { kind: 'retreat' }
@@ -180,6 +199,8 @@ export interface AdventureWindow {
   cancelWait(): void;
   /** 打起来缩成屏顶一条，打完展开 */
   setCompact(compact: boolean): void;
+  /** 手动出招：屏顶那一条临时长高放下按钮；收起后回到原来那条 */
+  setTurn(open: boolean): void;
   /** 收起（只藏起来，流程不停） */
   hide(): void;
   /** 从菜单叫回来 */
@@ -222,6 +243,24 @@ export function adventureCompactBounds(workArea: Rect, prefer: 'left' | 'right')
   const height = Math.min(ADVENTURE_COMPACT_HEIGHT, workArea.height);
   const x = prefer === 'right' ? workArea.x + workArea.width - width - GAP : workArea.x + GAP;
   return { x: Math.round(x), y: Math.round(workArea.y + GAP), width, height };
+}
+
+/**
+ * 手动出招时长高的那一条：位置同 compact，只把高度加到放得下按钮。
+ * 原地长高会盖住自家宠物（宠物在屏幕顶上时真机就是这样）：压到 `pet` 就挪到宠物下面，那里放不下才照原位。
+ */
+export function adventureTurnBounds(workArea: Rect, prefer: 'left' | 'right', pet: Rect | null = null): Rect {
+  const compact = adventureCompactBounds(workArea, prefer);
+  const turn = { ...compact, height: Math.min(ADVENTURE_TURN_HEIGHT, workArea.height) };
+  if (!pet) return turn;
+  const overlaps =
+    turn.x < pet.x + pet.width &&
+    pet.x < turn.x + turn.width &&
+    turn.y < pet.y + pet.height &&
+    pet.y < turn.y + turn.height;
+  if (!overlaps) return turn;
+  const below = Math.round(pet.y + pet.height + GAP);
+  return below + turn.height <= workArea.y + workArea.height ? { ...turn, y: below } : turn;
 }
 
 /** 拖出屏幕以后拉回来：至少让标题栏留在可见范围里（宽度留一段、高度留整条标题栏） */
@@ -329,6 +368,15 @@ export function openAdventureWindow(
   const workArea = electron.screen.getDisplayNearestPoint(point).workArea;
   const normal = adventureBounds(homeNow, workArea, options.prefer);
   const compact = adventureCompactBounds(workArea, options.prefer);
+  /** 手动出招长高时避开自家宠物：每次长高时按宠物当下的位置算 */
+  const turnBounds = (): Rect => {
+    const box = home();
+    return adventureTurnBounds(
+      workArea,
+      options.prefer,
+      box ? { x: box.left, y: box.top, width: box.size, height: box.size } : null,
+    );
+  };
   /** 拖到别的屏幕上也按那边的工作区夹：至少留标题栏可见 */
   const clampOnDisplay = (rect: Rect): Rect => {
     const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
@@ -336,6 +384,7 @@ export function openAdventureWindow(
   };
   let dragged: Rect | null = options.bounds ? clampOnDisplay(options.bounds) : null;
   let compactMode = false;
+  let turnMode = false;
   let bounds = dragged ?? normal;
   let closed = false;
   let waiter: ((value: AdventureAnswer | null) => void) | null = null;
@@ -421,9 +470,16 @@ export function openAdventureWindow(
     },
     setCompact(on) {
       compactMode = on;
-      bounds = on ? compact : (dragged ?? normal);
+      if (!on) turnMode = false;
+      bounds = on ? (turnMode ? turnBounds() : compact) : (dragged ?? normal);
       if (!win.isDestroyed()) win.setBounds(bounds);
       run(`adv.compact(${on ? 'true' : 'false'})`);
+    },
+    setTurn(open) {
+      turnMode = open;
+      if (!compactMode) return;
+      bounds = open ? turnBounds() : compact;
+      if (!win.isDestroyed()) win.setBounds(bounds);
     },
     hide() {
       if (!win.isDestroyed()) win.hide?.();
@@ -594,6 +650,7 @@ body.compact #full{display:none}
 </div>
 <div id="run" class="page" hidden>
   <div id="compactbar"><span id="compactTitle"></span><span id="compactHp"></span><button id="skip" type="button">快进</button></div>
+  <div id="turn" hidden><div id="turnTitle"></div><div id="turnOptions"></div></div>
   <div id="full">
     <div id="left">
       <div id="scene"><img id="sceneImg" alt=""><video id="sceneVideo" muted playsinline autoplay></video><div id="travel" hidden><span id="travelText">赶路中…</span><i></i></div><button id="cutSkip" type="button">跳过</button></div>
@@ -602,6 +659,7 @@ body.compact #full{display:none}
       <div id="loadout" class="loadout" hidden>
         <p id="foeTactics" class="tactics"></p>
         <div id="weapons"></div>
+        <div id="modes" class="modes"></div>
         <button id="loadoutOk" class="primary" type="button">带上这几件</button>
       </div>
       <label class="switch" id="fullShowRow"><input id="fullShow" type="checkbox"> 完整演出（小怪、精英）</label>
@@ -811,6 +869,24 @@ function renderCutscene(run, cut){
   skip.onclick = function(event){ if (event) event.stopPropagation(); finish('skip'); };
   scene.onclick = function(){ finish('skip'); };
 }
+function renderTurn(run){
+  var box = byId('turn');
+  var turn = run.turn;
+  if (!turn) { box.hidden = true; return; }
+  box.hidden = false;
+  setText('turnTitle', turn.title + (turn.seconds > 0 ? '（' + turn.seconds + ' 秒不点按后备出）' : ''));
+  var list = byId('turnOptions'); clear(list);
+  for (var i = 0; i < turn.options.length; i += 1) {
+    var option = turn.options[i];
+    var button = el('button', '', option.label);
+    button.type = 'button';
+    if (option.note) button.append(el('span', 'note', option.note));
+    (function(pick){
+      button.addEventListener('click', function(){ answer({ kind: 'action', pick: pick }); });
+    })(option.pick);
+    list.append(button);
+  }
+}
 function renderRun(view){
   var run = view.run;
   stopCutscene();
@@ -927,10 +1003,34 @@ function renderRun(view){
       row2.append(check, document.createTextNode(weapon.name));
       weapons.append(row2);
     }
+    // 出招方式（X18）：默认自动；上次选过的记在页面里，进程重开也还在
+    var remembered = null;
+    try { remembered = localStorage.getItem('adventureTurnMode'); } catch (e) { remembered = null; }
+    var selected = run.loadout.mode || remembered || 'auto';
+    var modeBox = byId('modes'); clear(modeBox);
+    var modeBoxes = [];
+    var modes = run.loadout.modes || [];
+    for (var m = 0; m < modes.length; m += 1) {
+      var mode = modes[m];
+      var label2 = el('label', mode.disabled ? 'off' : '');
+      var radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'turnMode'; radio.value = mode.value;
+      radio.disabled = mode.disabled === true;
+      radio.checked = !radio.disabled && mode.value === selected;
+      radio.addEventListener('change', function(){
+        if (!this.checked) return;
+        try { localStorage.setItem('adventureTurnMode', this.value); } catch (e) { /* 存不了就只记这次 */ }
+      });
+      label2.append(radio, document.createTextNode(mode.label));
+      modeBox.append(label2);
+      modeBoxes.push(radio);
+    }
     byId('loadoutOk').onclick = function(){
-      answer({ kind: 'loadout', node: run.loadout.node, weapons: boxes.filter(function(box){ return box.checked; }).map(function(box){ return box.value; }) });
+      var picked = 'auto';
+      for (var k = 0; k < modeBoxes.length; k += 1) if (modeBoxes[k].checked) picked = modeBoxes[k].value;
+      answer({ kind: 'loadout', node: run.loadout.node, weapons: boxes.filter(function(box){ return box.checked; }).map(function(box){ return box.value; }), mode: picked });
     };
   } else loadout.hidden = true;
+  renderTurn(run);
   byId('fullShowRow').hidden = !run.fullToggle;
   byId('fullShow').checked = run.fullShow === true;
   byId('fullShow').onchange = function(){ answer({ kind: 'toggle-full', on: this.checked }); };

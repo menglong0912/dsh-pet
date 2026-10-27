@@ -397,6 +397,8 @@ export const actionDecisionSchema = z.object({
     z.object({ kind: z.literal('skill'), skill: z.enum(SKILL_IDS) }),
     z.object({ kind: z.literal('move'), move: z.enum(MOVE_IDS) }),
   ]),
+  /** 逐手局（X18）自己定的一手；自动局的旧记录没有这个字段 */
+  live: z.boolean().optional(),
 });
 
 /** 主人的一个决定，以及战斗里自己一方的每次出手（进存档） */
@@ -412,6 +414,8 @@ export const decisionSchema = z.discriminatedUnion('kind', [
     kind: z.literal('loadout'),
     node: z.string().min(1).max(32),
     weapons: z.array(z.enum(WEAPON_IDS)).max(LOADOUT_MAX),
+    /** 出招方式（X18）：守护前挑法宝时选；旧存档没有就是自动 */
+    mode: z.enum(['auto', 'ai', 'manual']).optional(),
   }),
   z.object({ kind: z.literal('rewind') }),
   z.object({ kind: z.literal('retreat') }),
@@ -449,9 +453,13 @@ const runCoreSchema = z.object({
   pending: z
     .object({
       node: z.string().min(1).max(32),
-      need: z.enum(['choice', 'blessing', 'loadout']),
+      /** fight = 守护等逐手出招（X18）：先记下挑好的法宝和方式，再一手一手打 */
+      need: z.enum(['choice', 'blessing', 'loadout', 'fight']),
       /** 加持三选一的候选 */
       options: z.array(z.string().max(32)).max(6),
+      /** 逐手局的出招方式与守护前挑的法宝 */
+      mode: z.enum(['auto', 'ai', 'manual']).optional(),
+      weapons: z.array(z.enum(WEAPON_IDS)).max(LOADOUT_MAX).optional(),
     })
     .nullable(),
   /** 这一步的赶路什么时候走完；之前不收新的决定 */
@@ -891,6 +899,8 @@ export function choicesOf(def: DungeonDef, run: Run, pet: Fighter): Choice[] {
       }
       return out;
     }
+    // 守护的逐手局（X18）：这一场由流程一手一手打，不再给选项
+    if (run.pending.need === 'fight') return out;
     const foe = foePreviewOf(def, run, node);
     if (foe) out.push({ kind: 'loadout', node: node.id, weapons: weaponChoices(def, run, pet), max: LOADOUT_MAX, foe });
     return out;
@@ -976,6 +986,9 @@ export function advance(def: DungeonDef, run: Run, pet: Fighter, decision: Decis
     return finish(def, next, 'retreat', now, def.lines.retreat);
   }
 
+  // 守护的逐手局已经开打（X18）：这一场只由历练流程接着打，不再收别的决定
+  if (next.pending?.need === 'fight') throw new Error('这一场要逐手打完，不能再做别的选择');
+
   // 节点里等主人点的那一下：不再算赶路
   if (next.pending) {
     const node = def.nodes[next.pending.node];
@@ -988,7 +1001,37 @@ export function advance(def: DungeonDef, run: Run, pet: Fighter, decision: Decis
     }
     if (next.pending.need === 'loadout' && decision.kind === 'loadout' && decision.node === node.id) {
       next.pending = null;
-      return doFight(def, next, node, pet, now, decision.weapons, false);
+      const allowed = weaponChoices(def, next, pet);
+      const weapons = decision.weapons.filter((w) => allowed.includes(w)).slice(0, LOADOUT_MAX);
+      // 守护选了 AI / 手动（X18）：不在这里算完，先把双方配好、记下方式与法宝，交给历练流程一手一手打
+      const mode = decision.mode ?? 'auto';
+      if (mode !== 'auto' && node.kind === 'boss') {
+        // 灵泉余韵：开打前回 10% 气血（和 runFight 同一口径；只回这一次，续打不会再加）
+        if (next.blessings.includes('echo')) {
+          const max = maxHpOf(def, next, pet);
+          const m = selfMember(next);
+          m.hp = Math.min(max, m.hp + Math.floor(max * ECHO_HEAL));
+        }
+        next.pending = { node: node.id, need: 'fight', options: [], mode, weapons };
+        const foe = foePreviewOf(def, next, node);
+        return {
+          run: next,
+          outcome: {
+            readyAt: now,
+            travel: false,
+            result: {
+              kind: 'enter',
+              node: node.id,
+              name: node.name,
+              text: resolveText(node.text, next),
+              ...(node.art ? { art: node.art } : {}),
+              ...(node.anim ? { anim: node.anim } : {}),
+              ...(foe ? { foe } : {}),
+            },
+          },
+        };
+      }
+      return doFight(def, next, node, pet, now, weapons, false);
     }
     throw new Error(`「${node.name}」这一步要先做个选择，不是${decision.kind}`);
   }
@@ -1251,24 +1294,45 @@ interface FightOptions {
   extraRolls?: number;
   /** 打赢以后才打上的标记 */
   flags?: Record<string, string | number | boolean> | null;
+  /** 灵泉余韵开打前回 10% 气血（逐手局在 advance 里回，这里传 false） */
+  healEcho?: boolean;
 }
 
-/** 一场战斗的完整结算：配双方 → 钩子补丁 → `resolveFight` → 气血跨场 → 掉落 → 记出手 */
-function runFight(def: DungeonDef, run: Run, node: NodeDef, pet: Fighter, options: FightOptions): Fought {
+/** 配好的一场（X18 逐手局：先 `prepareLiveFight`，一手一手打完再 `completeLiveFight`） */
+export interface PreparedLiveFight {
+  foeId: string;
+  roster: FoeDef;
+  pet: Fighter;
+  party: Fighter[];
+  foe: Fighter;
+  seed: string;
+  extraRolls: number;
+  flags: Record<string, string | number | boolean> | null;
+  ctx: FightCtx;
+}
+
+/** 配双方 → 钩子补丁（X18 的逐手局也走这一份，保证和自动局同一口径） */
+function prepareFight(
+  def: DungeonDef,
+  run: Run,
+  node: NodeDef,
+  pet: Fighter,
+  options: FightOptions,
+): PreparedLiveFight {
   const foeId = foeOfNode(def, run, node);
   if (!foeId) throw new Error(`战斗节点 ${node.id} 没有对手`);
   const roster = def.foes[foeId];
-  const m = selfMember(run);
   const party = buildParty(def, run, pet);
   const foe = buildFoe(def, run, foeId);
   // 守护前挑法宝：引擎不用改，传进去的 weapons 少几件就行
-  const loadout = options.loadout;
+  const loadout = options.loadout ?? null;
   if (roster.tier === 'boss' && loadout && loadout.length > 0) {
     const allowed = weaponChoices(def, run, pet);
     party[0].weapons = loadout.filter((w) => allowed.includes(w));
   }
-  // 灵泉余韵：开打前回 10% 气血
-  if (run.blessings.includes('echo')) {
+  // 灵泉余韵：开打前回 10% 气血（自动局在这里回；逐手局在 advance 里回一次）
+  if (options.healEcho !== false && run.blessings.includes('echo')) {
+    const m = selfMember(run);
     const max = Math.max(1, party[0].hp);
     m.hp = Math.min(max, m.hp + Math.floor(max * ECHO_HEAL));
     party[0].hpNow = Math.max(1, m.hp);
@@ -1276,36 +1340,68 @@ function runFight(def: DungeonDef, run: Run, node: NodeDef, pet: Fighter, option
   const seed = fightSeed(run, node.id);
   const ctx: FightCtx = { def, run, node, party, foe, foeDef: roster, rng: rngFrom(`${seed}:patch`) };
   def.rules.patchFight?.(ctx);
-  const { events, hpAfter, won } = resolveFight(ctx.party, ctx.foe, seed);
-  // 气血跨场：赢了带着剩下的血进下一步；输了由调用方清零
+  return {
+    foeId,
+    roster,
+    pet,
+    party: ctx.party,
+    foe: ctx.foe,
+    seed,
+    extraRolls: options.extraRolls ?? 0,
+    flags: options.flags ?? null,
+    ctx,
+  };
+}
+
+/** 一场打完之后的结果：气血跨场、掉落、标记、记出手（自动局记；逐手局由流程边打边记） */
+function settleFight(
+  def: DungeonDef,
+  run: Run,
+  node: NodeDef,
+  prepared: PreparedLiveFight,
+  events: BattleEvent[],
+  hpAfter: [number, number],
+  won: boolean,
+  recordOwn: boolean,
+): Fought {
+  const m = selfMember(run);
   m.hp = won ? hpAfter[0] : 0;
   const reward = won
     ? fightLoot(
-        roster.tier,
-        rngFrom(`${seed}:loot`),
-        [...weaponChoices(def, run, pet), ...m.loot.weapons],
-        options.extraRolls ?? 0,
+        prepared.roster.tier,
+        rngFrom(`${prepared.seed}:loot`),
+        [...weaponChoices(def, run, prepared.pet), ...m.loot.weapons],
+        prepared.extraRolls,
         run.blessings.includes('mouse'),
       )
     : emptyLoot();
-  if (won && options.flags) Object.assign(run.flags, options.flags);
+  if (won && prepared.flags) Object.assign(run.flags, prepared.flags);
   // 自己一方的每次出手记进 run.decisions（手动战斗和回放的口子，设计 §4.16）
-  for (const action of actionsOf(events, 0)) {
-    run.decisions = [...run.decisions, { kind: 'action', node: node.id, side: 0, action }];
+  if (recordOwn) {
+    for (const action of actionsOf(events, 0)) {
+      run.decisions = [...run.decisions, { kind: 'action', node: node.id, side: 0, action }];
+    }
   }
   const result: FightResult = {
     kind: 'fight',
-    foe: foeId,
-    tier: roster.tier,
-    seed,
-    fighters: [ctx.party[0], ctx.foe],
+    foe: prepared.foeId,
+    tier: prepared.roster.tier,
+    seed: prepared.seed,
+    fighters: [prepared.party[0], prepared.foe],
     events,
     won,
     hp: [hpAfter[0], hpAfter[1]],
     reward,
     foeActions: actionsOf(events, 1),
   };
-  return { result, won, ctx };
+  return { result, won, ctx: prepared.ctx };
+}
+
+/** 一场战斗的完整结算：配双方 → 钩子补丁 → `resolveFight` → 气血跨场 → 掉落 → 记出手 */
+function runFight(def: DungeonDef, run: Run, node: NodeDef, pet: Fighter, options: FightOptions): Fought {
+  const prepared = prepareFight(def, run, node, pet, options);
+  const { events, hpAfter, won } = resolveFight(prepared.party, prepared.foe, prepared.seed);
+  return settleFight(def, run, node, prepared, events, [hpAfter[0], hpAfter[1]], won, true);
 }
 
 function actionsOf(events: BattleEvent[], side: 0 | 1): Action[] {
@@ -1476,6 +1572,43 @@ export function resolveFight(
   const last = events[events.length - 1];
   const hp: [number, number] = last.kind === 'end' ? last.hp : [party[0].hpNow ?? party[0].hp, 0];
   return { events, hpAfter: [Math.max(0, hp[0]), Math.max(0, hp[1])], won: last.kind === 'end' && last.winner === 0 };
+}
+
+/**
+ * 守护的逐手局（X18）：先配好双方（法宝按主人挑的少带），引擎那边由 `battle-live.ts` 用
+ * `fightUntilDecision` 一手一手算；打完再把事件交回 `completeLiveFight` 走同一套结算。
+ */
+export function prepareLiveFight(
+  def: DungeonDef,
+  run: Run,
+  node: NodeDef,
+  pet: Fighter,
+  weapons: WeaponId[],
+): PreparedLiveFight {
+  return prepareFight(def, run, node, pet, { loadout: weapons, healEcho: false });
+}
+
+/**
+ * 逐手局的收尾：事件已经打完，在这里结算气血、掉落、标记和结局。
+ * 自己这一边的出手由流程边打边记进 `run.decisions`（`recordOwn: false`，不能再记一遍）。
+ */
+export function completeLiveFight(
+  def: DungeonDef,
+  run: Run,
+  node: NodeDef,
+  prepared: PreparedLiveFight,
+  events: BattleEvent[],
+  now: number,
+): StepResult {
+  run.pending = null;
+  const last = events[events.length - 1];
+  const hp: [number, number] = last?.kind === 'end' ? last.hp : [prepared.party[0].hpNow ?? prepared.party[0].hp, 0];
+  const won = last?.kind === 'end' && last.winner === 0;
+  const fought = settleFight(def, run, node, prepared, events, [Math.max(0, hp[0]), Math.max(0, hp[1])], won, false);
+  if (!fought.won) return loseRound(run, now, fought.result);
+  addLoot(selfMember(run).loot, fought.result.reward);
+  def.rules.afterFight?.(fought.ctx);
+  return stepResult(def, run, now, fought.result, false);
 }
 
 /** 照着记下的出手走（手动战斗的口子）：用完了按空手，以后换成「问主人」的信号 */

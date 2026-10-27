@@ -1,5 +1,6 @@
 import { AdventureFlow } from '../adventure-flow';
 import { createAdventureShows } from '../adventure-show';
+import { askAiTurn } from '../battle-live';
 import { openAdventureWindow } from '../adventure-window';
 import { SANWANG } from '../dungeon-sanwang';
 import { guestBounds, guestSide } from '../visit-windows';
@@ -39,6 +40,9 @@ export function createAdventureGlue(ctx: FeatureContext): AdventureGlue {
     setBattle: (show) => {
       ctx.state.battle = show;
     },
+    setLiveBattle: (live) => {
+      ctx.state.liveBattle = live;
+    },
     refreshMenu: () => void refreshMenu(),
     playExtra: (anim, options) => void playExtra(anim, options),
     say: (text, options) => void say(text, options),
@@ -60,6 +64,7 @@ export function createAdventureGlue(ctx: FeatureContext): AdventureGlue {
           bounds: parked,
         }),
       fight: adventureShows.fight,
+      liveFight: adventureShows.liveFight,
       // 高光客串（Y5）：只开对手窗口，不打架
       cameo: adventureShows.cameo,
       skipFight: skipTrial,
@@ -79,6 +84,22 @@ export function createAdventureGlue(ctx: FeatureContext): AdventureGlue {
       setTimeout: (callback, ms) => setTimeout(callback, ms),
       clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
       random: Math.random,
+      exposeTurn: (question) => {
+        ctx.state.adventureTurn = question;
+      },
+      askAi: ({ view, names, signal }) =>
+        askAiTurn({
+          ai: ctx.ai,
+          system: ctx.fns.personaPrompt(),
+          view,
+          names,
+          timeoutMs: deps.aiTurnTimeoutMs ?? 15_000,
+          signal,
+          log: ctx.log,
+        }),
+      aiReady: () => ctx.ai.isReady(),
+      actionTimeoutMs: deps.actionTimeoutMs,
+      log: ctx.log,
       onChange: () => void refreshMenu(),
     });
     return ctx.state.adventure;
@@ -89,6 +110,9 @@ export function createAdventureGlue(ctx: FeatureContext): AdventureGlue {
     const flow = ensureAdventure();
     if (
       !flow ||
+      ctx.state.battle ||
+      ctx.state.liveBattle ||
+      ctx.state.actionPanel ||
       ctx.state.trip !== null ||
       ctx.state.hosting !== null ||
       ctx.state.duelWait !== null ||

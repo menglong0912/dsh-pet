@@ -4,9 +4,11 @@ import { AdventureFlow, AUTO_PICK_MS } from './adventure-flow.ts';
 import type { AdventureFlowDeps, AdventureProgress } from './adventure-flow.ts';
 import type { AdventureAnswer, AdventureChoiceView, AdventureWindow, AdventureView } from './adventure-window.ts';
 import { SANWANG } from './dungeon-sanwang.ts';
-import { autoDecide, layerNodeIdsOf, startRun } from './dungeon.ts';
+import { autoDecide, layerNodeIdsOf, prepareLiveFight, startRun } from './dungeon.ts';
 import type { DungeonDef, FightResult, FinishReason, Loot, Run } from './dungeon.ts';
-import type { Fighter } from './battle.ts';
+import { fallbackAction, fightUntilDecision } from './battle.ts';
+import { legalChoices } from './battle-live.ts';
+import type { Action, BattleEvent, Fighter } from './battle.ts';
 import type { CultivationEvent } from './cultivation.ts';
 
 /** 假时钟：注入 setTimeout / clearTimeout，测试按需拨 */
@@ -68,6 +70,7 @@ class FakeAdventureWindow implements AdventureWindow {
   setCompact(compact: boolean): void {
     this.compacted = compact;
   }
+  setTurn(): void {}
   hide(): void {
     this.hiddenNow = true;
   }
@@ -118,6 +121,10 @@ interface Harness {
   stored: () => Run | null;
   saves: Run[];
   fights: Array<{ result: FightResult; full: boolean }>;
+  liveCalls: number;
+  liveEvents: BattleEvent[][];
+  liveInitial: number[];
+  liveDecideIndexes: number[];
   cameos: Array<{ foe: string; lines: string[] }>;
   done: Array<{ reason: FinishReason; loot: Loot }>;
   events: CultivationEvent[][];
@@ -131,10 +138,22 @@ interface Harness {
   dispose(): void;
 }
 
-function makeFlow(options: { fighter?: Fighter; run?: Run | null; gate?: boolean; def?: DungeonDef } = {}): Harness {
+function makeFlow(
+  options: {
+    fighter?: Fighter;
+    run?: Run | null;
+    gate?: boolean;
+    def?: DungeonDef;
+    askAi?: () => Promise<{ pick: number; line?: string } | null>;
+  } = {},
+): Harness {
   const clock = fakeClock();
   const window = new FakeAdventureWindow();
   const fights: Harness['fights'] = [];
+  const liveEvents: BattleEvent[][] = [];
+  const liveInitial: number[] = [];
+  const liveDecideIndexes: number[] = [];
+  let liveCalls = 0;
   const cameos: Harness['cameos'] = [];
   const saves: Run[] = [];
   const done: Harness['done'] = [];
@@ -159,6 +178,22 @@ function makeFlow(options: { fighter?: Fighter; run?: Run | null; gate?: boolean
     fight: async (request) => {
       fights.push({ result: request.result, full: request.full });
       if (gate) await gate.promise;
+    },
+    liveFight: async (request) => {
+      liveCalls += 1;
+      liveInitial.push(request.initialActions.length);
+      const actions = [...request.initialActions];
+      let result = fightUntilDecision(request.a, request.b, request.seed, [actions, 'auto']);
+      while (result.need) {
+        liveDecideIndexes.push(actions.length);
+        const picked = await request.decide(result.need.view, actions.length, new AbortController().signal);
+        const action = picked?.action ?? fallbackAction(result.need.view, request.seed, actions.length);
+        actions.push(action);
+        request.onDecision(action, actions.length - 1);
+        result = fightUntilDecision(request.a, request.b, request.seed, [actions, 'auto']);
+      }
+      liveEvents.push(result.events);
+      return result.events;
     },
     cameo: async (request) => {
       cameos.push(request);
@@ -190,6 +225,7 @@ function makeFlow(options: { fighter?: Fighter; run?: Run | null; gate?: boolean
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
     random: () => 0.5,
+    ...(options.askAi ? { askAi: options.askAi } : {}),
   };
   const flow = new AdventureFlow(deps);
   const open = flow.open();
@@ -200,6 +236,12 @@ function makeFlow(options: { fighter?: Fighter; run?: Run | null; gate?: boolean
     stored: () => stored,
     saves,
     fights,
+    get liveCalls() {
+      return liveCalls;
+    },
+    liveEvents,
+    liveInitial,
+    liveDecideIndexes,
     cameos,
     done,
     events,
@@ -1065,6 +1107,199 @@ test('收起：结局页也能藏起来，从菜单叫回来再关掉', async ()
   assert.equal(harness.window.hiddenNow, false, '从菜单叫回来');
   harness.window.answer({ kind: 'close' });
   await harness.open;
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+/** 守护前挑法宝那一页：法宝一件、守关的是白凝冰 */
+function bossLoadoutRun(): Run {
+  const run = startRun(SANWANG, { pet: BIG, stage: 20, suppressed: false, nonce: 'boss-loadout', now: 0 });
+  run.layer = 5;
+  run.step = 1;
+  run.readyAt = 0;
+  run.pending = { node: 'collapse', need: 'loadout', options: [] };
+  run.flags = { ...run.flags, road: 'dog' };
+  run.decisions = [];
+  run.snapshot = null;
+  return run;
+}
+
+/** 守护已经开打、等逐手（中断 / 倒回以后的状态） */
+function bossFightRun(attempt: number, actions: Action[], pet: Fighter = BIG): Run {
+  const run = startRun(SANWANG, { pet, stage: 20, suppressed: false, nonce: 'boss-fight', now: 0 });
+  run.layer = 5;
+  run.step = 1;
+  run.attempt = attempt;
+  run.readyAt = 0;
+  run.pending = { node: 'collapse', need: 'fight', options: [], mode: 'ai', weapons: ['water-gun'] };
+  run.flags = { ...run.flags, road: 'dog' };
+  run.decisions = actions.map((action) => ({
+    kind: 'action' as const,
+    node: 'collapse',
+    side: 0 as const,
+    action,
+    live: true,
+  }));
+  run.snapshot = null;
+  return run;
+}
+
+/** 走一场守护：选方式 → 手动就点第一手 → 到结局页关掉 */
+async function driveBoss(harness: Harness, mode: 'auto' | 'ai' | 'manual'): Promise<void> {
+  for (let step = 0; step < 400; step += 1) {
+    await flush();
+    const view = harness.window.last;
+    if (view?.kind === 'ending') {
+      harness.window.answer({ kind: 'close' });
+      break;
+    }
+    if (view?.kind === 'run' && view.run) {
+      if (view.run.loadout && harness.window.waiting) {
+        harness.window.answer({
+          kind: 'loadout',
+          node: view.run.loadout.node,
+          weapons: ['water-gun'],
+          mode,
+        });
+        continue;
+      }
+      if (view.run.turn && harness.window.waiting) {
+        harness.window.answer({ kind: 'action', pick: 1 });
+        continue;
+      }
+      if (view.run.map.travel) {
+        await harness.clock.tick(view.run.map.travel.ms);
+        continue;
+      }
+      if (harness.window.waiting) {
+        const answer = answerFor(view);
+        if (answer) {
+          harness.window.answer(answer);
+          continue;
+        }
+      }
+    }
+    await harness.clock.tick(1_000);
+  }
+  await harness.open.catch(() => undefined);
+}
+
+test('X18 守护：自动 / AI 出招 / 手动三种方式各打一场，自己的手记进 run.decisions', async () => {
+  const seen: string[] = [];
+  for (const mode of ['auto', 'ai', 'manual'] as const) {
+    let aiCalls = 0;
+    const harness = makeFlow({
+      fighter: BIG,
+      run: bossLoadoutRun(),
+      askAi: async () => {
+        aiCalls += 1;
+        return { pick: 1 };
+      },
+    });
+    await driveBoss(harness, mode);
+    assert.equal(harness.done.length, 1, `${mode} 收了场`);
+    assert.equal(harness.done[0].reason, 'clear', `${mode} 打赢了`);
+    if (mode === 'auto') {
+      assert.equal(harness.fights.length, 1, '自动走整场');
+      assert.equal(harness.liveCalls, 0, '自动不逐手');
+      assert.equal(harness.liveInitial.length, 0);
+    } else {
+      assert.equal(harness.fights.length, 0, '逐手不走整场');
+      assert.equal(harness.liveCalls, 1, `${mode} 走逐手`);
+      assert.ok(harness.liveDecideIndexes.length > 0, `${mode} 问了至少一手`);
+      if (mode === 'ai') assert.ok(aiCalls > 0, 'AI 出招问了模型');
+      const saved = harness.saves[harness.saves.length - 1];
+      const recorded = saved?.decisions.filter((d) => d.kind === 'action' && d.live === true) ?? [];
+      assert.equal(recorded.length, harness.liveDecideIndexes.length, '每一手都记进了 run.decisions');
+      seen.push(mode);
+    }
+    harness.dispose();
+    await harness.open.catch(() => undefined);
+  }
+  assert.deepEqual(seen, ['ai', 'manual']);
+});
+
+test('X18 小怪不受出招方式影响：照旧整场自动算完，不走逐手', async () => {
+  const run = startRun(SANWANG, { pet: BIG, stage: 20, suppressed: false, nonce: 'mob', now: 0 });
+  run.layer = 2;
+  run.step = 0;
+  run.readyAt = 0;
+  run.flags = { ...run.flags, road: 'dog' };
+  run.decisions = [];
+  run.snapshot = null;
+  const harness = makeFlow({ fighter: BIG, run });
+  for (let step = 0; step < 100; step += 1) {
+    await flush();
+    const view = harness.window.last;
+    if (harness.fights.length > 0) break;
+    if (view?.kind === 'run' && harness.window.waiting) {
+      const node = view.run?.choices.find((choice) => choice.kind === 'node' && choice.id === 'dog-pack');
+      if (node) {
+        harness.window.answer({ kind: 'node', node: 'dog-pack' });
+        continue;
+      }
+    }
+    await harness.clock.tick(1_000);
+  }
+  assert.equal(harness.fights.length, 1, '小怪照旧打整场');
+  assert.equal(harness.liveCalls, 0, '小怪不走逐手');
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+test('X18 中断续打：先照 run.decisions 重放已经记下的手，再问剩下的，事件和一路打下来一致', async () => {
+  const pet: Fighter = { ...BIG, hp: 120, power: 9, agility: 9, speed: 9, weapons: ['water-gun'] };
+  const initial: Action[] = [{ kind: 'unarmed' }];
+  const run = startRun(SANWANG, { pet, stage: 9, suppressed: false, nonce: 'resume', now: 0 });
+  run.layer = 5;
+  run.step = 1;
+  run.readyAt = 0;
+  run.pending = { node: 'collapse', need: 'fight', options: [], mode: 'ai', weapons: ['water-gun'] };
+  run.flags = { ...run.flags, road: 'dog' };
+  run.decisions = initial.map((action) => ({
+    kind: 'action' as const,
+    node: 'collapse',
+    side: 0 as const,
+    action,
+    live: true,
+  }));
+  run.snapshot = null;
+  // 期望的事件：从已经记下的那一手开始，往后每一手都取清单第一项
+  const prepared = prepareLiveFight(SANWANG, run, SANWANG.nodes.collapse, pet, ['water-gun']);
+  const actions = [...initial];
+  let result = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [actions, 'auto']);
+  while (result.need) {
+    actions.push(legalChoices(result.need.view)[0].action);
+    result = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [actions, 'auto']);
+  }
+  const expected = result.events;
+
+  const harness = makeFlow({ fighter: pet, run, askAi: async () => ({ pick: 1 }) });
+  for (let step = 0; step < 200; step += 1) {
+    await flush();
+    if (harness.window.last?.kind === 'ending') break;
+    await harness.clock.tick(1_000);
+  }
+  assert.deepEqual(harness.liveInitial, [initial.length], '先拿已经记下的手');
+  assert.equal(harness.liveDecideIndexes[0], initial.length, '记下的手不再问，从下一手开始问');
+  assert.deepEqual(harness.liveEvents[0], expected, '重放出同一串事件');
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+test('X18 春秋蝉倒回：新一轮照着上一轮的决定序列走，不重新问已经记下的手', async () => {
+  const initial: Action[] = [{ kind: 'unarmed' }, { kind: 'unarmed' }];
+  const pet: Fighter = { ...BIG, hp: 500, power: 9, agility: 50, speed: 50, weapons: ['water-gun'] };
+  const run = bossFightRun(2, initial, pet);
+  const harness = makeFlow({ fighter: pet, run, askAi: async () => ({ pick: 1 }) });
+  for (let step = 0; step < 200; step += 1) {
+    await flush();
+    if (harness.window.last?.kind === 'ending') break;
+    await harness.clock.tick(1_000);
+  }
+  assert.deepEqual(harness.liveInitial, [initial.length], '倒回后先照决定序列重放');
+  assert.equal(harness.liveDecideIndexes[0], initial.length, '已经记下的两手不重新问');
+  assert.ok(harness.liveCalls === 1);
   harness.dispose();
   await harness.open.catch(() => undefined);
 });

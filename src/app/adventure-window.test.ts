@@ -10,6 +10,7 @@ import {
   adventureAssetUrl,
   adventureBounds,
   adventureCompactBounds,
+  adventureTurnBounds,
   adventurePage,
   adventureViewWithUrls,
   clampAdventureBounds,
@@ -62,6 +63,25 @@ test('小窗位置：在宠物旁边、优先和对手相反的一边；放不�
   assert.equal(compact.height, ADVENTURE_COMPACT_HEIGHT);
   assert.equal(compact.x, workArea.x + 12);
   assert.equal(compact.y, workArea.y + 12);
+  // 手动出招：同一条临时长高，够放下按钮
+  const turn = adventureTurnBounds(workArea, 'left');
+  assert.equal(turn.x, compact.x);
+  assert.equal(turn.y, compact.y);
+  assert.ok(turn.height > compact.height);
+  // 原地长高会盖住自家宠物（宠物在屏幕顶上）：挪到宠物下面
+  const pet = { x: compact.x + 50, y: compact.y + 40, width: 300, height: 300 };
+  const moved = adventureTurnBounds(workArea, 'left', pet);
+  assert.equal(moved.x, compact.x);
+  assert.equal(moved.y, pet.y + pet.height + 12);
+  assert.equal(moved.height, turn.height);
+  // 不压宠物：照原位
+  assert.deepEqual(
+    adventureTurnBounds(workArea, 'left', { x: compact.x + 900, y: 600, width: 100, height: 100 }),
+    turn,
+  );
+  // 压到宠物、但宠物下面放不下（宠物又高又靠下）：照原位
+  const deep = { x: compact.x, y: compact.y + 10, width: 300, height: workArea.height - 60 };
+  assert.deepEqual(adventureTurnBounds(workArea, 'left', deep), turn);
 });
 
 test('素材地址逐段编码；图片、场景、地图、加持卡面都由主进程拼好再进页面', () => {
@@ -99,6 +119,7 @@ test('素材地址逐段编码；图片、场景、地图、加持卡面都由�
       mapClickable: true,
       cutscene: null,
       loadout: null,
+      turn: null,
       fullShow: false,
       fullToggle: true,
       compact: false,
@@ -126,6 +147,11 @@ test('adventurePage：只用 textContent，数据经 JSON 字面量；adv.wait �
   assert.ok(adventurePage.includes("answer({ kind: 'skip' })"));
   assert.ok(adventurePage.includes("answer({ kind: 'enter', suppressed: byId('suppressed').checked })"));
   assert.ok(adventurePage.includes("answer({ kind: 'again' })"));
+  // 逐手出招（X18）：手动按钮在小窗里；出招方式默认自动、页面自己记上次选的
+  assert.ok(adventurePage.includes('id="turn"'));
+  assert.ok(adventurePage.includes("answer({ kind: 'action', pick: pick })"));
+  assert.ok(adventurePage.includes("localStorage.getItem('adventureTurnMode')"));
+  assert.ok(adventurePage.includes("localStorage.setItem('adventureTurnMode'"));
   // 收起、自动走、拖动标题栏（Y4）
   assert.ok(adventurePage.includes("answer({ kind: 'hide' })"));
   assert.ok(adventurePage.includes("answer({ kind: 'toggle-auto', on: this.checked })"));

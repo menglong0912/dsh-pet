@@ -272,6 +272,10 @@ export interface LiveBattleOptions {
   timeline?: TimelineOptions;
   /** 定这一手：AI 超时 / 手动没点由实现回 null，外层按后备挑法出 */
   decide: (view: BattleView, index: number, signal: AbortSignal) => Promise<TurnDecision | null>;
+  /** 已经记下的自家出手（中断续打 / 春秋蝉倒回）：先照这串重放，用完再问 */
+  initialActions?: readonly Action[];
+  /** 每定下一手（含后备）就回调：调用方立刻写进存档 */
+  onDecision?: (action: Action, index: number) => void;
   /** 演完一段还没定（AI 还在想）：让宠物头上显示「想一想…」 */
   think: () => void;
   log: (message: string) => void;
@@ -291,7 +295,7 @@ export interface LiveBattle {
  * 全自动的场次不走这里（`fight` + 整场 `timeline` 一字不改）。
  */
 export function startLiveBattle(options: LiveBattleOptions): LiveBattle {
-  const decisions: Action[] = [];
+  const decisions: Action[] = [...(options.initialActions ?? [])];
   const decideLines = new Map<number, string>();
   const live = new LiveTimeline(
     [options.a.name, options.b.name],
@@ -335,7 +339,7 @@ export function startLiveBattle(options: LiveBattleOptions): LiveBattle {
   };
 
   void (async () => {
-    let result = fightUntilDecision(options.a, options.b, options.seed, [[], 'auto']);
+    let result = fightUntilDecision(options.a, options.b, options.seed, [decisions, 'auto']);
     try {
       while (true) {
         if (disposed) return finish(null);
@@ -343,7 +347,9 @@ export function startLiveBattle(options: LiveBattleOptions): LiveBattle {
           // 剩下的手全按后备挑法算完，再跳到收场
           while (result.need) {
             const index = decisions.length;
-            decisions.push(fallbackAction(result.need.view, options.seed, index));
+            const action = fallbackAction(result.need.view, options.seed, index);
+            decisions.push(action);
+            options.onDecision?.(action, index);
             result = fightUntilDecision(options.a, options.b, options.seed, [decisions, 'auto']);
           }
           live.push(result.events);
@@ -388,6 +394,7 @@ export function startLiveBattle(options: LiveBattleOptions): LiveBattle {
         // 外部把等待作废（面板关了 / 收到一半的 AI 请求）：这一手改按后备挑法出
         const action = picked?.action ?? fallbackAction(need.view, options.seed, index);
         decisions.push(action);
+        options.onDecision?.(action, index);
         if (picked?.line) decideLines.set(result.events.length, picked.line);
         result = fightUntilDecision(options.a, options.b, options.seed, [decisions, 'auto']);
       }

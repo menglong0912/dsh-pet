@@ -79,6 +79,9 @@ test('Y5 客串：只开对手窗口、冒三句、淡出关掉，不开擂台�
     setBattle: () => {
       throw new Error('客串不该开擂台');
     },
+    setLiveBattle: () => {
+      throw new Error('客串不该开逐手局');
+    },
     refreshMenu: () => undefined,
     playExtra: () => undefined,
     say: () => undefined,

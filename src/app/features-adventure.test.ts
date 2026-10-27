@@ -1,5 +1,6 @@
 import { SANWANG } from './dungeon-sanwang.ts';
 import { startRun } from './dungeon.ts';
+import type { Fighter } from './battle.ts';
 import { withFeatures, cultivationEarly, until, last, windows, cultivationSeed, windowOn } from './features-testkit.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -129,4 +130,51 @@ test('历练：收起来以后从菜单能叫回来，心魔试炼和渡劫照�
     win.answerAdv({ kind: 'close' });
     await until(() => win.destroyed, '关掉');
   });
+});
+
+test('X18 历练逐手：GET /app/battle 看到在选方式 / 等一手，POST 同一口径能选方式、能点招', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const pet: Fighter = { name: '阿鱼', hp: 104, power: 8, agility: 8, speed: 8, weapons: ['water-gun'], skills: [] };
+  const run = startRun(SANWANG, { pet, stage: 8, suppressed: false, nonce: 'live-boss', now: Date.now() });
+  run.layer = 5;
+  run.step = 1;
+  run.readyAt = Date.now() - 1;
+  run.pending = { node: 'collapse', need: 'loadout', options: [] };
+  run.flags = { ...run.flags, road: 'dog' };
+  run.decisions = [];
+  const seed = { ...cultivationSeed(), adventure: { run, cleared: {}, titles: [] } };
+  await withFeatures(
+    { cultivation: seed, clicks, actionTimeoutMs: 5_000, aiTurnTimeoutMs: 1_000 },
+    async (features, _said, _bodies, _home, { menus }) => {
+      await until(() => (last(menus) ?? []).includes('修炼/历练（第 5 层）'), '历练菜单');
+      clicks.push('修炼/历练（第 5 层）');
+      await until(() => windowOn('/app/adventure') !== undefined, '历练小窗');
+      const win = windowOn('/app/adventure')!;
+      await until(() => features.battle.state()?.kind === 'mode', '本机接口看到选方式');
+      const mode = features.battle.state();
+      assert.deepEqual(
+        mode?.options.map((option) => option.label),
+        ['自动', 'AI 出招', '手动'],
+        '选方式三个按钮',
+      );
+      assert.ok(features.battle.choose(3), 'curl 选手动');
+      await until(() => features.battle.state()?.kind === 'action', '本机接口看到手动出招');
+      const action = features.battle.state();
+      assert.ok((action?.options.length ?? 0) > 0, '这一手有得选');
+      assert.ok(features.battle.choose(1), 'curl 点第一手');
+      await until(() => (last(menus) ?? []).includes('修炼/快进'), '逐手局开打（菜单换成快进）');
+      clicks.push('修炼/快进');
+      // 快进以后可能打赢（结局页），也可能输了（只剩倒带 / 收场）：输了就点「就此收场」
+      await until(() => {
+        const latest = win.calls.filter((code) => code.startsWith('adv.render(')).pop() ?? '';
+        if (latest.includes('"kind":"ending"')) return true;
+        if (latest.includes('"kind":"rewind"')) win.answerAdv({ kind: 'end' });
+        return false;
+      }, '打完到结局页');
+      assert.equal(features.battle.state(), null, '收场后本机接口不再挂着选择');
+      win.answerAdv({ kind: 'close' });
+      await until(() => win.destroyed, '关掉');
+    },
+  );
 });

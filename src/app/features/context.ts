@@ -5,7 +5,7 @@
 import type { ConfigPaths } from '../../host/config';
 import type { StandaloneAiService } from '../../standalone/ai-provider';
 import type { ActivitySnapshot, ActivityTracker } from '../activity';
-import type { AdventureFlow } from '../adventure-flow';
+import type { AdventureFlow, AdventureTurnQuestion } from '../adventure-flow';
 import type { AppConfig } from '../app-config';
 import type { ActionPanelWindow, PanelView, TurnMode } from '../action-panel-window';
 import type { ArenaWindow } from '../arena-window';
@@ -378,6 +378,8 @@ export interface FeatureState {
   liveBattle: LiveBattle | null;
   /** 出招面板（X17）：开打前选方式 / 手动出招时等一手；收摊、退出一起关 */
   actionPanel: ActionPanelWindow | null;
+  /** 历练里的选方式 / 手动出招（X18）：按钮在历练小窗里，本机接口和出招面板同一口径 */
+  adventureTurn: AdventureTurnQuestion | null;
   /**
    * 逐手对传（X19）应战方那一侧的入口：协议层收到 /v1/spar/turn、/v1/duel/turn 时递一手进来；
    * 只有一场，收摊时清掉。发起方（发 HTTP）那边没有。

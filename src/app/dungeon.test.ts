@@ -9,8 +9,11 @@ import {
   buildFoe,
   buildParty,
   choicesOf,
+  completeLiveFight,
+  fightSeed,
   expired,
   maxHpOf,
+  prepareLiveFight,
   reachableNodes,
   replayFight,
   resolveFight,
@@ -26,9 +29,9 @@ import {
   type Run,
 } from './dungeon.ts';
 import { SANWANG } from './dungeon-sanwang.ts';
-import { MOVES } from './battle.ts';
+import { MOVES, fallbackAction, fightUntilDecision } from './battle.ts';
 import { fighterAt, seededRng } from './battle-testkit.ts';
-import type { Action, Fighter } from './battle.ts';
+import type { Action, BattleEvent, Fighter } from './battle.ts';
 
 const NOW = 0;
 const DEF: DungeonDef = SANWANG;
@@ -319,6 +322,79 @@ test('Y0 口子：记下的出手加 scriptedController 原样重放一场', () 
   const ctrl = scriptedController([{ kind: 'unarmed' }]);
   assert.deepEqual(ctrl.decide({} as never), { kind: 'unarmed' });
   assert.deepEqual(ctrl.decide({} as never), { kind: 'unarmed' });
+});
+
+test('X18 逐手局：重放到缺决策处，补一手从头算，事件前缀不变；补齐后和整场一致', () => {
+  const pet: Fighter = { ...fighterAt(9, seededRng(23)), name: '小鱼' };
+  const run = startRun(DEF, { pet, stage: 9, suppressed: false, nonce: 'live-replay', now: 0 });
+  run.layer = 5;
+  run.step = 1;
+  run.flags.road = 'dog';
+  const node = DEF.nodes.collapse;
+  const prepared = prepareLiveFight(DEF, run, node, pet, []);
+  assert.equal(prepared.seed, fightSeed(run, node.id));
+
+  // 整场：每一手都用后备挑法，把完整事件和出手串都记下来（每次从头算，最后一份就是整场）
+  const actions: Action[] = [];
+  let result = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [actions, 'auto']);
+  while (result.need) {
+    actions.push(fallbackAction(result.need.view, prepared.seed, actions.length));
+    result = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [actions, 'auto']);
+  }
+  const full: BattleEvent[] = result.events;
+
+  // 中断：只有前两手的串，重放出来的事件必须是整场的前缀
+  const prefix = actions.slice(0, 2);
+  const partial = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [prefix, 'auto']);
+  assert.ok(partial.need, '还缺决策');
+  assert.deepEqual(partial.events, full.slice(0, partial.events.length));
+  // 同一个前缀再算一次，逐条一样（从头重算不漂）
+  const again = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [prefix, 'auto']);
+  assert.deepEqual(again.events, partial.events);
+
+  // 补齐剩下的手：和整场逐条一样
+  const rest = [...prefix];
+  let continued = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [rest, 'auto']);
+  while (continued.need) {
+    rest.push(fallbackAction(continued.need.view, prepared.seed, rest.length));
+    continued = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [rest, 'auto']);
+  }
+  assert.deepEqual(continued.events, full);
+});
+
+test('X18 逐手局：completeLiveFight 用同一套气血 / 掉落 / 收场结算', () => {
+  const pet: Fighter = {
+    name: '小鱼',
+    hp: 5_000,
+    power: 1_000,
+    agility: 500,
+    speed: 500,
+    weapons: ['water-gun'],
+    skills: [],
+  };
+  const run = startRun(DEF, { pet, stage: 9, suppressed: false, nonce: 'live-done', now: 0 });
+  run.layer = 5;
+  run.step = 1;
+  run.flags.road = 'dog';
+  const node = DEF.nodes.collapse;
+  const prepared = prepareLiveFight(DEF, run, node, pet, ['water-gun']);
+  const actions: Action[] = [];
+  let result = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [actions, 'auto']);
+  while (result.need) {
+    actions.push(fallbackAction(result.need.view, prepared.seed, actions.length));
+    result = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [actions, 'auto']);
+  }
+  const step = completeLiveFight(DEF, run, node, prepared, result.events, 1_000);
+  assert.equal(run.pending, null, '收尾时清掉等待');
+  assert.equal(step.outcome.result.kind, 'fight');
+  const fought = step.outcome.result.kind === 'fight' ? step.outcome.result : null;
+  assert.ok(fought);
+  assert.equal(fought.events.length, result.events.length);
+  assert.equal(run.members[0].hp, fought.hp[0]);
+  assert.equal(step.outcome.end?.reason, 'clear', '这是最后一层，打完就收场');
+  assert.equal(run.status, 'over');
+  assert.ok(step.outcome.end && step.outcome.end.loot.xp > 0);
+  assert.equal(run.decisions.length, 0, '逐手局由流程边打边记，complete 不再记一遍');
 });
 
 test('Y0 口子：seedOf 一份随机数时结果稳定', () => {
