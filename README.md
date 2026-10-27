@@ -128,6 +128,18 @@ dsh-pet look          # 看一眼屏幕吐槽
 ```
 
 
+## Windows 版的限制
+
+Windows 版只出 zip 绿色版，由 CI 构建（`.github/workflows/windows-check.yml` 手动触发：安装依赖 → 测试 → 打包 → 启动冒烟截图）。**没有 Windows 真机，只在 CI 上验证过能启动、`/health` 应答和截到宠物窗口**，日常使用没有实测。
+
+以下功能只在 macOS 版有，Windows 版没有：
+
+- 前台应用采样（`lsappinfo`）：依赖它的「知道你在干嘛」（碎碎念 / 对话里说你在用哪个应用）和宠物日记里的应用用时记录；没有它时仍能判断你在不在电脑前，只是不知道在用哪个应用；
+- `dsh-pet` 命令行（`say` / `whisper` / `look` / `activity` / `hook`）；
+- Claude Code hook。
+
+其余应用内功能（桌面宠物、右键菜单、设置页、碎碎念、对话、看屏幕、串门、修炼）两边是同一份代码，但 Windows 上没有真机验证。
+
 ## ⚙️ 碎碎念与对话
 
 - **碎碎念**：`pets[i].whisperEnabled` 开启后，按 `eventsRefreshSec.whisper`（秒，默认 300）周期自动生成一句——每只宠物独立周期、独立文案；触发时随机抽 `events.whisper` 动画 + 头顶说话气泡（10 秒消失）。默认开启

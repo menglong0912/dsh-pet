@@ -1,0 +1,80 @@
+# ============================================================================
+# Windows 冒烟流水线（手动触发）
+#
+# 没有 Windows 真机，CI 是唯一能验证「Windows 上装依赖、测试、打包、真启动」的地方：
+#   1. pnpm install  —— 确认 lockfile 与 Electron 二进制（.npmrc 的 electron_mirror）能装上；
+#   2. npm test      —— 先跑测试，测试不过就别打包；
+#   3. npm run dist  —— 先 bundle + build:desktop-core，再出 dist-app/win-unpacked；
+#   4. 冒烟脚本      —— 用临时 DSH_HOME 启动 dsh-pet.exe，等 app.json / GET /health，
+#                       借 helper 的 DSH_PET_SMOKE=1 截宠物窗口图，然后让它自己退出；
+#   5. 上传截图与日志作为 artifact。
+#
+# 这是正式发版（release-app.yml）之外的「先跑通」检查；release-app 只负责打 zip 挂 Release。
+# 推送/触发由人来做：这个仓库没有 Windows 机器，本地不能替代 CI 的这次真启动。
+# ============================================================================
+
+name: windows-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-check
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        # 包在 dsh-pet/ 子目录：所有 run 步骤默认在那里执行
+        working-directory: dsh-pet
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # 与本机一致（pnpm 10.33）；lockfileVersion 仍是 9.0
+          version: 10
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 运行测试
+        run: npm test
+
+      - name: 打包解包目录
+        run: npm run dist
+
+      - name: 启动应用冒烟（app.json → /health → 截图 → 自行退出）
+        run: node scripts/smoke-app.mjs
+
+      - name: 上传冒烟截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-screenshot
+          path: dsh-pet/dist-app/smoke.png
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 上传冒烟日志（失败也传）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-log
+          path: dsh-pet/dist-app/smoke-app.log
+          if-no-files-found: ignore
+          retention-days: 7
