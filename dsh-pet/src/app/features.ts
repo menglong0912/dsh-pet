@@ -157,8 +157,8 @@ const NOTE_RELAY_MS = 15_000;
 const SCREEN_ACTIVE_IDLE_SEC = 60;
 /** 应用刚说过话这么久内，自动碎碎念让一让（气泡默认显示 10 秒） */
 const SPOKE_HOLD_MS = 15_000;
-/** 打完到关掉心魔窗口 / 擂台之间的停顿（§X3：3 秒） */
-const CLOSE_HOLD_MS = 3_000;
+/** 打完到关掉心魔窗口 / 擂台之间的停顿（§X14：1 秒——run() 结束时收场动作只剩约 0.6 秒，停这么久正好播完） */
+const CLOSE_HOLD_MS = 1_000;
 /** 演出占着宠物的锁比时间线多留这么久：演完还要停 CLOSE_HOLD_MS 才放，定时器也会有点漂 */
 const SHOW_LOCK_SPARE_MS = 30_000;
 /** 切磋等客人应战 / 亮随机数的时限（§X5：对不上或 30 秒没来，按客人认输记） */
@@ -1711,9 +1711,18 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
    * 碎碎念与自动看屏幕让一让、平时打坐不播、有人来敲门先把这场快进结束、修炼冒泡不联动动画。
    */
   let battle: BattleShow | null = null;
-  /** 这场的心魔窗口、擂台与特效层（演完 3 秒关掉） */
-  let trialWindows: { guest: GuestWindow; arena: ArenaWindow; fx: FxWindow } | null = null;
-  /** 这场渡劫的特效层（X7 第二步：乌云与闪电；演完 3 秒关掉） */
+  /** 一场心魔试炼的三扇窗（每场记自己的一份引用，收摊只关自己那组） */
+  interface TrialWindows {
+    guest: GuestWindow;
+    arena: ArenaWindow;
+    fx: FxWindow;
+  }
+  /**
+   * 还没收完的每一场心魔试炼：上一场演完等 `CLOSE_HOLD_MS` 收摊时又开了下一场，
+   * 两组都要能各自关掉；敲门、退出时全部立刻关（§X14，照切磋的 `sparWindows` 那套）。
+   */
+  const trialWindowGroups = new Set<TrialWindows>();
+  /** 这场渡劫的特效层（X7 第二步：乌云与闪电；演完 `CLOSE_HOLD_MS` 后关掉） */
   let tribulationFx: FxWindow | null = null;
   /** 下次平时打坐最早什么时候（40–60 分钟一次） */
   let meditateAt = Date.now() + meditateGapMs();
@@ -1848,13 +1857,17 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   // ---------- 心魔试炼（X3 演出） ----------
 
   /**
-   * 开一场心魔试炼：心魔窗口 + 擂台 → 引擎算一场 → 按时间线演 → 算奖励、记日记、说赛后感言。
+   * 开一场心魔试炼：心魔窗口 + 擂台 → 引擎算一场 → 按时间线演 → 算奖励、记日记、收摊、说赛后感言。
    * 演法（§X3）：每句台词走 /broadcast 的 anim: false、时长和一步相当，下一句自然顶替上一句；
    * 台词不进说话队列（它们按时间线走），但碎碎念与自动看屏幕在这期间让路。
+   * 收摊不等模型（§X14）：菜单、窗口、记账都在 compose 之前，赛后感言回来只负责说。
    */
   async function runTrial(): Promise<void> {
     const practice = cultivationOn();
     if (!practice || battle || trip || hosting) return;
+    // 上一场演完还没收完的那组立刻关：新一场不能和它叠着，也不能让它稍后收摊时关错窗口（§X14）
+    for (const old of [...trialWindowGroups]) closeTrialWindows(old, 0);
+    let windows: TrialWindows | null = null;
     const you = practice.fighter(petName());
     const foe = shadowOf(you);
     const events = fight(you, foe, `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
@@ -1872,18 +1885,19 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       electron,
       `${new URL(deps.petBase).origin}/app/arena`,
       homePet.box,
-      () => trialWindows?.guest.bounds() ?? null,
+      () => windows?.guest.bounds() ?? null,
     );
     // 心魔要播的动画先取到窗口里（X7：换源不等网络，出手才和飞行物对得上）
     guest.preload(SHOW_ANIMS);
     // 特效层（X7）：飞行物从出手方手里飞到对方身上，命中那一刻对方才开始反应
     // 心魔放出来的飞行物和命中特效也用它的暗紫配色（手里那件暗色道具出手时颜色才接得上，不突然变鲜艳）
     const fx = openShowFx(
-      () => trialWindows?.guest.bounds() ?? null,
+      () => windows?.guest.bounds() ?? null,
       () => guest.side === 'left',
       true,
     );
-    trialWindows = { guest, arena, fx };
+    windows = { guest, arena, fx };
+    trialWindowGroups.add(windows);
     const scoreboard = arenaScoreboard({
       self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
       foe: { label: foe.name, maxHp: foe.hp },
@@ -1922,7 +1936,11 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     // 奖励（修为进账、掉法宝、战绩都在 trialDone 里；冒泡与日记在 onCultivation）
     onCultivation(Date.now(), practice.trialDone(Date.now(), won), { anim: false });
     diary.note(Date.now(), 'cultivate', won ? '心魔试炼打赢了' : '心魔试炼没打赢');
-    // 赛后感言：走 compose（只带人设，§2.2 的口径），生成不了用模板；anim: false 别顶掉收场动画
+    // 演完马上收摊（§X14）：菜单换回来、这一场的窗口按 CLOSE_HOLD_MS 收，都不等赛后感言
+    void refreshMenu();
+    closeTrialWindows(windows, CLOSE_HOLD_MS);
+    // 赛后感言：走 compose（只带人设，§2.2 的口径），生成不了用模板；anim: false 别顶掉收场动画。
+    // 回来时已经开了下一场（battle 不是 null）就不说了，免得插进下一场的台词里
     const instruction =
       `你刚跟自己的心魔打了一架（${you.name} 对 ${foe.name}），${won ? '你赢了' : '你输了'}。` +
       '跟主人说一句赛后感言。' +
@@ -1931,20 +1949,24 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       await compose(instruction, won ? '心魔被打跑了，呼～' : '心魔太强了，我输了，下次再来～'),
       LINE_MAX,
     );
-    void say(text, { anim: false });
-    void refreshMenu();
-    // 3 秒后关心魔窗口、擂台与特效层
-    closeTrial(CLOSE_HOLD_MS);
+    if (battle === null) void say(text, { anim: false });
   }
 
-  /** 关掉这场的心魔窗口、擂台与特效层（3 秒后收尾用；有人来敲门、退出时立刻关） */
+  /** 关掉某一组心魔试炼的窗口：0 = 立刻，`CLOSE_HOLD_MS` = 演完停一会儿；同一组只关一次 */
+  function closeTrialWindows(windows: TrialWindows, afterMs: number): void {
+    const close = (): void => {
+      if (!trialWindowGroups.delete(windows)) return;
+      windows.guest.close(0);
+      windows.arena.close(0);
+      windows.fx.close(0);
+    };
+    if (afterMs <= 0) close();
+    else setTimeout(close, afterMs);
+  }
+
+  /** 关掉所有还没收完的心魔窗口、擂台与特效层（有人来敲门、退出时立刻关；新开一场时先清上一组） */
   function closeTrial(afterMs: number): void {
-    const closing = trialWindows;
-    if (!closing) return;
-    trialWindows = null;
-    closing.guest.close(afterMs);
-    closing.arena.close(afterMs);
-    closing.fx.close(afterMs);
+    for (const windows of [...trialWindowGroups]) closeTrialWindows(windows, afterMs);
   }
 
   /** 快进：停掉剩下的步骤，直接看结果（菜单「修炼/快进」，有人敲门时也用它收场；渡劫同样用它） */
@@ -2022,7 +2044,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     void refreshMenu();
   }
 
-  /** 关掉渡劫的特效层（演完 3 秒收尾；退出时立刻关） */
+  /** 关掉渡劫的特效层（演完 `CLOSE_HOLD_MS` 后收尾；退出时立刻关） */
   function closeTribulationFx(afterMs: number): void {
     const closing = tribulationFx;
     if (!closing) return;
@@ -2067,7 +2089,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
 
   /**
    * 这一场切磋开着的窗口：对手窗口（主人家那边是客人窗口、客人这边是「主人家的宠物」窗口；心魔试炼没有）、
-   * 擂台、特效层。每一场记自己的一份引用——上一场演完到 3 秒收摊之间又开了下一场时，收摊只关自己那份，
+   * 擂台、特效层。每一场记自己的一份引用——上一场演完到 `CLOSE_HOLD_MS` 收摊之间又开了下一场时，收摊只关自己那份，
    * 不会把下一场的窗口误关掉，也不会把上一场的窗口丢下没人关（§X11「顺手发现」第 1 条就是漏关的教训）。
    */
   interface SparWindows {
@@ -2075,7 +2097,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     arena: ArenaWindow;
     fx: FxWindow;
   }
-  /** 还没收完的每一场（上一场演完等 3 秒收摊时又开了下一场，两组都要在退出 / 回家时立刻关掉） */
+  /** 还没收完的每一场（上一场演完等 `CLOSE_HOLD_MS` 收摊时又开了下一场，两组都要在退出 / 回家时立刻关掉） */
   const sparWindows = new Set<SparWindows>();
 
   /** 收摊一场切磋（客人走了 / 回家了 / 退出）：定时器停掉、演出停掉、窗口全部立刻关 */
@@ -2089,7 +2111,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       battle?.dispose();
       battle = null;
     }
-    // 演完到 3 秒收摊之间回家 / 被请回也要立刻关（那会儿 spar 已经是 null，靠窗口组收尾）
+    // 演完到 `CLOSE_HOLD_MS` 收摊之间回家 / 被请回也要立刻关（那会儿 spar 已经是 null，靠窗口组收尾）
     for (const windows of [...sparWindows]) closeSparWindows(windows, 0);
   }
 
@@ -2262,16 +2284,18 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     const cancelled = spar !== state || disposed;
     if (spar === state) spar = null;
     if (cancelled) return;
-    // 客人跟着 reveal 捎回来的赛后感言先上客人窗口的气泡；自家的走 compose（只带人设，每场 +1 次调用）
+    // 客人跟着 reveal 捎回来的赛后感言先上客人窗口的气泡；自家的走 compose（只带人设，每场 +1 次调用）。
+    // 演完马上收摊（§X14）：菜单换回来、这一场的窗口按 CLOSE_HOLD_MS 收，都不等自家的赛后感言
     if (guestLine) current.window.say(guestLine, LINE_MS);
+    void refreshMenu();
+    closeSparWindows(windows, CLOSE_HOLD_MS);
     const instruction =
       `你刚和来串门的${visitor.pet}（${visitor.owner} 家的）切磋了一场，${won ? '你赢了' : '你输了'}。` +
       '跟主人说一句赛后感言。' +
       (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人，下次再战。');
     const text = cleanText(await compose(instruction, won ? '切磋赢啦，承让承让～' : '切磋输了，下次再战！'), LINE_MAX);
-    void say(text, { anim: false });
-    closeSparWindows(windows, CLOSE_HOLD_MS);
-    void refreshMenu();
+    // 回来时已经开了下一场（battle 不是 null）就不说了，免得插进下一场的台词里
+    if (battle === null) void say(text, { anim: false });
   }
 
   /**

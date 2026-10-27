@@ -42,7 +42,17 @@ import { generateVisitIdentity, loadVisitIdentity } from './visit-identity.ts';
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /** 假环境里可调的：键鼠空闲秒数、插件碎碎念间隔、挑表情包时模型的回答、看屏幕时模型磨蹭多久（测试改完要还原） */
-const env = { idleSec: 0, whisperSec: 60, memeAnswer: '无', visionDelayMs: 0, visionDone: 0 };
+const env = {
+  idleSec: 0,
+  whisperSec: 60,
+  memeAnswer: '无',
+  /** 按调用顺序吐给 compose 的回答（用完后回落到 memeAnswer） */
+  memeReplies: [] as string[],
+  /** 非 null 时 compose 的模型调用卡在这里不返回（§X14 测「收摊不等感言」） */
+  memeHold: null as Promise<void> | null,
+  visionDelayMs: 0,
+  visionDone: 0,
+};
 
 /** 假窗口（客人 / 心魔 / 擂台）：记下页面调用与销毁 */
 interface FakeWin {
@@ -161,7 +171,9 @@ const ai = {
   currentSelection: () => ({ provider: 'local', model: 'qwen' }),
   stream: async function* (options: { messages: Array<{ content: Array<{ text: string }> }> }) {
     memeAsks.push(options.messages[0].content[0].text);
-    yield { type: 'text', text: env.memeAnswer };
+    if (env.memeHold) await env.memeHold;
+    const reply = env.memeReplies.length > 0 ? env.memeReplies.shift()! : env.memeAnswer;
+    yield { type: 'text', text: reply };
   },
   getSettings: () => ({ whisperIntervalSec: env.whisperSec }),
   streamVision: async function* (input: { prompt: string }) {
@@ -306,6 +318,18 @@ async function withFeatures(
 
 /** 数组最后一项（tsconfig 的 lib 不含 Array.prototype.at） */
 const last = <T>(list: T[]): T | undefined => list[list.length - 1];
+
+/** 手动放行的闸：让 compose 的模型调用挂在这里不返回（§X14 测「收摊不等感言」） */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = (): void => undefined;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+/** 某一页还活着的假窗口（同一页可能开了两场：上一场销毁后仍留在 windows 里） */
+const liveWindowsOn = (page: string): FakeWin[] => windows.filter((win) => !win.destroyed && win.url.endsWith(page));
 
 /** 等条件成立（首拍采样是异步的：要先跑完 lsappinfo） */
 /** 等条件成立（首拍采样是异步的；演出的台词按时间线走，第一条在 2.4 秒那一刻，tries 要给够） */
@@ -699,6 +723,19 @@ function cultivationEarly(): Record<string, unknown> {
   return { ...cultivationSeed(), stage: 0, progress: 0, stats: { hp: 50, power: 4, agility: 4, speed: 3 } };
 }
 
+/** 点开一场心魔试炼并等它开演（§X14 那几条用；菜单看**最新**一帧，历史快照不算） */
+async function startTrial(clicks: string[], menus: string[][], what: string): Promise<void> {
+  await until(() => (menus[menus.length - 1] ?? []).includes('修炼/心魔试炼'), `${what}菜单`);
+  clicks.push('修炼/心魔试炼');
+  await until(() => (menus[menus.length - 1] ?? []).includes('修炼/快进'), `${what}开打`);
+}
+
+/** 心魔 / 切磋的记账条数（赢 + 负） */
+function fightCount(home: string): number {
+  const record = cultivationSave(home)?.record as { wins: number; losses: number } | undefined;
+  return record ? record.wins + record.losses : 0;
+}
+
 test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线走；打的时候碎碎念让路；快进后奖励进存档', async () => {
   const clicks: string[] = [];
   windows.length = 0;
@@ -741,7 +778,7 @@ test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线�
     await until(
       () => bodies.some((body) => body.anim === false && body.duration === 2400),
       'show line anim:false + duration',
-      400,
+      1_000,
     );
     // 打的时候：菜单换成快进、没有「心魔试炼」，碎碎念让路
     await until(() => menus.some((labels) => labels.includes('修炼/快进')), 'fast-forward menu');
@@ -781,9 +818,9 @@ test('心魔试炼：开演前占住宠物（两段动画之间不插播随机�
     assert.ok(hold >= 0 && hold < requests.findIndex((r) => r.path === '/anim'), '拿锁在开场动画之前');
     const ttl = Number(requests[hold].body.ttl);
     assert.ok(ttl > 0 && ttl <= 30 * 60 * 1000, `锁的时长在 /lock 允许的区间：${ttl}`);
-    await until(() => requests.some((r) => r.path === '/broadcast'), 'show line', 400);
+    await until(() => requests.some((r) => r.path === '/broadcast'), 'show line', 1_000);
     clicks.push('修炼/快进');
-    // 演完停 3 秒（收场动作播完、在最后一帧停一会儿）才放锁
+    // 演完停 CLOSE_HOLD_MS（§X14 起是 1 秒：收场动作播完、在最后一帧停一会儿）才放锁
     await until(() => requests.some((r) => r.path === '/lock/release'), 'release', 400);
     const release = requests.findIndex((r) => r.path === '/lock/release');
     assert.equal(requests[release].body.lockId, 'show-lock');
@@ -848,6 +885,161 @@ test('修炼：演完一场马上再点第二场，两场都记，第二场还�
     assert.equal(save.progress, firstRound, '隔了几秒的第二场一点修为都没进账');
     assert.ok(firstRound > 0, '第一场（没打过）是满额');
     await until(() => said.some((line) => /心魔还没缓过来/.test(line)), '说一声还没缓过来');
+  });
+});
+
+test('心魔试炼：第一场感言没回来就开第二场，第一场的窗口立刻关、第二场不被误关（§X14 泄漏回归）', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const gate = deferred();
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, said, _bodies, home, extras) => {
+    const { menus } = extras;
+    try {
+      // 真机上 helper 会一直报自家宠物位置；先报一次，特效层才摆得出来
+      emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
+      env.memeHold = gate.promise;
+      env.memeReplies = ['第一场的感言', '第二场的感言'];
+      await startTrial(clicks, menus, '第 1 场');
+      await until(
+        () =>
+          liveWindowsOn('/app/guest').length === 1 &&
+          liveWindowsOn('/app/arena').length === 1 &&
+          liveWindowsOn('/app/fx').length === 1,
+        '第 1 场三扇窗',
+      );
+      const first = {
+        guest: liveWindowsOn('/app/guest')[0]!,
+        arena: liveWindowsOn('/app/arena')[0]!,
+        fx: liveWindowsOn('/app/fx')[0]!,
+      };
+      clicks.push('修炼/快进');
+      await until(() => fightCount(home) === 1, '第 1 场记账');
+      // 不等感言：菜单已经换回来（旧代码这里还挂着「快进」，第二场根本点不了）
+      await until(() => {
+        const latest = menus[menus.length - 1] ?? [];
+        return latest.includes('修炼/心魔试炼') && !latest.includes('修炼/快进');
+      }, '第 1 场收摊、菜单换回来');
+      // 第一场的 compose 还挂着，这时开第二场
+      await startTrial(clicks, menus, '第 2 场');
+      await until(() => liveWindowsOn('/app/guest').length === 1, '第 2 场心魔窗口');
+      const second = {
+        guest: liveWindowsOn('/app/guest')[0]!,
+        arena: liveWindowsOn('/app/arena')[0]!,
+        fx: liveWindowsOn('/app/fx')[0]!,
+      };
+      assert.ok(
+        first.guest !== second.guest && first.arena !== second.arena && first.fx !== second.fx,
+        '两场各开各的窗口',
+      );
+      // 新开一场时上一场还没关完的那组立刻关
+      await until(() => first.guest.destroyed && first.arena.destroyed && first.fx.destroyed, '第 1 场三扇窗立刻关');
+      // 熬过第一场原来的收摊时刻：第二场的窗口还在（旧代码会被第一场的收摊关掉）
+      await new Promise((done) => setTimeout(done, 1_200));
+      assert.ok(!second.guest.destroyed && !second.arena.destroyed && !second.fx.destroyed, '第 2 场的三扇窗还开着');
+      // 第二场打完、放开 compose：所有窗口都关掉，两场的感言各说各的
+      clicks.push('修炼/快进');
+      await until(() => fightCount(home) === 2, '第 2 场记账');
+      await until(
+        () =>
+          liveWindowsOn('/app/guest').length === 0 &&
+          liveWindowsOn('/app/arena').length === 0 &&
+          liveWindowsOn('/app/fx').length === 0,
+        '两场窗口都关了',
+        400,
+      );
+      gate.resolve();
+      await until(() => said.includes('第一场的感言') && said.includes('第二场的感言'), '两场的感言都说了', 400);
+    } finally {
+      env.memeHold = null;
+      env.memeReplies = [];
+      gate.resolve();
+    }
+  });
+});
+
+test('心魔试炼：compose 挂着不返回时，三扇窗到点先关、菜单先回来、账与日记先记，放开后感言照说（§X14）', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const gate = deferred();
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, said, _bodies, home, extras) => {
+    const { menus } = extras;
+    try {
+      // 真机上 helper 会一直报自家宠物位置；先报一次，特效层才摆得出来
+      emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
+      env.memeHold = gate.promise;
+      env.memeReplies = ['收摊以后才回来的感言'];
+      const asksBefore = memeAsks.length;
+      await startTrial(clicks, menus, '这一场');
+      clicks.push('修炼/快进');
+      await until(() => fightCount(home) === 1, '记账');
+      // compose 的模型调用已经发出去、卡在闸上
+      await until(() => memeAsks.slice(asksBefore).some((ask) => /心魔/.test(ask)), '赛后感言的模型调用');
+      assert.ok(!said.includes('收摊以后才回来的感言'), '感言还没回来');
+      await until(
+        () =>
+          liveWindowsOn('/app/guest').length === 0 &&
+          liveWindowsOn('/app/arena').length === 0 &&
+          liveWindowsOn('/app/fx').length === 0,
+        'CLOSE_HOLD_MS 后三扇窗都关了',
+        400,
+      );
+      await until(() => {
+        const latest = menus[menus.length - 1] ?? [];
+        return latest.includes('修炼/心魔试炼') && !latest.includes('修炼/快进');
+      }, '菜单不等感言就换回来');
+      assert.equal((cultivationSave(home)?.today as { trial: number }).trial, 1, '账记上了');
+      const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+      assert.ok(
+        day.events.some((event) => event.kind === 'cultivate' && /心魔试炼/.test(event.text)),
+        '日记不等感言就记上了',
+      );
+      gate.resolve();
+      await until(() => said.includes('收摊以后才回来的感言'), '放开后赛后感言照说', 400);
+    } finally {
+      env.memeHold = null;
+      env.memeReplies = [];
+      gate.resolve();
+    }
+  });
+});
+
+test('心魔试炼：第一场的感言在第二场开演以后才回来，就不再说了（§X14）', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const gate = deferred();
+  await withFeatures({ cultivation: cultivationEarly(), clicks }, async (_features, said, _bodies, home, extras) => {
+    const { menus } = extras;
+    try {
+      // 真机上 helper 会一直报自家宠物位置；先报一次，特效层才摆得出来
+      emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
+      env.memeHold = gate.promise;
+      env.memeReplies = ['第一场的旧感言', '第二场的感言'];
+      const asksBefore = memeAsks.length;
+      await startTrial(clicks, menus, '第 1 场');
+      clicks.push('修炼/快进');
+      await until(() => fightCount(home) === 1, '第 1 场记账');
+      await until(() => {
+        const latest = menus[menus.length - 1] ?? [];
+        return latest.includes('修炼/心魔试炼') && !latest.includes('修炼/快进');
+      }, '第 1 场收摊、菜单换回来');
+      await startTrial(clicks, menus, '第 2 场');
+      await until(() => memeAsks.slice(asksBefore).some((ask) => /心魔/.test(ask)), '第 1 场的感言卡在模型上');
+      // 第二场还在演，放开第一场的 compose：这一句过时了，不许插进第二场
+      gate.resolve();
+      env.memeHold = null;
+      await until(() => env.memeReplies.length === 1, '第 1 场感言回来了（用掉一条回答）');
+      await new Promise((done) => setTimeout(done, 100));
+      assert.ok(!said.includes('第一场的旧感言'), '过时的感言没说');
+      // 第二场打完，第二场的感言照说，旧感言一直不出现
+      clicks.push('修炼/快进');
+      await until(() => fightCount(home) === 2, '第 2 场记账');
+      await until(() => said.includes('第二场的感言'), '第 2 场的感言', 400);
+      assert.ok(!said.includes('第一场的旧感言'), '过时的感言一直没说');
+    } finally {
+      env.memeHold = null;
+      env.memeReplies = [];
+      gate.resolve();
+    }
   });
 });
 
@@ -924,100 +1116,130 @@ test('切磋（主人家）：邀约 → 应战 → 亮随机数 → 演出与�
   const clicks: string[] = [];
   windows.length = 0;
   const beaconPort = await freeUdpPort();
-  await withFeatures(
-    { config: visitConfig(), cultivation: cultivationEarly(), clicks, beacon: { port: beaconPort, targets: () => [] } },
-    async (_features, said, bodies, home, extras) => {
-      const { menus } = extras;
-      const { port, token } = await knockIn(home, clicks, extras);
-      // 切磋的菜单项有了（开着修炼、客人在、验证过身份、没在打）
-      await until(() => menus.some((labels) => labels.includes('串门/和客人切磋')), '切磋菜单项');
-      const target = { address: '127.0.0.1', port };
-      clicks.push('串门/和客人切磋');
-      // 邀约捎到客人那边：开场那句说出口 = inviteSpar 跑完（邀约已攒进出风箱），下一次报平安就带上了
-      await until(() => said.some((text) => text.includes('过两招')), '开场那句');
-      const ping = await tripRequest(target, '/v1/ping', { token });
-      assert.ok(ping.ok && ping.events.some((event) => event.type === 'spar-invite'), '邀约上了 ping');
-      // 应战：主人家的随机数到了；正在打时再来一发是 busy
-      const ownNonce = randomSparNonce();
-      const ask = () =>
-        sendSpar(
-          { address: '127.0.0.1', port },
-          { token, mode: SPAR_MODE, card: guestCard(), commit: sparCommit(ownNonce) },
+  // 自家感言卡在 compose 上不返回（§X14）：窗口和菜单不等它
+  const gate = deferred();
+  try {
+    await withFeatures(
+      {
+        config: visitConfig(),
+        cultivation: cultivationEarly(),
+        clicks,
+        beacon: { port: beaconPort, targets: () => [] },
+      },
+      async (_features, said, bodies, home, extras) => {
+        const { menus } = extras;
+        // 真机上 helper 会一直报自家宠物位置；先报一次，特效层才摆得出来
+        emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
+        const { port, token } = await knockIn(home, clicks, extras);
+        // 切磋的菜单项有了（开着修炼、客人在、验证过身份、没在打）
+        await until(() => menus.some((labels) => labels.includes('串门/和客人切磋')), '切磋菜单项');
+        const target = { address: '127.0.0.1', port };
+        clicks.push('串门/和客人切磋');
+        // 邀约捎到客人那边：开场那句说出口 = inviteSpar 跑完（邀约已攒进出风箱），下一次报平安就带上了
+        await until(() => said.some((text) => text.includes('过两招')), '开场那句');
+        const ping = await tripRequest(target, '/v1/ping', { token });
+        assert.ok(ping.ok && ping.events.some((event) => event.type === 'spar-invite'), '邀约上了 ping');
+        // 应战：主人家的随机数到了；正在打时再来一发是 busy
+        const ownNonce = randomSparNonce();
+        const ask = () =>
+          sendSpar(
+            { address: '127.0.0.1', port },
+            { token, mode: SPAR_MODE, card: guestCard(), commit: sparCommit(ownNonce) },
+          );
+        const reply = await ask();
+        assert.ok(reply.ok, `应战没成：${JSON.stringify(reply)}`);
+        const hostNonce = reply.ok ? reply.nonce : '';
+        assert.deepEqual(await ask(), { ok: false, reason: 'busy' });
+        // 亮随机数 → 开打（两边各自算同一场，赢家照这边自己的口径复核）
+        assert.deepEqual(
+          await sendReveal({ address: '127.0.0.1', port }, { token, nonce: ownNonce, line: '承让承让～' }),
+          { ok: true },
         );
-      const reply = await ask();
-      assert.ok(reply.ok, `应战没成：${JSON.stringify(reply)}`);
-      const hostNonce = reply.ok ? reply.nonce : '';
-      assert.deepEqual(await ask(), { ok: false, reason: 'busy' });
-      // 亮随机数 → 开打（两边各自算同一场，赢家照这边自己的口径复核）
-      assert.deepEqual(
-        await sendReveal({ address: '127.0.0.1', port }, { token, nonce: ownNonce, line: '承让承让～' }),
-        { ok: true },
-      );
-      const fightEvents = sparFight(hostFighter, cardFighter('阿花', guestCard()), ownNonce, hostNonce);
-      const fightEnd = fightEvents[fightEvents.length - 1]!;
-      const won = fightEnd.kind === 'end' && fightEnd.winner === 0;
-      // 主人家这边的解说也用 sparLineRng（X12）：复算一遍时间线，自己那一方的第一句要在 /broadcast 里出现
-      const expectedSteps = timeline(fightEvents, [petNameIn(home), '阿花'], sparLineRng(ownNonce, hostNonce), [
-        hostFighter.skills,
-        guestCard().skills,
-      ]);
-      const ownLine = expectedSteps.find((step) => step.line && step.who === 0)?.line;
-      const firstLine = ownLine ?? expectedSteps.find((step) => step.line)?.line;
-      assert.ok(firstLine, '这一场排出了解说台词');
-      // 这边的账：战绩 +1、修为进账（anim:false 的冒泡）、邻居簿、日记
-      await until(() => {
-        const record = cultivationSave(home)?.record as { wins: number; losses: number } | undefined;
-        return record !== undefined && record.wins + record.losses === 1;
-      }, '战绩记上了');
-      const record = cultivationSave(home)!.record as { wins: number; losses: number };
-      assert.equal(won ? record.wins : record.losses, 1, '输赢跟两边各自算的那场一致');
-      assert.ok((cultivationSave(home)!.progress as number) > 0, '修为进了账');
-      const book = JSON.parse(readFileSync(join(home, 'neighbors.json'), 'utf8')) as {
-        neighbors: Array<Record<string, unknown>>;
-      };
-      assert.equal(book.neighbors.length, 1);
-      assert.equal(book.neighbors[0][won ? 'sparWins' : 'sparLosses'], 1, '邻居簿记了切磋账');
-      assert.equal(book.neighbors[0].lastSparWon, won, '上次切磋的输赢留给见面提');
-      const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
-      assert.ok(
-        day.events.some((event) => event.kind === 'cultivate' && /切磋/.test(event.text)),
-        '记了日记',
-      );
-      // 演出：擂台开了、客人窗口照旧粉色、打的时候菜单换成快进
-      await until(() => windowOn('/app/arena') !== undefined, '擂台开了', 400);
-      const guest = windowOn('/app/guest');
-      assert.ok(guest, '客人窗口在');
-      assert.ok(!guest!.calls.some((code) => code.includes('"shadow"')), '切磋的客人窗口不是心魔配色');
-      await until(() => menus.some((labels) => labels.includes('修炼/快进')), '打的时候换成快进');
-      await until(
-        () =>
-          ownLine !== undefined
-            ? bodies.some((body) => body.anim === false && body.text === ownLine)
-            : guest!.calls.some((code) => code.startsWith('guest.say(') && code.includes(firstLine)),
-        '主人家也按 sparLineRng 挑台词（复算的第一句出现在对应的那一侧）',
-        1000,
-      );
-      // 快进收场：客人的感言（跟着 reveal 带来的）上了客人窗口、自家感言走 compose
-      clicks.push('修炼/快进');
-      await until(
-        () => guest!.calls.some((code) => code.startsWith('guest.say(') && code.includes('承让承让')),
-        '客人的感言上了客人窗口',
-        400,
-      );
-      await until(() => memeAsks.some((ask) => /切磋/.test(ask)), '自家感言走 compose', 400);
-      await until(() => said.some((text) => text.includes('过两招')), '开场说了一句');
-      // 打完菜单收回来——必须看**最新**一帧（some 扫历史会被开打前的快照满足，真机 battle
-      // 残留的 bug 就是从这漏过去的）：快进消失、切磋项回来了
-      await until(
-        () => {
-          const latest = menus[menus.length - 1] ?? [];
-          return latest.includes('串门/和客人切磋') && !latest.includes('修炼/快进');
-        },
-        '打完菜单收回来（battle 清零、快进消失）',
-        400,
-      );
-    },
-  );
+        const fightEvents = sparFight(hostFighter, cardFighter('阿花', guestCard()), ownNonce, hostNonce);
+        const fightEnd = fightEvents[fightEvents.length - 1]!;
+        const won = fightEnd.kind === 'end' && fightEnd.winner === 0;
+        // 主人家这边的解说也用 sparLineRng（X12）：复算一遍时间线，自己那一方的第一句要在 /broadcast 里出现
+        const expectedSteps = timeline(fightEvents, [petNameIn(home), '阿花'], sparLineRng(ownNonce, hostNonce), [
+          hostFighter.skills,
+          guestCard().skills,
+        ]);
+        const ownLine = expectedSteps.find((step) => step.line && step.who === 0)?.line;
+        const firstLine = ownLine ?? expectedSteps.find((step) => step.line)?.line;
+        assert.ok(firstLine, '这一场排出了解说台词');
+        // 这边的账：战绩 +1、修为进账（anim:false 的冒泡）、邻居簿、日记
+        await until(() => {
+          const record = cultivationSave(home)?.record as { wins: number; losses: number } | undefined;
+          return record !== undefined && record.wins + record.losses === 1;
+        }, '战绩记上了');
+        const record = cultivationSave(home)!.record as { wins: number; losses: number };
+        assert.equal(won ? record.wins : record.losses, 1, '输赢跟两边各自算的那场一致');
+        assert.ok((cultivationSave(home)!.progress as number) > 0, '修为进了账');
+        const book = JSON.parse(readFileSync(join(home, 'neighbors.json'), 'utf8')) as {
+          neighbors: Array<Record<string, unknown>>;
+        };
+        assert.equal(book.neighbors.length, 1);
+        assert.equal(book.neighbors[0][won ? 'sparWins' : 'sparLosses'], 1, '邻居簿记了切磋账');
+        assert.equal(book.neighbors[0].lastSparWon, won, '上次切磋的输赢留给见面提');
+        const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+        assert.ok(
+          day.events.some((event) => event.kind === 'cultivate' && /切磋/.test(event.text)),
+          '记了日记',
+        );
+        // 演出：擂台开了、客人窗口照旧粉色、打的时候菜单换成快进
+        await until(() => windowOn('/app/arena') !== undefined, '擂台开了', 400);
+        const guest = windowOn('/app/guest');
+        const arenaWin = windowOn('/app/arena');
+        const fxWin = windowOn('/app/fx');
+        assert.ok(guest, '客人窗口在');
+        assert.ok(arenaWin, '擂台在');
+        assert.ok(fxWin, '特效层在');
+        assert.ok(!guest!.calls.some((code) => code.includes('"shadow"')), '切磋的客人窗口不是心魔配色');
+        await until(() => menus.some((labels) => labels.includes('修炼/快进')), '打的时候换成快进');
+        await until(
+          () =>
+            ownLine !== undefined
+              ? bodies.some((body) => body.anim === false && body.text === ownLine)
+              : guest!.calls.some((code) => code.startsWith('guest.say(') && code.includes(firstLine)),
+          '主人家也按 sparLineRng 挑台词（复算的第一句出现在对应的那一侧）',
+          1000,
+        );
+        // 快进收场：客人的感言（跟着 reveal 带来的）上了客人窗口、自家感言走 compose。
+        // 让自家的 compose 卡住不返回（§X14）：前面的招呼等人设台词都已经说完，这里只卡赛后感言
+        const asksBefore = memeAsks.length;
+        env.memeHold = gate.promise;
+        env.memeAnswer = '切磋后的感言～';
+        clicks.push('修炼/快进');
+        await until(
+          () => guest!.calls.some((code) => code.startsWith('guest.say(') && code.includes('承让承让')),
+          '客人的感言上了客人窗口',
+          400,
+        );
+        await until(() => memeAsks.slice(asksBefore).some((ask) => /切磋/.test(ask)), '自家感言走 compose', 400);
+        await until(() => said.some((text) => text.includes('过两招')), '开场说了一句');
+        // 收摊不等模型（§X14）：compose 还卡着，擂台上这一场的窗口已经按 CLOSE_HOLD_MS 关掉
+        // （客人窗口属于这趟串门，客人还在就留着，不是切磋的 window 组）
+        await until(() => arenaWin!.destroyed && fxWin!.destroyed, '窗口不等感言就关', 400);
+        assert.ok(!said.some((text) => text.includes('切磋后的感言～')), '感言还没回来');
+        // 菜单同样不等感言——必须看**最新**一帧（some 扫历史会被开打前的快照满足，真机 battle
+        // 残留的 bug 就是从这漏过去的）：快进消失、切磋项回来了
+        await until(
+          () => {
+            const latest = menus[menus.length - 1] ?? [];
+            return latest.includes('串门/和客人切磋') && !latest.includes('修炼/快进');
+          },
+          '打完菜单收回来（battle 清零、快进消失）',
+          400,
+        );
+        // 放开 compose：自家感言照说
+        gate.resolve();
+        await until(() => said.some((text) => text.includes('切磋后的感言～')), '放开后自家感言说出来了', 400);
+      },
+    );
+  } finally {
+    env.memeHold = null;
+    env.memeAnswer = '无';
+    gate.resolve();
+  }
 });
 
 test('切磋：随机数对不上、超时没亮、邀约没人接，各按各的口径收场（不开打、没有擂台）', async () => {
