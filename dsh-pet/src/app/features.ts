@@ -356,6 +356,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
   let adventure: AdventureFlow | null = null;
   let lastScreenAt = Date.now();
   let menuLabels: string[] = [];
+  /** 菜单注册的队列（见 refreshMenu）：放在这里，免得初始化时还没走到声明那一行就被调用 */
+  let menuQueue: Promise<void> = Promise.resolve();
   let tickTimer: ReturnType<typeof setTimeout> | null = null;
   /** 说话串行：上一句发出去再生成下一句，免得两个气泡互相顶掉 */
   let speaking: Promise<unknown> = Promise.resolve();
@@ -1908,9 +1910,10 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     if (!practice) return null;
     adventure = new AdventureFlow({
       def: SANWANG,
-      openWindow: () =>
+      openWindow: (parked) =>
         openAdventureWindow(electron, `${new URL(deps.petBase).origin}/app/adventure`, deps.petBase, homePet.box, {
           prefer: adventurePrefer(),
+          bounds: parked,
         }),
       fight: adventureShows.fight,
       skipFight: skipTrial,
@@ -2159,8 +2162,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
    * （气血上限 ×1.2，一次最多吃 1 颗）。没在打、没出门、家里没客人时才有，和「心魔试炼」同一口径。
    */
   function tribulationActions(practice: Cultivation, actions: Map<string, () => unknown>): void {
-    // 历练小窗开着时不能开心魔试炼和渡劫：先关了小窗再说
-    if (battle || trip !== null || hosting !== null || adventure?.active === true) return;
+    // 历练小窗开着时不能开心魔试炼和渡劫：先关了小窗再说；收起来的小窗只在宠物还在秘境里时算数（Y4）
+    if (battle || trip !== null || hosting !== null || adventure?.blocking === true) return;
     const plan = practice.tribulationPlan(Date.now());
     if (!plan) return;
     actions.set(`${MENU_CULTIVATION_GROUP}/渡劫`, () => void runTribulation(false));
@@ -2638,10 +2641,16 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
           `身法 ${now.stats.agility}、遁速 ${now.stats.speed}，有 ${now.weapons.length} 件法宝～`,
       );
     });
-    // 历练（Y3）：开着修炼才有；存档里有没走完的一趟时带层数
+    // 历练（Y3）：开着修炼才有；存档里有没走完的一趟时带层数；这一趟在走时多一项自动走开关（Y4）
     if (ensureAdventure()) {
       const run = practice.adventureRun();
       actions.set(`${MENU_CULTIVATION_GROUP}/历练${run ? `（第 ${run.layer} 层）` : ''}`, () => void runAdventure());
+      if (adventure && adventure.active && adventure.running) {
+        actions.set(`${MENU_CULTIVATION_GROUP}/自动走：${adventure.autoWalk ? '开' : '关'}`, () => {
+          adventure?.toggleAutoWalk();
+          void refreshMenu();
+        });
+      }
     }
     if (view.full) tribulationActions(practice, actions);
     // 二选一：两项「领悟：X」（点了才消失；10 分钟没人挑就由 cultivation 在 tick 里随机定一个）
@@ -2655,7 +2664,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     }
     // 心魔试炼：没在打、没出门、家里没客人时才有；打的时候换成「快进」
     if (battle) actions.set(`${MENU_CULTIVATION_GROUP}/快进`, skipTrial);
-    else if (trip === null && hosting === null && adventure?.active !== true)
+    else if (trip === null && hosting === null && adventure?.blocking !== true)
       actions.set(`${MENU_CULTIVATION_GROUP}/心魔试炼`, () => void runTrial());
     return actions;
   }
@@ -2672,7 +2681,18 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     return labels.length > MENU_ITEMS_MAX ? labels.slice(0, MENU_ITEMS_MAX) : labels;
   }
 
-  async function refreshMenu(force = false): Promise<void> {
+  /**
+   * 注册菜单一次排一次队：上一次的 /menu/item 回来以后，下一次才按**那时**的状态重算再发。
+   * 不排队的话，两次刷新并发时旧的那份可能后到宿主（历练小窗刚关、「小窗开着」那份还在路上），
+   * 菜单就停在旧状态，而 menuLabels 记成了最后回来的那份，之后没有新变化就不会再刷。
+   */
+  function refreshMenu(force = false): Promise<void> {
+    const next = menuQueue.then(() => registerMenu(force));
+    menuQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  async function registerMenu(force: boolean): Promise<void> {
     const labels = wantedLabels();
     if (!force && labels.join('\n') === menuLabels.join('\n')) return;
     try {

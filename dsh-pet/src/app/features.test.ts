@@ -68,6 +68,7 @@ interface FakeWin {
   loadURL(url: string): Promise<void>;
   showInactive(): void;
   show(): void;
+  hide(): void;
   focus(): void;
   once(event: 'closed', listener: () => void): void;
   destroy(): void;
@@ -76,6 +77,7 @@ interface FakeWin {
   url: string;
   calls: string[];
   destroyed: boolean;
+  hidden: boolean;
 }
 
 /** 建窗与页面调用记录（心魔试炼那场用；其他测试不开窗口，看到的一直是空） */
@@ -87,6 +89,7 @@ function fakeWindow(url: string): FakeWin {
   const win: FakeWin = {
     calls: [],
     destroyed: false,
+    hidden: false,
     url,
     isDestroyed: () => win.destroyed,
     getBounds: () => ({ x: 0, y: 0, width: 200, height: 200 }),
@@ -100,7 +103,12 @@ function fakeWindow(url: string): FakeWin {
       return Promise.resolve();
     },
     showInactive: () => undefined,
-    show: () => undefined,
+    show: () => {
+      win.hidden = false;
+    },
+    hide: () => {
+      win.hidden = true;
+    },
     focus: () => undefined,
     once: (_event, listener) => {
       closedListeners.push(listener);
@@ -1118,6 +1126,71 @@ test('历练：存档里有没走完的一趟，菜单写「修炼/历练（第 
       () => win.calls.some((code) => code.startsWith('adv.render(') && code.includes('"kind":"run"')),
       '接着走的一趟',
     );
+    win.answerAdv({ kind: 'close' });
+    await until(() => win.destroyed, '关掉');
+  });
+});
+
+test('历练：这一趟在走时菜单多「自动走：开 / 关」，切了标签跟着变，修炼还是最多 5 项', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const run = startRun(SANWANG, {
+    pet: { name: '阿鱼', hp: 100, power: 10, agility: 10, speed: 10, weapons: [], skills: [] },
+    stage: 8,
+    suppressed: false,
+    nonce: 'auto',
+    now: Date.now(),
+  });
+  run.readyAt = Date.now() - 1;
+  const seed = { ...cultivationSeed(), adventure: { run, cleared: {}, titles: [] } };
+  await withFeatures({ cultivation: seed, clicks }, async (_features, _said, _bodies, _home, { menus }) => {
+    await until(() => (last(menus) ?? []).includes('修炼/历练（第 1 层）'), '带层数的菜单');
+    assert.ok(!(last(menus) ?? []).some((label) => label.startsWith('修炼/自动走：')), '没开小窗时没有自动走');
+    clicks.push('修炼/历练（第 1 层）');
+    await until(() => windowOn('/app/adventure') !== undefined, '历练小窗');
+    const win = windowOn('/app/adventure')!;
+    await until(() => (last(menus) ?? []).includes('修炼/自动走：关'), '默认关着的自动走');
+    const own = (last(menus) ?? []).filter((label) => label.startsWith('修炼/'));
+    assert.ok(own.length <= 5, `修炼最多 5 项，实际 ${own.join('、')}`);
+    assert.ok(!(last(menus) ?? []).includes('修炼/心魔试炼'), '这一趟在走时藏起来');
+    assert.ok(!(last(menus) ?? []).includes('修炼/渡劫'));
+    clicks.push('修炼/自动走：关');
+    await until(() => (last(menus) ?? []).includes('修炼/自动走：开'), '切成开');
+    clicks.push('修炼/自动走：开');
+    await until(() => (last(menus) ?? []).includes('修炼/自动走：关'), '切回关');
+    win.answerAdv({ kind: 'close' });
+    await until(() => win.destroyed, '关掉');
+  });
+});
+
+test('历练：收起来以后从菜单能叫回来，心魔试炼和渡劫照旧藏着', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const run = startRun(SANWANG, {
+    pet: { name: '阿鱼', hp: 100, power: 10, agility: 10, speed: 10, weapons: [], skills: [] },
+    stage: 8,
+    suppressed: false,
+    nonce: 'hide',
+    now: Date.now(),
+  });
+  run.readyAt = Date.now() - 1;
+  const seed = { ...cultivationSeed(), adventure: { run, cleared: {}, titles: [] } };
+  await withFeatures({ cultivation: seed, clicks }, async (_features, _said, _bodies, _home, { menus }) => {
+    await until(() => (last(menus) ?? []).includes('修炼/历练（第 1 层）'), '带层数的菜单');
+    clicks.push('修炼/历练（第 1 层）');
+    await until(() => windowOn('/app/adventure') !== undefined, '历练小窗');
+    const win = windowOn('/app/adventure')!;
+    await until(
+      () => win.calls.some((code) => code.startsWith('adv.render(') && code.includes('"kind":"run"')),
+      '接着走的一趟',
+    );
+    win.answerAdv({ kind: 'hide' });
+    await until(() => win.hidden, '收起来了');
+    await until(() => (last(menus) ?? []).includes('修炼/历练（第 1 层）'), '菜单还在');
+    assert.ok(!(last(menus) ?? []).includes('修炼/心魔试炼'), '宠物还在秘境里');
+    assert.ok(!(last(menus) ?? []).includes('修炼/渡劫'));
+    clicks.push('修炼/历练（第 1 层）');
+    await until(() => !win.hidden, '从菜单叫回来');
     win.answerAdv({ kind: 'close' });
     await until(() => win.destroyed, '关掉');
   });

@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AdventureFlow } from './adventure-flow.ts';
+import { AdventureFlow, AUTO_PICK_MS } from './adventure-flow.ts';
 import type { AdventureFlowDeps, AdventureProgress } from './adventure-flow.ts';
 import type { AdventureAnswer, AdventureChoiceView, AdventureWindow, AdventureView } from './adventure-window.ts';
 import { SANWANG } from './dungeon-sanwang.ts';
-import { startRun } from './dungeon.ts';
+import { autoDecide, layerNodeIdsOf, startRun } from './dungeon.ts';
 import type { DungeonDef, FightResult, FinishReason, Loot, Run } from './dungeon.ts';
 import type { Fighter } from './battle.ts';
 import type { CultivationEvent } from './cultivation.ts';
@@ -47,6 +47,8 @@ class FakeAdventureWindow implements AdventureWindow {
   views: AdventureView[] = [];
   compacted = false;
   closed = false;
+  hiddenNow = false;
+  shows = 0;
   waiting = false;
   private waiter: ((value: AdventureAnswer | null) => void) | null = null;
 
@@ -65,6 +67,16 @@ class FakeAdventureWindow implements AdventureWindow {
   }
   setCompact(compact: boolean): void {
     this.compacted = compact;
+  }
+  hide(): void {
+    this.hiddenNow = true;
+  }
+  show(): void {
+    this.hiddenNow = false;
+    this.shows += 1;
+  }
+  position() {
+    return null;
   }
   bounds() {
     return { x: 0, y: 0, width: 420, height: 600 };
@@ -595,4 +607,311 @@ test('出门前先收小窗：闲着能走；正在打或者正在赶路时不�
   assert.equal(travel.flow.beforeTrip(), false);
   travel.flow.dispose();
   await travel.open.catch(() => undefined);
+});
+
+/** 一路自动走：赶路用假时钟拨，要选的地方等 1.5 秒让 autoDecide 挑；结局页关掉 */
+async function driveAuto(harness: Harness, endingAnswer: 'close' | 'again' = 'close'): Promise<void> {
+  for (let step = 0; step < 2_000; step += 1) {
+    await flush();
+    const view = harness.window.last;
+    if (!view) {
+      await harness.clock.tick(1_000);
+      continue;
+    }
+    if (view.kind === 'entry') {
+      harness.window.answer({ kind: 'enter', suppressed: false });
+      continue;
+    }
+    if (view.kind === 'ending') {
+      harness.window.answer({ kind: endingAnswer });
+      return;
+    }
+    if (!harness.window.waiting) {
+      await harness.clock.tick(1_000);
+      continue;
+    }
+    if (view.run?.map.travel) {
+      await harness.clock.tick(view.run.map.travel.ms);
+      continue;
+    }
+    await harness.clock.tick(AUTO_PICK_MS);
+  }
+  throw new Error('自动走没走到结局');
+}
+
+/** 走到第一个要选的地方（赶路拨完、等主人点的那一手挂出来） */
+async function toFirstChoice(harness: Harness): Promise<AdventureView> {
+  for (let step = 0; step < 120; step += 1) {
+    await flush();
+    const view = harness.window.last;
+    if (view?.kind === 'entry' && harness.window.waiting) {
+      harness.window.answer({ kind: 'enter', suppressed: false });
+      continue;
+    }
+    if (view?.kind === 'run' && view.run?.map.travel) {
+      await harness.clock.tick(view.run.map.travel.ms);
+      continue;
+    }
+    if (view?.kind === 'run' && harness.window.waiting) return view;
+    await harness.clock.tick(1_000);
+  }
+  throw new Error('没走到第一个要选的地方');
+}
+
+test('自动走：赶路没满 15 秒不选；满了再过 1.5 秒按 autoDecide 选', async () => {
+  const harness = makeFlow({ fighter: BIG });
+  await flush();
+  harness.window.answer({ kind: 'toggle-auto', on: true });
+  await flush();
+  harness.window.answer({ kind: 'enter', suppressed: false });
+  for (let step = 0; step < 60; step += 1) {
+    await flush();
+    if (harness.window.last?.kind === 'run' && harness.window.last.run?.map.travel) break;
+    await harness.clock.tick(1_000);
+  }
+  const travel = harness.window.last!.run!.map.travel!;
+  const savesAfterEnter = harness.saves.length;
+  await harness.clock.tick(travel.ms - 1);
+  await flush();
+  assert.ok(harness.window.last?.run?.map.travel, '差 1 秒还在赶路');
+  assert.equal(harness.window.last?.run?.choices.length, 0, '赶路的时候没有选项');
+  assert.equal(harness.saves.length, savesAfterEnter, '没满 15 秒不自动选');
+
+  await harness.clock.tick(1);
+  await flush();
+  assert.equal(harness.window.last?.run?.map.travel, null, '赶路走完了');
+  await harness.clock.tick(AUTO_PICK_MS - 1);
+  await flush();
+  assert.equal(harness.saves.length, savesAfterEnter, '让主人看清选项的 1.5 秒还没到');
+
+  const before = harness.stored()!;
+  const expected = autoDecide(SANWANG, before, BIG);
+  assert.equal(expected.kind, 'node');
+  await harness.clock.tick(1);
+  await flush();
+  assert.equal(harness.saves.length, savesAfterEnter + 1, '到点自动走了一步');
+  const after = harness.saves[harness.saves.length - 1];
+  const ids = layerNodeIdsOf(SANWANG, before, before.layer);
+  assert.equal(after.path[after.path.length - 1], ids.indexOf(expected.node), '挑的就是 autoDecide 那一个');
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+test('自动走：这 1.5 秒里主人点了，就按主人点的走', async () => {
+  const harness = makeFlow({ fighter: BIG });
+  await flush();
+  harness.window.answer({ kind: 'toggle-auto', on: true });
+  await flush();
+  await toFirstChoice(harness);
+  // 光柱选犬王，走到第二层（这一层 autoDecide 会挑加持，主人改挑野狗群）
+  harness.window.answer({ kind: 'node', node: 'beam-dog' });
+  for (let step = 0; step < 300; step += 1) {
+    await flush();
+    const view = harness.window.last;
+    if (view?.kind === 'run' && view.run?.map.travel) {
+      await harness.clock.tick(view.run.map.travel.ms);
+      continue;
+    }
+    if (view?.kind === 'run' && harness.window.waiting) {
+      if (view.run?.choices.some((choice) => choice.kind === 'node' && choice.id === 'dog-pack')) break;
+      if (view.run?.choices.some((choice) => choice.kind === 'node' && choice.id === 'beam-dog')) {
+        harness.window.answer({ kind: 'node', node: 'beam-dog' });
+        continue;
+      }
+    }
+    await harness.clock.tick(1_000);
+  }
+  const view = harness.window.last!;
+  assert.ok(
+    view.run?.choices.some((choice) => choice.kind === 'node' && choice.id === 'dog-pack'),
+    '第二层等主人点',
+  );
+  const before = harness.stored()!;
+  assert.equal(autoDecide(SANWANG, before, BIG).kind, 'node');
+  const saves = harness.saves.length;
+  harness.window.answer({ kind: 'node', node: 'dog-pack' });
+  for (let step = 0; step < 30 && harness.saves.length === saves; step += 1) await flush();
+  const after = harness.saves[harness.saves.length - 1];
+  assert.equal(after.path[1], 0, '按主人点的野狗群走，不跟 autoDecide');
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+test('自动走：一趟走完停在结局页，不自动开下一趟', async () => {
+  const harness = makeFlow({ fighter: BIG });
+  await flush();
+  harness.window.answer({ kind: 'toggle-auto', on: true });
+  await flush();
+  harness.window.answer({ kind: 'enter', suppressed: false });
+  for (let step = 0; step < 2_000; step += 1) {
+    await flush();
+    const view = harness.window.last;
+    if (view?.kind === 'ending') break;
+    if (!harness.window.waiting) {
+      await harness.clock.tick(1_000);
+      continue;
+    }
+    if (view?.kind === 'run' && view.run?.map.travel) {
+      await harness.clock.tick(view.run.map.travel.ms);
+      continue;
+    }
+    await harness.clock.tick(AUTO_PICK_MS);
+  }
+  assert.equal(harness.window.last?.kind, 'ending');
+  assert.equal(harness.done.length, 1, '走完这一趟就入账');
+  const saves = harness.saves.length;
+  const fights = harness.fights.length;
+  await harness.clock.tick(10_000);
+  await flush();
+  assert.equal(harness.window.last?.kind, 'ending', '还停在结局页');
+  assert.equal(harness.saves.length, saves, '没有自动开下一趟');
+  assert.equal(harness.fights.length, fights);
+  assert.equal(harness.done.length, 1);
+  harness.window.answer({ kind: 'close' });
+  await harness.open;
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+test('自动走：倒带和大殿两问都按 autoDecide', async () => {
+  // 第一轮输在第二层：autoDecide 催春秋蝉，倒回本层开头；第二次输就收场
+  const lost = makeFlow({ fighter: TINY });
+  await flush();
+  lost.window.answer({ kind: 'toggle-auto', on: true });
+  await flush();
+  await driveAuto(lost, 'close').catch(() => undefined);
+  const last = lost.saves[lost.saves.length - 1];
+  assert.equal(last.attempt, 2, '春秋蝉倒回了一次');
+  assert.equal(last.flags.rewound, true);
+  assert.equal(lost.done.length, 1);
+  assert.equal(lost.done[0].reason, 'lose', '第二次输就收场');
+  lost.dispose();
+  await lost.open.catch(() => undefined);
+
+  // 大殿里「记得」的两问：autoDecide 挑最稳的那个（识破 + 改炼定仙游）
+  const run = startRun(SANWANG, { pet: BIG, stage: 20, suppressed: false, nonce: 'hall', now: 0 });
+  run.layer = 4;
+  run.step = 1;
+  run.attempt = 2;
+  run.readyAt = 0;
+  run.flags = { stage: 20, road: 'dog', dogs: 4, remember: true };
+  run.decisions = [];
+  run.snapshot = null;
+  const hall = makeFlow({ fighter: BIG, run });
+  hall.flow.setAutoWalk(true);
+  await driveAuto(hall, 'close');
+  const after = hall.saves[hall.saves.length - 1];
+  assert.equal(after.flags.seen, true, '识破白凝冰');
+  assert.equal(after.flags.smelt, 'dingxian', '改炼定仙游');
+  assert.equal(hall.done.length, 1);
+  assert.equal(hall.done[0].reason, 'clear');
+  hall.dispose();
+  await hall.open.catch(() => undefined);
+});
+
+test('收起：自动走开着时藏着也能走完一趟、入账，小窗不自己弹出来', async () => {
+  const harness = makeFlow({ fighter: BIG });
+  await flush();
+  harness.window.answer({ kind: 'toggle-auto', on: true });
+  await flush();
+  await toFirstChoice(harness);
+  harness.window.answer({ kind: 'hide' });
+  await flush();
+  assert.equal(harness.window.hiddenNow, true, '收起来了');
+  // 收起来以后不再有页面点击，只拨假时钟：自动走一路走到入账
+  for (let step = 0; step < 2_000 && harness.done.length === 0; step += 1) {
+    const view = harness.window.last;
+    if (view?.kind === 'entry') {
+      harness.window.answer({ kind: 'enter', suppressed: false });
+      continue;
+    }
+    if (view?.run?.map.travel) {
+      await harness.clock.tick(view.run.map.travel.ms);
+      continue;
+    }
+    await harness.clock.tick(AUTO_PICK_MS);
+    await flush();
+  }
+  assert.equal(harness.done.length, 1, '藏着也走完入账');
+  assert.equal(harness.window.hiddenNow, true, '小窗没自己弹出来');
+  assert.equal(harness.window.shows, 0);
+  assert.ok(harness.said.includes('三王传承走完了'), '冒泡说一声走完了');
+  harness.window.answer({ kind: 'close' });
+  await harness.open;
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+test('收起：自动走关着时藏着停在当前这一步；从菜单叫回来还是最新状态', async () => {
+  const harness = makeFlow({ fighter: BIG });
+  await toFirstChoice(harness);
+  harness.window.answer({ kind: 'hide' });
+  await flush();
+  assert.equal(harness.window.hiddenNow, true);
+  const saves = harness.saves.length;
+  await harness.clock.tick(60_000);
+  await flush();
+  assert.equal(harness.saves.length, saves, '没有自动往前跑');
+  assert.equal(harness.window.last?.kind, 'run');
+  assert.equal(harness.window.waiting, true, '还停在当前这一步');
+  void harness.flow.open();
+  await flush();
+  assert.equal(harness.window.hiddenNow, false, '从菜单叫回来');
+  assert.equal(harness.window.shows, 1);
+  harness.window.answer({ kind: 'close' });
+  await harness.open;
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+test('收起：菜单切自动走会把等主人点的那一头叫醒，按新状态接着走', async () => {
+  const harness = makeFlow({ fighter: BIG });
+  await toFirstChoice(harness);
+  const saves = harness.saves.length;
+  harness.flow.setAutoWalk(true);
+  await flush();
+  await harness.clock.tick(AUTO_PICK_MS - 1);
+  await flush();
+  assert.equal(harness.saves.length, saves, '1.5 秒没到');
+  await harness.clock.tick(1);
+  await flush();
+  assert.equal(harness.saves.length, saves + 1, '菜单开了自动走以后按 autoDecide 走一步');
+  harness.dispose();
+  await harness.open.catch(() => undefined);
+});
+
+test('收起：结局页也能藏起来，从菜单叫回来再关掉', async () => {
+  const harness = makeFlow({
+    fighter: BIG,
+    run: layerFiveRun({ smelt: 'second', seen: true, remember: true }),
+  });
+  for (let step = 0; step < 300; step += 1) {
+    await flush();
+    const view = harness.window.last;
+    if (view?.kind === 'ending') break;
+    if (view?.kind === 'run' && view.run?.map.travel) {
+      await harness.clock.tick(view.run.map.travel.ms);
+      continue;
+    }
+    if (view?.kind === 'run' && harness.window.waiting) {
+      const answer = answerFor(view);
+      if (answer) {
+        harness.window.answer(answer);
+        continue;
+      }
+    }
+    await harness.clock.tick(1_000);
+  }
+  assert.equal(harness.window.last?.kind, 'ending');
+  harness.window.answer({ kind: 'hide' });
+  await flush();
+  assert.equal(harness.window.hiddenNow, true, '结局页收起来了');
+  assert.equal(harness.window.closed, false, '收起来不是关掉');
+  void harness.flow.open();
+  await flush();
+  assert.equal(harness.window.hiddenNow, false, '从菜单叫回来');
+  harness.window.answer({ kind: 'close' });
+  await harness.open;
+  harness.dispose();
+  await harness.open.catch(() => undefined);
 });

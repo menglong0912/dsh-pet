@@ -7,6 +7,7 @@
  * `/pic/adventure/…`（逐段 `encodeURIComponent`），页面不拼路径。
  *
  * 位置在宠物旁边，和对手窗口相反的那一边；打起来时缩成屏顶一条（名字、气血、快进），打完再展开。
+ * 标题栏可拖动（Y4）：拖过以后这次打开 app 期间都停在拖到的位置；拖出屏幕至少留标题栏可见。
  */
 import type { PetBox, Rect, WindowElectron, WindowLike } from './visit-windows';
 
@@ -15,8 +16,17 @@ export const ADVENTURE_HEIGHT = 600;
 /** 打起来缩成的那一条 */
 export const ADVENTURE_COMPACT_WIDTH = 320;
 export const ADVENTURE_COMPACT_HEIGHT = 88;
+/** 拖出屏幕时至少留在可见范围里的标题栏尺寸 */
+export const ADVENTURE_BAR_HEIGHT = 44;
+export const ADVENTURE_BAR_MIN_WIDTH = 120;
 /** 小窗和宠物之间留的缝 */
 const GAP = 12;
+
+/** 用到的 BrowserWindow 成员（`hide`、`moved` 不在共用的 WindowLike 里，按需探测） */
+type ManagedWindow = WindowLike & {
+  hide?(): void;
+  on?(event: 'moved', listener: () => void): void;
+};
 
 /** 小窗里画的场景：节点插画、过场视频，或封面兜底 */
 export interface AdventureSceneView {
@@ -126,6 +136,8 @@ export interface AdventureView {
   kind: 'entry' | 'run' | 'ending';
   title: string;
   subtitle?: string;
+  /** 「自动走」开关的状态（这次打开 app 期间记住，不进存档） */
+  auto?: boolean;
   entry?: AdventureEntryView;
   run?: AdventureRunView;
   ending?: AdventureEndingView;
@@ -135,6 +147,8 @@ export interface AdventureView {
 export type AdventureAnswer =
   | { kind: 'enter'; suppressed: boolean }
   | { kind: 'close' }
+  | { kind: 'hide' }
+  | { kind: 'toggle-auto'; on: boolean }
   | { kind: 'node'; node: string }
   | { kind: 'choice'; node: string; index: number }
   | { kind: 'blessing'; node: string; blessing: string }
@@ -155,6 +169,12 @@ export interface AdventureWindow {
   cancelWait(): void;
   /** 打起来缩成屏顶一条，打完展开 */
   setCompact(compact: boolean): void;
+  /** 收起（只藏起来，流程不停） */
+  hide(): void;
+  /** 从菜单叫回来 */
+  show(): void;
+  /** 主人拖过以后停的位置；没拖过是 null（跟着宠物旁边走） */
+  position(): Rect | null;
   bounds(): Rect;
   close(afterMs: number): void;
 }
@@ -190,6 +210,28 @@ export function adventureCompactBounds(workArea: Rect, prefer: 'left' | 'right')
   const height = Math.min(ADVENTURE_COMPACT_HEIGHT, workArea.height);
   const x = prefer === 'right' ? workArea.x + workArea.width - width - GAP : workArea.x + GAP;
   return { x: Math.round(x), y: Math.round(workArea.y + GAP), width, height };
+}
+
+/** 拖出屏幕以后拉回来：至少让标题栏留在可见范围里（宽度留一段、高度留整条标题栏） */
+export function clampAdventureBounds(rect: Rect, workArea: Rect): Rect {
+  const width = Math.min(rect.width, workArea.width);
+  const height = Math.min(rect.height, workArea.height);
+  const keepX = Math.min(ADVENTURE_BAR_MIN_WIDTH, width);
+  const keepY = Math.min(ADVENTURE_BAR_HEIGHT, height);
+  const minX = workArea.x + keepX - width;
+  const maxX = workArea.x + workArea.width - keepX;
+  const minY = workArea.y;
+  const maxY = workArea.y + workArea.height - keepY;
+  return {
+    x: Math.round(Math.min(Math.max(rect.x, minX), maxX)),
+    y: Math.round(Math.min(Math.max(rect.y, minY), maxY)),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
+
+function sameRect(a: Rect, b: Rect): boolean {
+  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 }
 
 /** 把素材名拼成图片 / 视频地址（逐段编码；页面不拼路径） */
@@ -259,13 +301,14 @@ function isAnswer(value: unknown): value is AdventureAnswer {
  * @param petBase 插件路由前缀（拼 `/pic/adventure/…` 用）
  * @param home 取自家宠物现在的位置（watchHomePet 的 box）
  * @param options.prefer 小窗放宠物哪一边（调用方传与对手窗口相反的一边）
+ * @param options.bounds 上次主人拖到的位置（这次打开 app 期间记住；不给就贴着宠物）
  */
 export function openAdventureWindow(
   electron: WindowElectron,
   pageUrl: string,
   petBase: string,
   home: () => PetBox | null,
-  options: { prefer: 'left' | 'right' },
+  options: { prefer: 'left' | 'right'; bounds?: Rect | null },
 ): AdventureWindow {
   const homeNow = home();
   const point = homeNow
@@ -274,10 +317,17 @@ export function openAdventureWindow(
   const workArea = electron.screen.getDisplayNearestPoint(point).workArea;
   const normal = adventureBounds(homeNow, workArea, options.prefer);
   const compact = adventureCompactBounds(workArea, options.prefer);
-  let bounds = normal;
+  /** 拖到别的屏幕上也按那边的工作区夹：至少留标题栏可见 */
+  const clampOnDisplay = (rect: Rect): Rect => {
+    const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    return clampAdventureBounds(rect, electron.screen.getDisplayNearestPoint(center).workArea);
+  };
+  let dragged: Rect | null = options.bounds ? clampOnDisplay(options.bounds) : null;
+  let compactMode = false;
+  let bounds = dragged ?? normal;
   let closed = false;
   let waiter: ((value: AdventureAnswer | null) => void) | null = null;
-  const win: WindowLike = new electron.BrowserWindow({
+  const win: ManagedWindow = new electron.BrowserWindow({
     ...bounds,
     show: false,
     frame: false,
@@ -320,8 +370,23 @@ export function openAdventureWindow(
     waiter = null;
     done?.(null);
   });
+  // 标题栏拖动是系统行为：拖完读一次位置，夹回屏幕里并记住。
+  // 自己挪的（缩起来、展开、重新渲染）位置和 `bounds` 一样，不算主人拖过。
+  win.on?.('moved', () => {
+    if (closed || win.isDestroyed() || compactMode) return;
+    const current = win.getBounds();
+    if (sameRect(current, bounds)) return;
+    const clamped = clampOnDisplay(current);
+    dragged = clamped;
+    bounds = clamped;
+    if (!sameRect(current, clamped)) win.setBounds(clamped);
+  });
   return {
     render(view) {
+      // 拖过以后重新渲染也停在拖到的位置（缩成一条时除外）
+      if (!compactMode && dragged && !closed && !win.isDestroyed() && !sameRect(win.getBounds(), dragged)) {
+        win.setBounds(dragged);
+      }
       run(`adv.render(${JSON.stringify(adventureViewWithUrls(view, petBase))})`);
     },
     wait() {
@@ -343,10 +408,20 @@ export function openAdventureWindow(
       run('adv.cancel()');
     },
     setCompact(on) {
-      bounds = on ? compact : normal;
+      compactMode = on;
+      bounds = on ? compact : (dragged ?? normal);
       if (!win.isDestroyed()) win.setBounds(bounds);
       run(`adv.compact(${on ? 'true' : 'false'})`);
     },
+    hide() {
+      if (!win.isDestroyed()) win.hide?.();
+    },
+    show() {
+      if (win.isDestroyed()) return;
+      win.show();
+      win.focus();
+    },
+    position: () => dragged,
     bounds: () => bounds,
     close(afterMs) {
       setTimeout(
@@ -367,12 +442,16 @@ export const adventurePage = `<!doctype html>
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden;background:#f7f2e7;color:#2b2a26;font-family:"ShangshouSoftCandy","PingFang SC",sans-serif;-webkit-app-region:no-drag;user-select:none}
 body{display:flex;flex-direction:column}
-#bar{display:flex;align-items:center;gap:8px;padding:10px 14px;background:linear-gradient(#3c4a44,#2f3a35);color:#f7f2e7;flex:none}
+#bar{display:flex;align-items:center;gap:8px;padding:10px 14px;background:linear-gradient(#3c4a44,#2f3a35);color:#f7f2e7;flex:none;-webkit-app-region:drag}
+#bar button{-webkit-app-region:no-drag}
 #head{flex:1;min-width:0}
 #title{font-size:15px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #subtitle{font-size:11px;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#close{flex:none;width:24px;height:24px;border:0;border-radius:12px;background:rgba(255,255,255,.14);color:#f7f2e7;font-size:16px;line-height:24px;padding:0;cursor:pointer}
-#close:hover{background:rgba(255,255,255,.26)}
+#hide,#close{flex:none;width:24px;height:24px;border:0;border-radius:12px;background:rgba(255,255,255,.14);color:#f7f2e7;font-size:16px;line-height:24px;padding:0;cursor:pointer}
+#hide:hover,#close:hover{background:rgba(255,255,255,.26)}
+#autoRow{flex:none;padding:7px 14px;background:#efe6d4;border-bottom:1px solid #d9cdb5}
+#autoRow[hidden]{display:none}
+#autoRow .switch{margin:0;font-size:12.5px;color:#4c463b}
 .page{flex:1;min-height:0;overflow:auto;padding:12px 14px 16px}
 h2{margin:4px 0 2px;font-size:20px}
 .title{margin:0 0 10px;color:#8a6d3b;font-size:13px}
@@ -459,14 +538,15 @@ button{font-family:inherit}
 #compactTitle{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #compactHp{flex:none;color:#e9c46a}
 #skip{flex:none;padding:4px 10px;border:0;border-radius:7px;background:#b23b32;color:#fff;font-size:12px;cursor:pointer}
-body.compact #bar,body.compact #entry,body.compact #ending,body.compact #full{display:none}
+body.compact #bar,body.compact #autoRow,body.compact #entry,body.compact #ending,body.compact #full{display:none}
 body.compact{padding-top:0}
 body.compact #run{display:flex;flex-direction:column}
 body.compact #compactbar{display:flex}
 body.compact #full{display:none}
 </style></head>
 <body>
-<header id="bar"><div id="head"><div id="title"></div><div id="subtitle"></div></div><button id="close" type="button" aria-label="关掉">×</button></header>
+<header id="bar"><div id="head"><div id="title"></div><div id="subtitle"></div></div><button id="hide" type="button" aria-label="收起">—</button><button id="close" type="button" aria-label="关掉">×</button></header>
+<div id="autoRow"><label class="switch"><input id="autoWalk" type="checkbox"> 自动走（每步替你选）</label></div>
 <div id="entry" class="page" hidden>
   <div class="cover"><img id="cover" alt=""></div>
   <p id="opening" class="opening"></p>
@@ -734,6 +814,8 @@ window.adv = {
     setText('subtitle', view.subtitle || '');
     show(view.kind);
     document.body.classList.remove('compact');
+    byId('autoRow').hidden = view.kind === 'ending';
+    byId('autoWalk').checked = view.auto === true;
     if (view.kind === 'entry') renderEntry(view);
     else if (view.kind === 'run') renderRun(view);
     else renderEnding(view);
@@ -743,6 +825,8 @@ window.adv = {
   compact: function(on){ document.body.classList.toggle('compact', !!on); },
 };
 byId('close').addEventListener('click', function(){ answer({ kind: 'close' }); });
+byId('hide').addEventListener('click', function(){ answer({ kind: 'hide' }); });
+byId('autoWalk').addEventListener('change', function(){ answer({ kind: 'toggle-auto', on: this.checked }); });
 byId('enter').addEventListener('click', function(){ answer({ kind: 'enter', suppressed: byId('suppressed').checked }); });
 byId('endingClose').addEventListener('click', function(){ answer({ kind: 'close' }); });
 byId('again').addEventListener('click', function(){ answer({ kind: 'again' }); });

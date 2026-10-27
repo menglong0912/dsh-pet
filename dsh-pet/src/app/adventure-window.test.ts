@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ADVENTURE_BAR_HEIGHT,
+  ADVENTURE_BAR_MIN_WIDTH,
   ADVENTURE_COMPACT_HEIGHT,
   ADVENTURE_COMPACT_WIDTH,
   ADVENTURE_HEIGHT,
@@ -10,6 +12,7 @@ import {
   adventureCompactBounds,
   adventurePage,
   adventureViewWithUrls,
+  clampAdventureBounds,
   openAdventureWindow,
 } from './adventure-window.ts';
 import type { AdventureAnswer, AdventureView } from './adventure-window.ts';
@@ -115,30 +118,53 @@ test('adventurePage：只用 textContent，数据经 JSON 字面量；adv.wait �
   assert.ok(adventurePage.includes("answer({ kind: 'skip' })"));
   assert.ok(adventurePage.includes("answer({ kind: 'enter', suppressed: byId('suppressed').checked })"));
   assert.ok(adventurePage.includes("answer({ kind: 'again' })"));
+  // 收起、自动走、拖动标题栏（Y4）
+  assert.ok(adventurePage.includes("answer({ kind: 'hide' })"));
+  assert.ok(adventurePage.includes("answer({ kind: 'toggle-auto', on: this.checked })"));
+  assert.ok(adventurePage.includes("byId('autoRow').hidden = view.kind === 'ending';"));
+  assert.ok(adventurePage.includes("byId('autoWalk').checked = view.auto === true;"));
+  assert.ok(adventurePage.includes('body.compact #bar,body.compact #autoRow'));
+  assert.ok(/-webkit-app-region:drag/.test(adventurePage), '标题栏可拖动');
+  assert.ok(/#bar button\{-webkit-app-region:no-drag\}/.test(adventurePage), '标题栏里的按钮不跟着拖');
   assert.equal(adventurePage.includes('require('), false);
   assert.equal(adventurePage.includes('ipcRenderer'), false);
 });
 
-/** 假窗口：记录构造参数与 executeJavaScript；wait 的结果由测试控制 */
+/** 假窗口：记录构造参数与 executeJavaScript；wait 的结果、位置、收起由测试控制 */
 function fakeWindows() {
   const created: Record<string, unknown>[] = [];
   const executed: string[] = [];
   let destroyed = false;
   let waiter: ((value: unknown) => void) | null = null;
   let onClosed: (() => void) | null = null;
-  const win: WindowLike = {
+  let onMoved: (() => void) | null = null;
+  let hidden = false;
+  let bounds = { x: 0, y: 0, width: 0, height: 0 };
+  const win = {
     isDestroyed: () => destroyed,
-    getBounds: () => ({ x: 0, y: 0, width: 0, height: 0 }),
-    setBounds: () => undefined,
+    getBounds: () => ({ ...bounds }),
+    setBounds: (rect: { x: number; y: number; width: number; height: number }) => {
+      bounds = { ...rect };
+      // Electron 挪完窗口会发 moved：自己挪的也要走一遍，才能确认没被当成主人拖的
+      onMoved?.();
+    },
     setOpacity: () => undefined,
     setIgnoreMouseEvents: () => undefined,
     setAlwaysOnTop: () => undefined,
     setVisibleOnAllWorkspaces: () => undefined,
     loadURL: () => Promise.resolve(),
     showInactive: () => undefined,
-    show: () => undefined,
+    show: () => {
+      hidden = false;
+    },
     focus: () => undefined,
-    once: (_event, listener) => {
+    hide: () => {
+      hidden = true;
+    },
+    on: (event: 'moved', listener: () => void) => {
+      if (event === 'moved') onMoved = listener;
+    },
+    once: (_event: 'closed', listener: () => void) => {
       onClosed = listener;
     },
     destroy: () => {
@@ -147,17 +173,24 @@ function fakeWindows() {
     },
     webContents: {
       getURL: () => '',
-      executeJavaScript: (code) => {
+      executeJavaScript: (code: string) => {
         executed.push(code);
         if (code === 'adv.wait()') return new Promise((resolve) => (waiter = resolve));
         return Promise.resolve(undefined);
       },
     },
-  };
+  } as WindowLike & { hide(): void; on(event: 'moved', listener: () => void): void };
   return {
     electron: {
       BrowserWindow: function FakeBrowserWindow(options: Record<string, unknown>) {
         created.push(options);
+        // 构造参数里的位置就是初始位置
+        bounds = {
+          x: Number(options.x ?? 0),
+          y: Number(options.y ?? 0),
+          width: Number(options.width ?? 0),
+          height: Number(options.height ?? 0),
+        };
         return win;
       },
       screen: {
@@ -167,6 +200,11 @@ function fakeWindows() {
     } as unknown as WindowElectron,
     created,
     executed,
+    /** 模拟主人拖动：改位置并触发 moved */
+    moveTo: (x: number, y: number) => {
+      bounds = { ...bounds, x, y };
+      onMoved?.();
+    },
     answer: (value: unknown) => {
       const done = waiter;
       waiter = null;
@@ -174,6 +212,9 @@ function fakeWindows() {
     },
     get destroyed() {
       return destroyed;
+    },
+    get hidden() {
+      return hidden;
     },
   };
 }
@@ -248,5 +289,73 @@ test('openAdventureWindow：缩起来时窗口挪到屏顶、展开回宠物旁�
   win.setCompact(false);
   await new Promise((done) => setImmediate(done));
   assert.deepEqual(win.bounds(), normal);
+  assert.equal(win.position(), null, '自己缩起来再展开不算主人拖过');
   assert.ok(fake.executed.includes('adv.compact(false)'));
+});
+
+test('拖动：至少留标题栏在可见范围里', () => {
+  const normal = adventureBounds(home, workArea, 'right');
+  const dragged = clampAdventureBounds({ ...normal, x: -500, y: -200 }, workArea);
+  assert.equal(dragged.y, workArea.y, '不能拖出上边');
+  assert.ok(dragged.x >= workArea.x - normal.width + ADVENTURE_BAR_MIN_WIDTH, '左边至少留一段');
+  assert.ok(dragged.x + normal.width >= workArea.x + ADVENTURE_BAR_MIN_WIDTH);
+  const far = clampAdventureBounds({ ...normal, x: 5_000, y: 5_000 }, workArea);
+  assert.equal(far.x, workArea.x + workArea.width - ADVENTURE_BAR_MIN_WIDTH, '右边至少留一段');
+  assert.ok(far.y + ADVENTURE_BAR_HEIGHT <= workArea.y + workArea.height, '标题栏留在屏幕里');
+});
+
+test('openAdventureWindow：拖过以后重新渲染、展开都回到拖到的位置；再开窗也停在那儿', async () => {
+  const fake = fakeWindows();
+  const win = openAdventureWindow(
+    fake.electron,
+    'http://127.0.0.1:1/app/adventure',
+    'http://127.0.0.1:1/dsh-pet-7340',
+    () => home,
+    { prefer: 'right' },
+  );
+  await new Promise((done) => setImmediate(done));
+  const normal = { ...win.bounds() };
+  fake.moveTo(normal.x - 40, normal.y + 30);
+  await new Promise((done) => setImmediate(done));
+  const dragged = { ...win.bounds() };
+  assert.deepEqual(dragged, { ...normal, x: normal.x - 40, y: normal.y + 30 });
+  assert.deepEqual(win.position(), dragged, '记住了拖到的位置');
+
+  win.render(entryView);
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(win.bounds(), dragged, '重新渲染不回宠物旁边');
+
+  win.setCompact(true);
+  await new Promise((done) => setImmediate(done));
+  assert.equal(win.bounds().height, ADVENTURE_COMPACT_HEIGHT);
+  win.setCompact(false);
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(win.bounds(), dragged, '打完从顶上展开回拖到的位置');
+
+  // 拖出屏幕：moved 里夹回来
+  fake.moveTo(-2_000, -2_000);
+  await new Promise((done) => setImmediate(done));
+  assert.equal(win.bounds().y, workArea.y);
+  assert.ok(win.bounds().x + win.bounds().width >= workArea.x + ADVENTURE_BAR_MIN_WIDTH);
+
+  // 收起 / 叫回来
+  win.hide();
+  assert.equal(fake.hidden, true);
+  win.show();
+  assert.equal(fake.hidden, false);
+
+  // 关掉再开：这次打开 app 期间停在拖到的位置
+  const parked = win.position();
+  win.close(0);
+  await new Promise((done) => setTimeout(done, 10));
+  const fake2 = fakeWindows();
+  const again = openAdventureWindow(
+    fake2.electron,
+    'http://127.0.0.1:1/app/adventure',
+    'http://127.0.0.1:1/dsh-pet-7340',
+    () => home,
+    { prefer: 'left', bounds: parked },
+  );
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(again.position(), parked);
 });

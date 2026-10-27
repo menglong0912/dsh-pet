@@ -7,10 +7,14 @@
  *
  * 赶路 15 秒从做决定那一刻算起（`run.readyAt`），小窗倒数、宠物播一次 `秘境-赶路`；
  * 演出比赶路长就等演完，赶路比演出长就等赶路走完。打起来时小窗缩成屏顶一条（名字、气血、快进）。
+ *
+ * 自动走（Y4）：开着时每个要选的地方等赶路走完再停 1.5 秒，然后照 `dungeon.autoDecide` 挑；这 1.5 秒里
+ * 主人自己点了就按主人的。小窗可以收起（只藏起来，流程不停）和拖动（拖过的位置这次打开 app 期间记住）。
  */
 import {
   BLESSINGS,
   advance,
+  autoDecide,
   choicesOf,
   dayLabel,
   layerNodeIdsOf,
@@ -37,6 +41,7 @@ import { roadLabel } from './dungeon-sanwang';
 import { WEAPONS } from './battle';
 import type { Fighter, WeaponId } from './battle';
 import type { CultivationEvent } from './cultivation';
+import type { Rect } from './visit-windows';
 import type {
   AdventureAnswer,
   AdventureChoiceView,
@@ -63,11 +68,14 @@ export interface AdventureFightRequest {
   full: boolean;
 }
 
+/** 自动走在一个要选的地方停多久，让主人看清有哪些选项 */
+export const AUTO_PICK_MS = 1_500;
+
 /** 流程用到的全部外部能力：features.ts 把真的传进来，测试传假的 */
 export interface AdventureFlowDeps {
   def: DungeonDef;
-  /** 开一扇小窗（页面走 /app/adventure） */
-  openWindow: () => AdventureWindow;
+  /** 开一扇小窗（页面走 /app/adventure）；`parked` 是上次主人拖到的位置 */
+  openWindow: (parked: Rect | null) => AdventureWindow;
   /** 演一场（速战或完整；返回时窗口、擂台、特效层已经收好） */
   fight: (request: AdventureFightRequest) => Promise<void>;
   /** 菜单「修炼/快进」或小窗上的快进 */
@@ -148,6 +156,16 @@ export class AdventureFlow {
   private travelTimer: unknown = null;
   /** 赶路的定时器被撤掉时，让等待赶路的那一头也醒过来（敲门收起、退出） */
   private travelResolve: (() => void) | null = null;
+  /** 自动走：这次打开 app 期间记住，不进存档 */
+  private auto = false;
+  /** 小窗收起来了（只藏起来，这一趟还在走） */
+  private collapsed = false;
+  /** 主人拖到过哪里：这次打开 app 期间小窗都停在这儿 */
+  private parked: Rect | null = null;
+  /** 自动走的 1.5 秒计时 */
+  private autoTimer: unknown = null;
+  /** 菜单切了自动走：把等主人点的那一头叫醒，重新按新状态等 */
+  private nudgeResolve: (() => void) | null = null;
 
   private readonly deps: AdventureFlowDeps;
 
@@ -156,9 +174,44 @@ export class AdventureFlow {
     this.fullShow = false;
   }
 
-  /** 小窗开着（入口页、一趟里、结局页都算） */
+  /** 小窗开着（入口页、一趟里、结局页都算；收起来了也算，流程没停） */
   get active(): boolean {
     return this.activeFlag;
+  }
+
+  /** 收起来了：不算「小窗开着」，但宠物还在秘境里 */
+  get hidden(): boolean {
+    return this.collapsed;
+  }
+
+  /** 这一趟还在走（不是入口页、结局页） */
+  get running(): boolean {
+    const run = this.deps.getRun();
+    return run !== null && run.status !== 'over';
+  }
+
+  /** 要不要在菜单里藏起心魔试炼和渡劫：小窗可见时照 Y3，收起来时只看这一趟还在不在走 */
+  get blocking(): boolean {
+    return this.activeFlag && (!this.collapsed || this.running);
+  }
+
+  /** 自动走开着？ */
+  get autoWalk(): boolean {
+    return this.auto;
+  }
+
+  /** 菜单 / 小窗切自动走：状态变了叫醒等主人点的那一头，让它按新状态接着走 */
+  setAutoWalk(on: boolean): void {
+    if (this.auto === on) return;
+    this.auto = on;
+    this.deps.onChange?.();
+    const resolve = this.nudgeResolve;
+    this.nudgeResolve = null;
+    resolve?.();
+  }
+
+  toggleAutoWalk(): void {
+    this.setAutoWalk(!this.auto);
   }
 
   /** 正在打或者正在赶路：这时候不能出门串门 */
@@ -166,17 +219,22 @@ export class AdventureFlow {
     return this.fighting || this.travelling;
   }
 
-  /** 菜单点了：开小窗；存档里有没走完的一趟就直接接着走 */
+  /** 菜单点了：开小窗；存档里有没走完的一趟就直接接着走；收起来的小窗叫回来 */
   open(): Promise<void> {
     if (this.disposed) return Promise.resolve();
-    if (this.activeFlag) return this.loop ?? Promise.resolve();
-    this.win = this.deps.openWindow();
+    if (this.activeFlag) {
+      this.showWindow();
+      return this.loop ?? Promise.resolve();
+    }
+    this.win = this.deps.openWindow(this.parked);
     this.activeFlag = true;
     this.suspended = false;
+    this.collapsed = false;
     this.deps.onChange?.();
     const win = this.win;
     const session = this.runSession(win).finally(() => {
       if (this.win === win) {
+        this.parked = win.position() ?? this.parked;
         this.win = null;
         this.activeFlag = false;
         this.loop = null;
@@ -192,6 +250,7 @@ export class AdventureFlow {
   suspend(): void {
     if (!this.activeFlag) return;
     this.suspended = true;
+    this.stopAuto();
     this.deps.skipFight();
     this.stopTravel();
     this.win?.close(0);
@@ -209,8 +268,31 @@ export class AdventureFlow {
   dispose(): void {
     this.disposed = true;
     this.suspended = true;
+    this.stopAuto();
     this.stopTravel();
     this.win?.close(0);
+  }
+
+  /** 收起小窗：只藏起来，流程不停 */
+  private collapseWindow(win: AdventureWindow): void {
+    if (this.collapsed) return;
+    this.collapsed = true;
+    win.hide();
+  }
+
+  /** 从菜单叫回来：页面一直是按最新状态画的 */
+  private showWindow(): void {
+    const win = this.win;
+    if (!win) return;
+    this.collapsed = false;
+    win.show();
+    if (this.fighting) {
+      const run = this.deps.getRun();
+      if (run && run.status !== 'over') {
+        win.setCompact(true);
+        win.render(this.runView(run, [], null, true));
+      }
+    }
   }
 
   /** 赶路的等待提前结束（定时器撤掉，等待那头 resolve） */
@@ -222,6 +304,12 @@ export class AdventureFlow {
     const resolve = this.travelResolve;
     this.travelResolve = null;
     resolve?.();
+  }
+
+  private stopAuto(): void {
+    if (this.autoTimer === null) return;
+    this.deps.clearTimeout(this.autoTimer);
+    this.autoTimer = null;
   }
 
   /** 小窗一开：存档里有一趟就接着走，否则先看入口页 */
@@ -239,12 +327,41 @@ export class AdventureFlow {
 
   /** 入口页：秘境卡片、压境开关、进入 */
   private async showEntry(win: AdventureWindow): Promise<void> {
+    win.render(this.entryView());
+    while (!this.stopped()) {
+      const answer = await this.waitAnswer(win);
+      if (this.stopped()) return;
+      if (answer === 'nudge') {
+        win.cancelWait();
+        continue;
+      }
+      if (answer === null || answer.kind === 'close') {
+        this.suspended = true;
+        return;
+      }
+      if (answer.kind === 'hide') {
+        this.collapseWindow(win);
+        continue;
+      }
+      if (answer.kind === 'toggle-auto') {
+        this.auto = answer.on === true;
+        this.deps.onChange?.();
+        continue;
+      }
+      if (answer.kind !== 'enter') continue;
+      this.beginRun(answer.suppressed === true);
+      return;
+    }
+  }
+
+  private entryView(): AdventureView {
     const def = this.deps.def;
     const progress = this.deps.progress();
-    win.render({
+    return {
       kind: 'entry',
       title: def.name,
       subtitle: def.opening[0] ?? '',
+      auto: this.auto,
       entry: {
         cover: dungeonAsset(def, def.cover),
         fallback: dungeonAsset(def, def.map),
@@ -259,17 +376,7 @@ export class AdventureFlow {
         })),
         suppressed: false,
       },
-    });
-    while (!this.stopped()) {
-      const answer = await win.wait();
-      if (answer === null || answer.kind === 'close') {
-        this.suspended = true;
-        return;
-      }
-      if (answer.kind !== 'enter') continue;
-      this.beginRun(answer.suppressed === true);
-      return;
-    }
+    };
   }
 
   /** 新开一趟：定种子、存盘、播入阵，赶路交给主循环 */
@@ -300,40 +407,70 @@ export class AdventureFlow {
         const from = this.travelFrom ?? Math.max(1, run.layer - 1);
         this.travelling = true;
         this.deps.onChange?.();
-        // 赶路时不给选项（点不出来），只留小窗右上角的「关掉」：关掉也在这趟存档里，回菜单接着走
+        // 赶路时不给选项（点不出来），只留小窗右上角的「收起」「关掉」：关掉也在这趟存档里，回菜单接着走
         win.render(this.runView(run, [], { from, to: run.layer, ms: remaining }, false));
-        const arrived = this.waitTravel(remaining).then(() => true);
-        const closed = win.wait().then((answer) => answer === null || answer.kind === 'close');
-        const ok = await Promise.race([arrived, closed.then((isClosed) => !isClosed)]);
+        const arrived = this.waitTravel(remaining).then(() => 'arrived' as const);
+        const answered = this.waitAnswer(win);
+        const first = await Promise.race([arrived, answered]);
+        this.stopTravel();
         win.cancelWait();
-        if (!ok) this.stopTravel();
         this.travelling = false;
         this.travelFrom = null;
         this.deps.onChange?.();
-        if (this.stopped() || !ok) {
+        if (this.stopped()) return;
+        if (first === 'arrived') continue;
+        if (first === 'nudge') continue;
+        if (first === null || first.kind === 'close') {
           this.suspended = true;
           return;
+        }
+        if (first.kind === 'hide') {
+          this.collapseWindow(win);
+          continue;
+        }
+        if (first.kind === 'toggle-auto') {
+          this.auto = first.on === true;
+          this.deps.onChange?.();
+          continue;
         }
         continue;
       }
       win.render(this.runView(run, choices, null, false));
-      const answer = await win.wait();
-      if (answer === null || answer.kind === 'close') {
-        this.suspended = true;
-        return;
+      const picked = await this.waitChoice(win);
+      if (this.stopped()) return;
+      if (picked === 'nudge') continue;
+      let decision: Decision | null;
+      if (picked === 'auto') {
+        decision = autoDecide(def, run, this.deps.fighter());
+      } else {
+        if (picked === null || picked.kind === 'close') {
+          this.suspended = true;
+          return;
+        }
+        if (picked.kind === 'hide') {
+          this.collapseWindow(win);
+          continue;
+        }
+        if (picked.kind === 'toggle-full') {
+          this.fullShow = picked.on === true;
+          continue;
+        }
+        if (picked.kind === 'toggle-auto') {
+          this.auto = picked.on === true;
+          this.deps.onChange?.();
+          continue;
+        }
+        decision = this.decisionOf(choices, picked);
       }
-      if (answer.kind === 'toggle-full') {
-        this.fullShow = answer.on === true;
-        continue;
-      }
-      const decision = this.decisionOf(choices, answer);
       if (!decision) continue;
       const before = run;
       let next: { run: Run; outcome: StepOutcome };
       try {
         next = advance(def, run, this.deps.fighter(), decision, this.deps.now());
-      } catch {
-        // 页面递回来的决定不在 `choicesOf` 里（正常点不出来）：重新画一遍，别让这一趟卡死
+      } catch (error) {
+        // 页面递回来的决定不在 `choicesOf` 里（正常点不出来）：重新画一遍，别让这一趟卡死。
+        // 自动挑的走不通是逻辑 bug，别每 1.5 秒转一圈，直接抛出去。
+        if (picked === 'auto') throw error;
         continue;
       }
       this.deps.saveRun(next.run);
@@ -347,6 +484,50 @@ export class AdventureFlow {
       this.beginRun(next.run.suppressed);
       if (this.stopped()) return;
     }
+  }
+
+  /** 等主人点一下或者自动走的时间到；菜单切了自动走（nudge）就回去重画重等 */
+  private waitAnswer(win: AdventureWindow): Promise<AdventureAnswer | null | 'nudge'> {
+    return new Promise((resolve) => {
+      let done = false;
+      this.nudgeResolve = () => {
+        if (done) return;
+        done = true;
+        this.nudgeResolve = null;
+        resolve('nudge');
+      };
+      void win.wait().then((answer) => {
+        if (done) return;
+        done = true;
+        this.nudgeResolve = null;
+        resolve(answer);
+      });
+    });
+  }
+
+  /**
+   * 要选的地方：等主人点，自动走开着就等 1.5 秒后让 `autoDecide` 挑。
+   * 这 1.5 秒里主人点了，按主人的（用户的那一脚照旧走 `advance` → `saveRun` → 演出）。
+   */
+  private async waitChoice(win: AdventureWindow): Promise<AdventureAnswer | null | 'nudge' | 'auto'> {
+    const answered = this.waitAnswer(win);
+    if (!this.auto) return answered;
+    const due = new Promise<'auto'>((resolve) => {
+      this.autoTimer = this.deps.setTimeout(
+        () => {
+          this.autoTimer = null;
+          resolve('auto');
+        },
+        Math.max(0, AUTO_PICK_MS),
+      );
+    });
+    const picked = await Promise.race([answered, due]);
+    this.stopAuto();
+    if (picked === 'auto' || picked === 'nudge') {
+      win.cancelWait();
+      return picked;
+    }
+    return picked;
   }
 
   /** 本层还等主人点的那一下：场景换成这个节点的插画和文字 */
@@ -454,10 +635,14 @@ export class AdventureFlow {
     const events = this.deps.done(run, end.reason);
     this.deps.onEvents(events, this.deps.now());
     this.deps.diary(this.diaryText(run, end));
+    // 这一趟走完了：菜单里的「自动走」收掉；藏着的窗口也不再挡心魔试炼和渡劫
+    this.deps.onChange?.();
     const ending = end.ending ?? null;
     if (end.reason === 'clear' && ending) this.deps.play(ending.anim ?? '秘境-得宝');
     this.deps.play('秘境-出阵');
     win.render(this.endingView(run, end));
+    // 藏着走完：小窗不自己弹出来，只在桌面上说一声
+    if (this.collapsed) this.deps.say(`${this.deps.def.name}走完了`, { anim: false });
     const answered = win.wait();
     const fallback =
       end.reason === 'clear' && ending
@@ -466,7 +651,12 @@ export class AdventureFlow {
     const instruction = this.summaryInstruction(run, end);
     const text = (await this.deps.compose(instruction, fallback).catch(() => fallback)) || fallback;
     this.deps.say(text, { anim: false });
-    const answer = await answered;
+    let answer = await answered;
+    // 结局页也能收起：藏起来等主人从菜单叫回来，不能当「关掉」把这一趟丢了
+    while (answer?.kind === 'hide' && !this.stopped()) {
+      this.collapseWindow(win);
+      answer = await win.wait();
+    }
     if (answer?.kind === 'again') return true;
     this.suspended = true;
     return false;
@@ -578,6 +768,7 @@ export class AdventureFlow {
       kind: 'run',
       title: def.name,
       subtitle: day?.label ?? def.name,
+      auto: this.auto,
       run: view,
     };
   }
