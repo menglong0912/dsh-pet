@@ -728,8 +728,8 @@ test('the save file is only written when persisted state changes', () => {
     c.tick(base + 50_000, true);
     c.tick(base + 80_000, true);
     assert.equal(progressOf(path), 1);
+    // 写没写看内容：两次写盘离得太近时，mtime 可能停在同一个刻度上（Windows CI 上实际遇到过）
     assert.notEqual(readFileSync(path, 'utf8'), before);
-    assert.notEqual(statSync(path).mtimeMs, mtime);
   });
 });
 
