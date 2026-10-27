@@ -21,10 +21,10 @@ import {
   choicesOf,
   dayLabel,
   layerNodeIdsOf,
+  maxHpOf,
   reachableNodes,
   resolveText,
   startRun,
-  typicalStats,
   visibleLayers,
 } from './dungeon';
 import type {
@@ -806,7 +806,7 @@ export class AdventureFlow {
     const self = run.members.find((member) => member.id === run.leader) ?? run.members[0];
     const pet = this.deps.fighter();
     // 压境入内时气血上限也压到原著境界（和 buildParty 同一口径）
-    const maxHp = Math.max(1, run.suppressed ? Math.min(pet.hp, typicalStats(def.originStage).hp) : pet.hp);
+    const maxHp = maxHpOf(def, run, pet);
     const day = dayLabel(def, run);
     const loadout = choices.find((choice): choice is Extract<Choice, { kind: 'loadout' }> => choice.kind === 'loadout');
     const view: AdventureRunView = {
@@ -814,7 +814,8 @@ export class AdventureFlow {
         ...this.scene,
         ...(this.scene.art || this.scene.video ? { fallback: dungeonAsset(def, def.map) } : {}),
       },
-      hp: { now: Math.max(0, self.hp), max: maxHp },
+      // 压境修正之前开的一趟，存档里的气血可能还高过上限：显示时夹住（战斗里引擎本来也会夹）
+      hp: { now: Math.min(maxHp, Math.max(0, self.hp)), max: maxHp },
       map: {
         current: run.layer,
         layers: this.mapLayers(run),

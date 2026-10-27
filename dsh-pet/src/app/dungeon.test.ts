@@ -10,6 +10,7 @@ import {
   buildParty,
   choicesOf,
   expired,
+  maxHpOf,
   reachableNodes,
   replayFight,
   resolveFight,
@@ -19,6 +20,7 @@ import {
   settle,
   settleByReason,
   startRun,
+  typicalStats,
   weaponChoices,
   type DungeonDef,
   type Run,
@@ -166,6 +168,19 @@ test('Y0 跑图：压境时修为 ×1.5、法宝招式被封住', () => {
   const total = settle(DEF, run, 'retreat');
   const plain = settle(DEF, normal, 'retreat');
   assert.equal(total.xp, Math.floor(plain.xp * 1.5));
+});
+
+test('压境入内：开场气血就是压过的上限，回血也不超过它（真机：显示「136 / 118」）', () => {
+  const pet = { ...fighterAt(20, seededRng(5)), name: '小鱼' };
+  const cap = typicalStats(DEF.originStage).hp;
+  assert.ok(pet.hp > cap, '这只宠物的气血要高过原著境界，才测得出来');
+  const run = startRun(DEF, { pet, stage: DEF.originStage, suppressed: true, nonce: 'sup-hp', now: NOW });
+  assert.equal(maxHpOf(DEF, run, pet), cap);
+  assert.equal(run.members[0].hp, cap, '开场满血是压过的上限，不是自己的');
+  assert.equal(buildParty(DEF, run, pet)[0].hp, cap, '和战斗里的上限同一口径');
+  const normal = startRun(DEF, { pet, stage: DEF.originStage, suppressed: false, nonce: 'sup-hp', now: NOW });
+  assert.equal(normal.members[0].hp, pet.hp);
+  assert.equal(maxHpOf(DEF, normal, pet), pet.hp);
 });
 
 test('Y0 春秋蝉：第二、三层倒回这一层开头，状态和快照一样', () => {

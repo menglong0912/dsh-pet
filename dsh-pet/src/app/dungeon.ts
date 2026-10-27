@@ -727,6 +727,19 @@ export function buildFoe(def: DungeonDef, run: Run, foeId: string): Fighter {
   };
 }
 
+/** 压境入内时的气血上限：自己的和原著境界典型值里小的那个（同 buildParty 的口径） */
+function suppressedMaxHp(def: DungeonDef, pet: Fighter): number {
+  return Math.max(1, Math.min(pet.hp, typicalStats(def.originStage).hp));
+}
+
+/**
+ * 这一趟里宠物的气血上限：压境入内按原著境界压过，平常就是自己的。
+ * 开场气血、灵泉和奇遇的回血上限、自动走看「血少了没有」都用它，和战斗里的上限同一口径。
+ */
+export function maxHpOf(def: DungeonDef, run: Run, pet: Fighter): number {
+  return run.suppressed ? suppressedMaxHp(def, pet) : Math.max(1, pet.hp);
+}
+
 /**
  * 自己这一边：跨场气血、这一路给的一转蛊、加持的修正、压境的封属性和砍到典型值都在这贴上去。
  * `pet` 是 `Cultivation.fighter()`。
@@ -755,7 +768,7 @@ export function buildParty(def: DungeonDef, run: Run, pet: Fighter): Fighter[] {
       const typical = typicalStats(def.originStage);
       f.weapons = [];
       f.skills = [];
-      f.hp = Math.max(1, Math.min(pet.hp, typical.hp));
+      f.hp = maxHpOf(def, run, pet);
       f.power = Math.max(1, Math.min(pet.power, typical.power));
       f.agility = Math.max(1, Math.min(pet.agility, typical.agility));
       f.speed = Math.max(1, Math.min(pet.speed, typical.speed));
@@ -819,7 +832,14 @@ export function startRun(
     suppressed,
     mode: 'solo',
     leader: 'self',
-    members: [{ id: 'self', name: pet.name, hp: pet.hp, loot: emptyLoot() }],
+    members: [
+      {
+        id: 'self',
+        name: pet.name,
+        hp: suppressed ? suppressedMaxHp(def, pet) : Math.max(1, pet.hp),
+        loot: emptyLoot(),
+      },
+    ],
     layer: 1,
     step: 0,
     path: [],
@@ -1001,7 +1021,7 @@ function enterNode(def: DungeonDef, run: Run, node: NodeDef, pet: Fighter, now: 
       return openChest(def, run, node, pet, now);
     case 'spring': {
       const m = selfMember(run);
-      const max = Math.max(1, pet.hp);
+      const max = maxHpOf(def, run, pet);
       const healed = Math.min(Math.max(0, max - m.hp), Math.floor(max * (node.healShare ?? SPRING_HEAL)));
       m.hp += healed;
       return stepResult(
@@ -1129,7 +1149,7 @@ function applyOutcome(
   if (outcome.flags) Object.assign(run.flags, outcome.flags);
   let hpLost = 0;
   if (outcome.healShare !== undefined) {
-    const max = Math.max(1, pet.hp);
+    const max = maxHpOf(def, run, pet);
     m.hp = Math.min(max, m.hp + Math.floor(max * outcome.healShare));
   }
   if (outcome.cutShare !== undefined) {
@@ -1505,7 +1525,7 @@ export function autoDecide(def: DungeonDef, run: Run, pet: Fighter): Decision {
     return { kind: 'loadout', node: node.id, weapons: [] }; // 全带
   }
   const nodes = reachableNodes(def, run);
-  const alive = selfMember(run).hp / Math.max(1, pet.hp);
+  const alive = selfMember(run).hp / maxHpOf(def, run, pet);
   const prefer: NodeKind[] =
     alive < AUTO_SPRING_BELOW
       ? ['spring', 'chest', 'ruin', 'mob', 'event', 'elite', 'boss']

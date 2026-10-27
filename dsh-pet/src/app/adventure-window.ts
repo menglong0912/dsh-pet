@@ -535,7 +535,7 @@ body.cutscene #sceneText{flex:1;min-height:0;max-height:none;overflow:hidden;mar
 .rows .v{flex:1;min-width:0;word-break:break-all}
 .cracks{display:flex;gap:3px;height:4px;flex:none}
 .cracks span{flex:1;height:4px;border-radius:2px;background:#c9b891;transform:skewX(-18deg)}
-.sceneText{font-size:12.5px;line-height:1.55;margin:0;white-space:pre-line;min-height:2.2em;max-height:3.8em;overflow:hidden}
+.sceneText{font-size:12.5px;line-height:1.55;margin:0;white-space:pre-line;min-height:2.2em;max-height:9.3em;overflow-y:auto;flex:none}
 .choices{display:flex;flex-direction:column;gap:5px;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:3px}
 .choices .choice{display:flex;align-items:center;gap:7px;width:100%;padding:6px 8px;border:1px solid #cdbfa6;border-radius:9px;background:#fffaf0;color:#332f28;font-size:12.5px;line-height:1.35;text-align:left;cursor:pointer;flex:none}
 .choices .choice:hover{border-color:#3f7d5a;background:#fff}
