@@ -44,8 +44,8 @@ import { isIPv4 } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { z } from 'zod';
-import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS, fight, rngFrom, statCap } from './battle';
-import type { BattleEvent, Fighter, SkillId, WeaponId } from './battle';
+import { BATTLE_VERSION, MOVE_IDS, SKILL_IDS, WEAPON_IDS, fight, rngFrom, statCap } from './battle';
+import type { Action, BattleEvent, Fighter, MoveId, SkillId, WeaponId } from './battle';
 import { MAX_STAGE } from './cultivation';
 import { idOfPub, duelAcceptMessage, duelMessage, knockMessage, verifyWithPub, welcomeMessage } from './visit-identity';
 import type { VisitIdentity } from './visit-identity';
@@ -101,8 +101,14 @@ export function cleanName(value: unknown): string {
 
 // ---------- 切磋（X5） ----------
 
-/** 切磋模式（现在只有自动打；以后的手动对战另加模式，收到不认识的回 unsupported-mode） */
+/** 切磋模式：auto = 开打前整场算好；live = 逐手对传（X19），收到不认识的回 unsupported-mode */
 export const SPAR_MODE = 'auto';
+export const SPAR_LIVE_MODE = 'live';
+
+/** 逐手局每一手对方等多久（35 秒没收到就当掉线，§X19） */
+export const TURN_WAIT_MS = 35_000;
+/** 一手最多几步（只防离谱的 index；一场三十手就结束，留足余量） */
+const TURN_INDEX_MAX = 1_000;
 
 /** 名帖：切磋前双方交换的战斗档案（编号会过网，全用引擎图鉴里的 ASCII 编号） */
 export interface SparCard {
@@ -187,6 +193,29 @@ export function sparCommit(nonce: string): string {
 /** 是不是一条 32 字节的十六进制随机数 / 承诺 */
 export function isSparNonce(value: string): boolean {
   return /^[0-9a-f]{64}$/.test(value);
+}
+
+/**
+ * 逐手局收到的出手（X19）：只认图鉴里认识的编号，形状不对就当没带。
+ * 这只是结构校验；能不能出这一手还要过 `legalActions`（features 那边判，不合法按掉线）。
+ */
+export function parseSparAction(raw: unknown): Action | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const action = raw as Record<string, unknown>;
+  if (action.kind === 'unarmed') return { kind: 'unarmed' };
+  if (action.kind === 'weapon' && WEAPON_IDS.includes(action.weapon as WeaponId))
+    return { kind: 'weapon', weapon: action.weapon as WeaponId };
+  if (action.kind === 'skill' && SKILL_IDS.includes(action.skill as SkillId))
+    return { kind: 'skill', skill: action.skill as SkillId };
+  if (action.kind === 'move' && MOVE_IDS.includes(action.move as MoveId))
+    return { kind: 'move', move: action.move as MoveId };
+  return null;
+}
+
+/** 逐手局的一手请求里的序号：0 起、不能离谱 */
+export function parseTurnIndex(raw: unknown): number | null {
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0 || raw > TURN_INDEX_MAX) return null;
+  return raw;
 }
 
 /**
@@ -513,7 +542,8 @@ export type HostEvent =
   | { type: 'play'; what: string }
   | { type: 'gift'; what: string }
   | { type: 'note'; text: string }
-  | { type: 'spar-invite' };
+  /** 邀切磋（X5）；`mode: 'live'` = 发起方选了逐手局（X19），旧客人不认识 mode 时照自动走 */
+  | { type: 'spar-invite'; mode?: 'live' };
 /** 一次最多捎几件事（攒多了丢最早的） */
 const EVENTS_MAX = 8;
 
@@ -563,6 +593,14 @@ export type DuelReply = { ok: true; card: SparCard; nonce: string; token: string
 /** /v1/duel/reveal 的应答：对不上（mismatch）或超时（late）都按挑战方认输，应答里如实带回去 */
 export type DuelRevealReply = { ok: true } | { ok: false; reason: 'mismatch' | 'late' | 'not-visiting' | 'old-host' };
 
+/**
+ * 逐手局一手（X19）的应答：轮到对面出手时带回它的 action；`illegal` = 收到的出手过不了
+ * `legalActions`（按掉线处理），`late` = 序号对不上 / 这一场已经收了，`not-visiting` = 没有这一场。
+ */
+export type SparTurnReply =
+  | { ok: true; action?: Action }
+  | { ok: false; reason: 'illegal' | 'late' | 'busy' | 'bad-request' | 'not-visiting' | 'sent-home' };
+
 export interface HostHandlers {
   /** 现在能不能接待（自己的宠物出门在外、正在敲别人家的门时不行） */
   canHost(): boolean;
@@ -578,16 +616,20 @@ export interface HostHandlers {
    * 客人应约（或主动）发来切磋（X5 第 2 步）：名帖与承诺已在协议层验过（parseSparCard / isSparNonce），
    * 这里只答切磋关不关（off）、在不在打（busy）、认不认得客人（no-id），答应对了回名帖与随机数
    */
-  spar(visitor: Visitor, card: SparCard, commit: string): Promise<SparReply>;
+  spar(visitor: Visitor, card: SparCard, commit: string, live?: boolean): Promise<SparReply>;
   /** 客人亮随机数（X5 第 4 步，line 是它带来的赛后感言）：核对承诺后开打，对不上或超时按客人认输 */
   reveal(visitor: Visitor, nonce: string, line: string): Promise<SparRevealReply>;
+  /** 逐手局的一手（X19）：收到（或等）对方这一手；不合法 / 序号不对 / 没有这一场在这里回 */
+  sparTurn?(visitor: Visitor, index: number, action?: Action): Promise<SparTurnReply>;
   /**
    * 隔空切磋（X15）的挑战：等主人答复；off / busy / declined / timeout 在这里答，
    * 答应时回这边自己的名帖与随机数（令牌与应答签名在协议层出）
    */
-  duel(visitor: Visitor, card: SparCard, commit: string): Promise<DuelAnswer>;
+  duel(visitor: Visitor, card: SparCard, commit: string, live?: boolean): Promise<DuelAnswer>;
   /** 挑战方亮对了随机数：名帖与随机数都齐了，开演（features.ts 记账 + 演出） */
   duelReveal(visitor: Visitor, nonce: string, line: string): void;
+  /** 逐手局的一手（X19，隔空切磋） */
+  duelTurn?(visitor: Visitor, index: number, action?: Action): Promise<SparTurnReply>;
   /** 挑战方没亮随机数（对不上 / 超时，协议层已判）：按它认输记一场 */
   duelConceded(visitor: Visitor, reason: 'mismatch' | 'late'): void;
   /** 客人走了：leave = 告辞（text 是告别的话，可空）；lost = 太久没动静 */
@@ -626,6 +668,8 @@ interface PendingDuel {
   nonce: string;
   acceptedAt: number;
   timer: ReturnType<typeof setTimeout> | null;
+  /** 逐手局（X19）：亮随机数后还留着这条会话给 /v1/duel/turn 认令牌 */
+  live: boolean;
 }
 
 export interface HostOptions {
@@ -768,6 +812,7 @@ export class VisitHost {
       return this.duel(address, local, body, res);
     }
     if (path === '/v1/duel/reveal') return this.duelReveal(address, body, res);
+    if (path === '/v1/duel/turn') return this.duelTurn(address, body, res);
 
     const session = this.session;
     if (!session || body.token !== session.token || address !== session.visitor.address) {
@@ -801,13 +846,22 @@ export class VisitHost {
       }
       case '/v1/spar': {
         // 先验模式，再验版本（未来版本的名帖字段可能对不上现在的 schema，得先说清是版本问题），再验名帖
-        if (body.mode !== SPAR_MODE) return send(res, 200, { ok: false, reason: 'unsupported-mode' });
+        const live = body.mode === SPAR_LIVE_MODE;
+        if (body.mode !== SPAR_MODE && !live) return send(res, 200, { ok: false, reason: 'unsupported-mode' });
         const commit = typeof body.commit === 'string' ? body.commit : '';
         if (!isSparNonce(commit)) return send(res, 400, { ok: false, reason: 'bad-request' });
         const card = parseSparCard(body.card);
         if (card === 'version') return send(res, 200, { ok: false, reason: 'version' });
         if (card === null) return send(res, 200, { ok: false, reason: 'bad-card' });
-        return send(res, 200, await this.handlers.spar(session.visitor, card, commit));
+        return send(res, 200, await this.handlers.spar(session.visitor, card, commit, live));
+      }
+      case '/v1/spar/turn': {
+        const reply = await this.turnBody(body, (index, action) =>
+          this.handlers.sparTurn
+            ? this.handlers.sparTurn(session.visitor, index, action)
+            : Promise.resolve({ ok: false, reason: 'not-visiting' as const }),
+        );
+        return send(res, 200, reply);
       }
       case '/v1/spar/reveal': {
         // 感言是客人捎来给自己家客人窗口说的：照台词清洗截断，核过承诺才上屏（features.ts）
@@ -946,7 +1000,8 @@ export class VisitHost {
     // 验签在冷却之后：和敲门一个顺序（验不过的也占一次冷却，免得同一地址反复打）
     const challengerId = this.verifyDuel(body, owner, pet, local, now);
     if (!challengerId) return send(res, 200, { ok: false, reason: 'bad-sig' });
-    if (body.mode !== SPAR_MODE) return send(res, 200, { ok: false, reason: 'unsupported-mode' });
+    const live = body.mode === SPAR_LIVE_MODE;
+    if (body.mode !== SPAR_MODE && !live) return send(res, 200, { ok: false, reason: 'unsupported-mode' });
     const commit = typeof body.commit === 'string' ? body.commit : '';
     if (!isSparNonce(commit)) return send(res, 400, { ok: false, reason: 'bad-request' });
     const card = parseSparCard(body.card);
@@ -972,7 +1027,7 @@ export class VisitHost {
       // 对方等不及断开了：撤掉这次挑战（应答写完后也会触发 close，那时已经清掉，finish 不再生效）
       res.once('close', () => pending.finish('gone'));
       this.duelAsk = pending;
-      void this.handlers.duel(visitor, card, commit).then(
+      void this.handlers.duel(visitor, card, commit, live).then(
         (result) => pending.finish(result),
         (error: unknown) => {
           this.options.log(`串门：隔空切磋出错：${error instanceof Error ? error.message : String(error)}`);
@@ -994,6 +1049,7 @@ export class VisitHost {
       nonce: answer.nonce,
       acceptedAt: this.now(),
       timer: null,
+      live,
     };
     session.timer = setTimeout(() => this.timeoutDuel(session), this.options.duelWaitMs ?? DUEL_WAIT_MS);
     this.duelSession = session;
@@ -1024,18 +1080,62 @@ export class VisitHost {
     }
     const nonce = typeof body.nonce === 'string' ? body.nonce : '';
     if (session.timer !== null) clearTimeout(session.timer);
-    this.duelSession = null;
+    session.timer = null;
     if (this.now() - session.acceptedAt > (this.options.duelWaitMs ?? DUEL_WAIT_MS)) {
+      this.duelSession = null;
       this.lastDuel = { token, visitor: session.visitor, at: session.acceptedAt };
       this.handlers.duelConceded(session.visitor, 'late');
       return send(res, 200, { ok: false, reason: 'late' });
     }
     if (sparCommit(nonce) !== session.commit) {
+      this.duelSession = null;
       this.handlers.duelConceded(session.visitor, 'mismatch');
       return send(res, 200, { ok: false, reason: 'mismatch' });
     }
+    // 逐手局（X19）：这条会话留着给 /v1/duel/turn 认令牌，打完由 features 调 finishDuel() 收
+    if (!session.live) this.duelSession = null;
     this.handlers.duelReveal(session.visitor, nonce, cleanText(body.line, LINE_MAX));
     return send(res, 200, { ok: true });
+  }
+
+  /** 逐手局的隔空切磋打完了 / 断了：把留着认令牌的会话收掉（下一场挑战才能进来） */
+  finishDuel(): void {
+    const session = this.duelSession;
+    if (!session) return;
+    this.duelSession = null;
+    if (session.timer !== null) clearTimeout(session.timer);
+  }
+
+  /** 逐手局的隔空切磋一手（X19）：令牌与来源地址对上才交给 features；结构不对当 bad-request */
+  private async duelTurn(address: string, body: Record<string, unknown>, res: ServerResponse): Promise<void> {
+    const token = typeof body.token === 'string' ? body.token : '';
+    const session = this.duelSession;
+    if (!session || session.token !== token || session.visitor.address !== address) {
+      return send(res, 200, { ok: false, reason: 'not-visiting' });
+    }
+    const reply = await this.turnBody(body, (index, action) =>
+      this.handlers.duelTurn
+        ? this.handlers.duelTurn(session.visitor, index, action)
+        : Promise.resolve({ ok: false, reason: 'not-visiting' as const }),
+    );
+    return send(res, 200, reply);
+  }
+
+  /** 逐手局请求体的结构校验（序号、出手形状）：过了才交给 features 判 `legalActions` */
+  private async turnBody(
+    body: Record<string, unknown>,
+    ask: (index: number, action: Action | undefined) => Promise<SparTurnReply>,
+  ): Promise<SparTurnReply> {
+    const index = parseTurnIndex(body.index);
+    if (index === null) return { ok: false, reason: 'bad-request' };
+    let action: Action | undefined;
+    if (body.action !== undefined && body.action !== null) {
+      const parsed = parseSparAction(body.action);
+      // 结构不对：当掉线（对端不该发这种形状）；不回 illegal 是因为连「它出了哪一手」都认不出
+      if (!parsed) return { ok: false, reason: 'bad-request' };
+      action = parsed;
+    }
+    return ask(index, action);
   }
 
   /** 超时没亮随机数：主人家按挑战方认输记一场，槽位腾出来；迟到的 reveal 还能认出来回 late */
@@ -1125,12 +1225,14 @@ async function post(
   path: string,
   body: unknown,
   timeoutMs: number,
+  abort?: AbortSignal,
 ): Promise<Record<string, unknown>> {
+  const timeout = AbortSignal.timeout(timeoutMs);
   const response = await fetch(`http://${host.address}:${host.port}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: abort ? AbortSignal.any([timeout, abort]) : timeout,
   });
   const text = await response.text();
   if (text.length > MAX_BODY_BYTES) throw new Error('应答太大');
@@ -1199,8 +1301,10 @@ export function parseEvents(raw: unknown): HostEvent[] {
   for (const item of raw.slice(0, EVENTS_MAX)) {
     const event = item as Record<string, unknown> | null;
     if (event?.type === 'poke') events.push({ type: 'poke' });
-    // 邀切磋：旧客人不认识这种类型，走到这儿也不匹配，照样丢掉（X5 的兼容口径）
-    if (event?.type === 'spar-invite') events.push({ type: 'spar-invite' });
+    // 邀切磋：旧客人不认识这种类型，走到这儿也不匹配，照样丢掉（X5 的兼容口径）。
+    // 逐手局（X19）多带一个 mode: 'live'；旧客人只认 type，照样按自动应战
+    if (event?.type === 'spar-invite')
+      events.push({ type: 'spar-invite', ...(event.mode === 'live' ? { mode: 'live' as const } : {}) });
     const text = cleanText(event?.text, LINE_MAX);
     if (event?.type === 'line' && text) events.push({ type: 'line', text });
     // 捎给客人主人的话：只当文本显示，不进任何提示词（features.ts 的 onHostEvent）
@@ -1266,7 +1370,8 @@ export async function sendSpar(
   host: HostAddress,
   body: { token: string; mode: string; card: SparCard; commit: string },
 ): Promise<SparReply> {
-  const result = await post(host, '/v1/spar', body, 5_000);
+  // 逐手局里主人家要先在自己的出招面板里选方式（10 秒不点按自动），请求要等得比 5 秒久
+  const result = await post(host, '/v1/spar', body, body.mode === SPAR_LIVE_MODE ? 15_000 : 5_000);
   if (result.ok === true) {
     const nonce = typeof result.nonce === 'string' ? result.nonce : '';
     const card = parseSparCard(result.card);
@@ -1278,6 +1383,45 @@ export async function sendSpar(
   return {
     ok: false,
     reason: SPAR_FAILURES.includes(reason) ? (reason as SparFailure) : 'not-visiting',
+  };
+}
+
+/**
+ * 逐手局的一手（X19，串门切磋）：轮到自家出手时带 action，轮到对面时不带、挂着等它回 action。
+ * 等的一方 35 秒还没收到就当掉线（`TURN_WAIT_MS`），连不上 / 超时都抛错，由调用方按掉线收。
+ */
+export async function sendSparTurn(
+  host: HostAddress,
+  body: { token: string; index: number; action?: Action },
+  signal?: AbortSignal,
+): Promise<SparTurnReply> {
+  return sendTurn(host, '/v1/spar/turn', body, signal);
+}
+
+async function sendTurn(
+  host: HostAddress,
+  path: '/v1/spar/turn' | '/v1/duel/turn',
+  body: { token: string; index: number; action?: Action },
+  signal?: AbortSignal,
+): Promise<SparTurnReply> {
+  const result = await post(host, path, body, TURN_WAIT_MS, signal);
+  if (result.ok === true) {
+    if (result.action === undefined || result.action === null) return { ok: true };
+    const action = parseSparAction(result.action);
+    return action ? { ok: true, action } : { ok: false, reason: 'illegal' };
+  }
+  const reason = typeof result.reason === 'string' ? result.reason : '';
+  if (reason === 'not-found') return { ok: false, reason: 'not-visiting' };
+  return {
+    ok: false,
+    reason:
+      reason === 'illegal' ||
+      reason === 'late' ||
+      reason === 'busy' ||
+      reason === 'bad-request' ||
+      reason === 'sent-home'
+        ? (reason as Extract<SparTurnReply, { ok: false }>['reason'])
+        : 'not-visiting',
   };
 }
 
@@ -1347,7 +1491,8 @@ export async function sendDuel(
       card: body.card,
       commit: body.commit,
     },
-    DUEL_WAIT_MS + 10_000,
+    // 逐手局里应战方在答复主人以后还要选出招方式（10 秒），比自动局多留一点
+    DUEL_WAIT_MS + (body.mode === SPAR_LIVE_MODE ? 25_000 : 10_000),
   );
   if (result.ok === true) {
     const token = typeof result.token === 'string' ? result.token : '';
@@ -1375,6 +1520,15 @@ export async function sendDuel(
   // 旧版本没有 /v1/duel：老代码会先撞上 session 检查回 not-visiting，两种都当「还不会隔空切磋」
   if (reason === 'not-found' || reason === 'not-visiting') return { ok: false, reason: 'old-host' };
   return { ok: false, reason: DUEL_FAILURES.includes(reason) ? (reason as DuelFailure) : 'bad-request' };
+}
+
+/** 逐手局的一手（X19，隔空切磋）：同 `sendSparTurn`，只是走 /v1/duel/turn 的令牌 */
+export async function sendDuelTurn(
+  host: HostAddress,
+  body: { token: string; index: number; action?: Action },
+  signal?: AbortSignal,
+): Promise<SparTurnReply> {
+  return sendTurn(host, '/v1/duel/turn', body, signal);
 }
 
 /** 亮随机数（X15 第 3 步），line 是挑战方宠物的赛后感言，应战方核过承诺后开演；连不上时抛错 */

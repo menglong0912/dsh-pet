@@ -72,7 +72,8 @@ test('X17 心魔试炼：自动 / AI 出招 / 手动三种方式各打一场，�
           await openTrial(features, clicks, menus);
           assert.ok(features.battle.choose(pick), `选了第 ${pick} 种出招方式`);
           await until(() => (menus[menus.length - 1] ?? []).includes('修炼/快进'), '开打');
-          if (pick === 2) await until(() => env.battleCalls > 0, '问了 AI 一手');
+          // 全量测试并行跑时动画定时器会漂：给 AI 请求留足等待（断言本身不改）
+          if (pick === 2) await until(() => env.battleCalls > 0, '问了 AI 一手', 800);
           if (pick === 3) {
             await until(() => features.battle.state()?.kind === 'action', '手动出招面板');
             assert.ok(features.battle.choose(1), '点了第一手');

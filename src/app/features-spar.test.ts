@@ -25,6 +25,7 @@ import {
   hostedApp,
   fightCount,
   fakeDuelHost,
+  pickPanel,
 } from './features-testkit.ts';
 import { generateVisitIdentity } from './visit-identity.ts';
 import {
@@ -64,7 +65,7 @@ test('切磋（主人家）：邀约 → 应战 → 亮随机数 → 演出与�
         clicks,
         beacon: { port: beaconPort, targets: () => [] },
       },
-      async (_features, said, bodies, home, extras) => {
+      async (features, said, bodies, home, extras) => {
         const { menus } = extras;
         // 真机上 helper 会一直报自家宠物位置；先报一次，特效层才摆得出来
         emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
@@ -73,6 +74,8 @@ test('切磋（主人家）：邀约 → 应战 → 亮随机数 → 演出与�
         await until(() => menus.some((labels) => labels.includes('串门/和客人切磋')), '切磋菜单项');
         const target = { address: '127.0.0.1', port };
         clicks.push('串门/和客人切磋');
+        // X19：主人发起时也先选方式，选自动照旧走现在的协议
+        await pickPanel(features, 1, '串门切磋方式');
         // 邀约捎到客人那边：开场那句说出口 = inviteSpar 跑完（邀约已攒进出风箱），下一次报平安就带上了
         await until(() => said.some((text) => text.includes('过两招')), '开场那句');
         const ping = await tripRequest(target, '/v1/ping', { token });
@@ -192,13 +195,14 @@ test('切磋：随机数对不上、超时没亮、邀约没人接，各按各�
       sparWaitMs: 300,
       beacon: { port: beaconPort, targets: () => [] },
     },
-    async (_features, said, _bodies, home, extras) => {
+    async (features, said, _bodies, home, extras) => {
       const { menus } = extras;
       const { port, token } = await knockIn(home, clicks, extras);
       const target = { address: '127.0.0.1', port };
       // 邀约没人接：过了时限收摊，说一句没接招
       await until(() => menus.some((labels) => labels.includes('串门/和客人切磋')));
       clicks.push('串门/和客人切磋');
+      await pickPanel(features, 1, '串门切磋方式');
       await until(() => said.some((text) => text.includes('过两招')), '开场那句');
       await until(() => said.some((text) => text.includes('没接招')), '邀约超时收摊');
       // 应战 → 亮的随机数对不上：按客人认输记（这边的战绩是赢），应答如实说 mismatch
@@ -300,7 +304,7 @@ test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数
   try {
     await withFeatures(
       { config, cultivation: cultivationEarly(), clicks, beacon: { port: beaconPort, targets: () => [] } },
-      async (_features, said, bodies, home, extras) => {
+      async (features, said, bodies, home, extras) => {
         const { menus } = extras;
         // 真机上 helper 会一直报自家宠物位置；先报一次，切磋的特效层才摆得出来
         emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
@@ -312,6 +316,8 @@ test('切磋（客人）：找主人家的宠物切磋 → 应战、亮随机数
         clicks.push('串门/去 测试邻居 家');
         await until(() => menus.some((labels) => labels.includes('串门/找主人家的宠物切磋')), '进了门、切磋项出现');
         clicks.push('串门/找主人家的宠物切磋');
+        // X19：发起方先选方式，选自动照旧整场算好
+        await pickPanel(features, 1, '串门切磋方式');
         // 客人发来名帖与承诺，接着亮随机数（带一句按人设编的感言）
         await until(() => saw.card !== null, '切磋请求送到了主人家');
         await until(() => saw.nonce !== null, '亮了随机数');
@@ -845,7 +851,7 @@ test('隔空切磋（挑战方）：点菜单 → 应战 → 自家屏幕演全�
         clicks,
         beacon: { port: beaconPort, targets: () => [] },
       },
-      async (_features, said, bodies, home, extras) => {
+      async (features, said, bodies, home, extras) => {
         emitPetBounds({ x: 100, y: 100, marginL: 0, marginT: 0, size: 200, bottomPad: 20 });
         await until(
           () => extras.menus.some((labels) => labels.includes('修炼/切磋/测试邻居 家的 大个')),
@@ -853,6 +859,8 @@ test('隔空切磋（挑战方）：点菜单 → 应战 → 自家屏幕演全�
           400,
         );
         clicks.push('修炼/切磋/测试邻居 家的 大个');
+        // X19：发起方先在出招面板里选方式，选自动照旧整场算好
+        await pickPanel(features, 1, '隔空切磋方式');
         await until(() => said.some((text) => text.includes('等它应战')), '出门那句');
         await until(() => saw.card !== null, '挑战请求送到了应战方');
         await until(() => saw.nonce !== null, '亮了随机数');
@@ -970,13 +978,14 @@ test('隔空切磋（挑战方）：对方不应战就说一句，不记账、�
         clicks,
         beacon: { port: beaconPort, targets: () => [] },
       },
-      async (_features, said, _bodies, home, extras) => {
+      async (features, said, _bodies, home, extras) => {
         await until(
           () => extras.menus.some((labels) => labels.includes('修炼/切磋/测试邻居 家的 大个')),
           '挑战项出现',
           400,
         );
         clicks.push('修炼/切磋/测试邻居 家的 大个');
+        await pickPanel(features, 1, '隔空切磋方式');
         await until(() => said.some((text) => text.includes('没应战')), '说了没应战');
         await new Promise((done) => setTimeout(done, 200));
         assert.equal(fightCount(home), 0, '不记账');

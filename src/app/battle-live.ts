@@ -20,9 +20,10 @@ import {
   type SkillId,
   type WeaponId,
 } from './battle';
-import { BattleShow, LiveTimeline, type ShowSides, type Step, type TimelineOptions } from './battle-show';
+import { BattleShow, LiveTimeline, swapSides, type ShowSides, type Step, type TimelineOptions } from './battle-show';
 import type { StandaloneAiService } from '../standalone/ai-provider';
 import { cleanText } from './visit';
+import type { SparTurnReply } from './visit';
 
 /** 一手：动作 + AI 可选的一句台词（20 字以内） */
 export interface TurnDecision {
@@ -411,6 +412,400 @@ export function startLiveBattle(options: LiveBattleOptions): LiveBattle {
       abort.abort();
       current?.dispose();
       finish(null);
+    },
+  };
+}
+
+// ---------- 逐手对传（X19：串门切磋 / 隔空切磋） ----------
+
+/** 逐手局一手的应答（协议层的 SparTurnReply 与此同形；battle-live 不认识网络） */
+export type LiveTurnReply =
+  { ok: true; action?: Action } | { ok: false; reason: 'illegal' | 'late' | 'busy' | 'not-visiting' };
+
+/** 逐手对传两边共用的一份：本地是引擎几号、本地这一手怎么定、怎么把一段一段演出来 */
+export interface LiveVersusOptions {
+  a: Fighter;
+  b: Fighter;
+  seed: string;
+  /** 本地是引擎 0 号还是 1 号（1 号要 swapSides 成本地视角） */
+  local: 0 | 1;
+  show: ShowSides;
+  /** 解说台词的随机数（两边同一种子） */
+  lineRng: () => number;
+  timeline?: TimelineOptions;
+  /** 本地这一手：返回 null（超时 / 没选 / 收摊）就按后备挑法出 */
+  decide: (view: BattleView, index: number, signal: AbortSignal) => Promise<TurnDecision | null>;
+  /** 演完一段、本地这一手还没定：宠物头上「想一想…」 */
+  think: () => void;
+  log: (message: string) => void;
+}
+
+/** 发起方 / 客人那一侧：发 HTTP 的总是这一边 */
+export interface LiveClientOptions extends LiveVersusOptions {
+  /** 等对面一手 / 自己这一手送达的时限（35 秒没收到就当掉线） */
+  waitMs: number;
+  sendTurn: (body: { index: number; action?: Action }, signal: AbortSignal) => Promise<SparTurnReply>;
+}
+
+/** 应战方 / 主人家那一侧：请求由协议层经 `turn()` 递进来 */
+export interface LiveServerOptions extends LiveVersusOptions {
+  /** 等对面下一手的时限（35 秒没来就当掉线） */
+  waitMs: number;
+}
+
+/** 一场逐手对传：`done` 在演完 / 掉线 / 收摊时结算（掉线、收摊回 null） */
+export interface LiveVersus {
+  done: Promise<BattleEvent[] | null>;
+  /** 快进：本地剩下的手全按后备挑法、不再等 AI / 手动；仍按协议把出手传完 */
+  skip(): void;
+  /** 收摊 / 退出：停掉等待与演出，`done` 回 null */
+  dispose(): void;
+  /** 服务端专用：协议层收到一手时调（客户端调用回 not-visiting） */
+  turn(index: number, action?: Action): Promise<LiveTurnReply>;
+}
+
+/** 两个动作是不是同一个（动作只有 kind + 编号） */
+function sameAction(a: Action, b: Action): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'weapon' && b.kind === 'weapon') return a.weapon === b.weapon;
+  if (a.kind === 'skill' && b.kind === 'skill') return a.skill === b.skill;
+  if (a.kind === 'move' && b.kind === 'move') return a.move === b.move;
+  return a.kind === 'unarmed';
+}
+
+/** 这一手在不在 `legalActions` 里 */
+function isLegal(view: BattleView, action: Action): boolean {
+  return legalActions(view).some((item) => sameAction(item, action));
+}
+
+/** 一次入站请求（服务端）：序号、对面的出手（轮到它时才有）、应答 */
+interface LiveInbound {
+  index: number;
+  action?: Action;
+  reply: (result: LiveTurnReply) => void;
+}
+
+/**
+ * 逐手对传的发起方 / 客人那一侧（X19）：轮到自家时带上这一手发出去，轮到对面时挂着等它回。
+ * 对面 35 秒没回、连接断了、回的招不合法，都按掉线，`done` 回 null。
+ */
+export function startLiveClient(options: LiveClientOptions): LiveVersus {
+  const actions: [Action[], Action[]] = [[], []];
+  const decideLines = new Map<number, string>();
+  const live = new LiveTimeline(
+    [options.a.name, options.b.name],
+    options.lineRng,
+    [options.a.skills, options.b.skills],
+    { ...options.timeline, decideLines },
+  );
+  const decideAbort = new AbortController();
+  const networkAbort = new AbortController();
+  let current: BattleShow | null = null;
+  let fastForward = false;
+  let disposed = false;
+  let settled = false;
+  let resolveDone: (events: BattleEvent[] | null) => void = () => undefined;
+  const done = new Promise<BattleEvent[] | null>((resolve) => (resolveDone = resolve));
+
+  const finish = (events: BattleEvent[] | null): void => {
+    if (settled) return;
+    settled = true;
+    current = null;
+    resolveDone(events);
+  };
+
+  /** 演一段：步骤的绝对时刻从上一段结尾接着排，所以平移到 0 起播；本地是 1 号时换边 */
+  const play = async (steps: Step[]): Promise<void> => {
+    if (steps.length === 0 || fastForward || disposed) return;
+    const local = options.local === 1 ? swapSides(steps) : steps;
+    const start = local[0].at;
+    const show = new BattleShow(
+      local.map((one) => ({ ...one, at: one.at - start })),
+      options.show,
+    );
+    current = show;
+    await show.run();
+    if (current === show) current = null;
+  };
+
+  /** 本地这一手：定不了 / 不合法都按后备挑法（序号用这一手在整场里的位置） */
+  const localAction = async (view: BattleView, index: number): Promise<{ action: Action; line?: string }> => {
+    let decision: TurnDecision | null = null;
+    try {
+      decision = await options.decide(view, index, decideAbort.signal);
+    } catch (error) {
+      options.log(`逐手对传：定这一手失败（${error instanceof Error ? error.message : String(error)}），按后备挑法`);
+    }
+    const action =
+      decision?.action && isLegal(view, decision.action) ? decision.action : fallbackAction(view, options.seed, index);
+    return { action, ...(decision?.line ? { line: decision.line } : {}) };
+  };
+
+  /** 等对面一手 / 送出自家的这一手：超过 waitMs 或收摊都抛错，外层按掉线 */
+  const waitTurn = (body: { index: number; action?: Action }, what: string): Promise<SparTurnReply> => {
+    if (networkAbort.signal.aborted) return Promise.reject(new Error('cancelled'));
+    return new Promise<SparTurnReply>((resolve, reject) => {
+      let done = false;
+      const finish = (error: Error | null, reply?: SparTurnReply): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        networkAbort.signal.removeEventListener('abort', cancel);
+        if (error) reject(error);
+        else resolve(reply ?? { ok: false, reason: 'not-visiting' });
+      };
+      const timer = setTimeout(() => finish(new Error(`${what}超时`)), Math.max(1, options.waitMs));
+      const cancel = (): void => finish(new Error('cancelled'));
+      networkAbort.signal.addEventListener('abort', cancel, { once: true });
+      options.sendTurn(body, networkAbort.signal).then(
+        (reply) => finish(null, reply),
+        (error: unknown) => finish(error instanceof Error ? error : new Error(String(error))),
+      );
+    });
+  };
+
+  void (async () => {
+    try {
+      let result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]]);
+      while (true) {
+        if (disposed) return finish(null);
+        if (!result.need) {
+          await play(live.push(result.events));
+          return finish(disposed ? null : result.events);
+        }
+        const need = result.need;
+        const index = actions[0].length + actions[1].length;
+        const local = need.side === options.local;
+        let decided = false;
+        const decision = (async (): Promise<{ action: Action; line?: string } | null> => {
+          if (local) {
+            const picked = await localAction(need.view, index);
+            decided = true;
+            return picked;
+          }
+          const reply = await waitTurn({ index }, '等对面出手');
+          if (!reply.ok) throw new Error(reply.reason);
+          if (!reply.action) throw new Error('对面没有给这一手');
+          if (!isLegal(need.view, reply.action)) throw new Error('对面这一手不合法');
+          decided = true;
+          return { action: reply.action };
+        })();
+        // 一边问下一手一边把上一段演完（§X17 边演边想）
+        await play(live.push(result.events));
+        if (disposed) return finish(null);
+        if (!decided && !fastForward) options.think();
+        let picked: { action: Action; line?: string } | null;
+        try {
+          picked = await decision;
+        } catch (error) {
+          options.log(`逐手对传：这一手断了（${error instanceof Error ? error.message : String(error)}），按掉线`);
+          return finish(null);
+        }
+        if (disposed) return finish(null);
+        if (!picked) return finish(null);
+        if (picked.line) decideLines.set(result.events.length, picked.line);
+        // 自家这一手也发给对面（对面要过 legalActions，收下这一场才往下走）
+        if (local) {
+          const reply = await waitTurn({ index, action: picked.action }, '送这一手').catch((error: unknown) => {
+            options.log(`逐手对传：这一手没送到（${error instanceof Error ? error.message : String(error)}），按掉线`);
+            return null;
+          });
+          if (disposed) return finish(null);
+          if (!reply || !reply.ok) return finish(null);
+        }
+        actions[need.side].push(picked.action);
+        result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]]);
+      }
+    } catch (error) {
+      options.log(`逐手对传：这一场中断了（${error instanceof Error ? error.message : String(error)}）`);
+      finish(null);
+    }
+  })();
+
+  return {
+    done,
+    skip() {
+      if (fastForward || disposed || settled) return;
+      fastForward = true;
+      decideAbort.abort();
+      current?.dispose();
+    },
+    dispose() {
+      if (disposed || settled) return;
+      disposed = true;
+      fastForward = true;
+      decideAbort.abort();
+      networkAbort.abort();
+      current?.dispose();
+      finish(null);
+    },
+    turn: () => Promise.resolve({ ok: false, reason: 'not-visiting' as const }),
+  };
+}
+
+/**
+ * 逐手对传的应战方 / 主人家那一侧（X19）：请求由协议层经 `turn()` 递进来。
+ * 轮到对面时只收它那一手（先过 legalActions）；轮到自家时定了再随应答回过去。
+ * 对面 35 秒没来下一手、序号对不上、出手不合法，都按掉线，`done` 回 null。
+ */
+export function startLiveServer(options: LiveServerOptions): LiveVersus {
+  const actions: [Action[], Action[]] = [[], []];
+  const decideLines = new Map<number, string>();
+  const live = new LiveTimeline(
+    [options.a.name, options.b.name],
+    options.lineRng,
+    [options.a.skills, options.b.skills],
+    { ...options.timeline, decideLines },
+  );
+  const abort = new AbortController();
+  const inbound: LiveInbound[] = [];
+  let wake: (() => void) | null = null;
+  let current: BattleShow | null = null;
+  let fastForward = false;
+  let disposed = false;
+  let settled = false;
+  let resolveDone: (events: BattleEvent[] | null) => void = () => undefined;
+  const done = new Promise<BattleEvent[] | null>((resolve) => (resolveDone = resolve));
+
+  const finish = (events: BattleEvent[] | null): void => {
+    if (settled) return;
+    settled = true;
+    current = null;
+    resolveDone(events);
+  };
+
+  const play = async (steps: Step[]): Promise<void> => {
+    if (steps.length === 0 || fastForward || disposed) return;
+    const local = options.local === 1 ? swapSides(steps) : steps;
+    const start = local[0].at;
+    const show = new BattleShow(
+      local.map((one) => ({ ...one, at: one.at - start })),
+      options.show,
+    );
+    current = show;
+    await show.run();
+    if (current === show) current = null;
+  };
+
+  const localAction = async (view: BattleView, index: number): Promise<{ action: Action; line?: string }> => {
+    let decision: TurnDecision | null = null;
+    try {
+      decision = await options.decide(view, index, abort.signal);
+    } catch (error) {
+      options.log(`逐手对传：定这一手失败（${error instanceof Error ? error.message : String(error)}），按后备挑法`);
+    }
+    const action =
+      decision?.action && isLegal(view, decision.action) ? decision.action : fallbackAction(view, options.seed, index);
+    return { action, ...(decision?.line ? { line: decision.line } : {}) };
+  };
+
+  /** 等下一手；超时回 null（按掉线） */
+  const nextInbound = (): Promise<LiveInbound | null> => {
+    const ready = inbound.shift();
+    if (ready) return Promise.resolve(ready);
+    if (disposed || settled) return Promise.resolve(null);
+    return new Promise<LiveInbound | null>((resolve) => {
+      let done = false;
+      const settle = (value: LiveInbound | null): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (wake === kick) wake = null;
+        resolve(value);
+      };
+      const timer = setTimeout(() => settle(null), Math.max(1, options.waitMs));
+      const kick = (): void => settle(inbound.shift() ?? null);
+      wake = kick;
+    });
+  };
+
+  void (async () => {
+    try {
+      let result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]]);
+      while (true) {
+        if (disposed) return finish(null);
+        if (!result.need) {
+          await play(live.push(result.events));
+          return finish(disposed ? null : result.events);
+        }
+        const need = result.need;
+        const index = actions[0].length + actions[1].length;
+        const playing = play(live.push(result.events));
+        const request = await nextInbound();
+        if (disposed) return finish(null);
+        if (!request) {
+          options.log('逐手对传：等对面出手超时，按掉线');
+          return finish(null);
+        }
+        if (request.index !== index) {
+          request.reply({ ok: false, reason: 'late' });
+          options.log(`逐手对传：对面这一手的序号 ${request.index} 对不上 ${index}，按掉线`);
+          return finish(null);
+        }
+        if (need.side === options.local) {
+          if (request.action) {
+            request.reply({ ok: false, reason: 'illegal' });
+            options.log('逐手对传：还没轮到对面，它却带了一手，按掉线');
+            return finish(null);
+          }
+          // 一边演上一段一边想这一手（§X17 边演边想）
+          let decided = false;
+          const deciding = localAction(need.view, index).then((value) => {
+            decided = true;
+            return value;
+          });
+          await playing;
+          if (!decided && !fastForward) options.think();
+          const picked = await deciding;
+          if (disposed) {
+            request.reply({ ok: false, reason: 'not-visiting' });
+            return finish(null);
+          }
+          if (picked.line) decideLines.set(result.events.length, picked.line);
+          actions[need.side].push(picked.action);
+          request.reply({ ok: true, action: picked.action });
+        } else {
+          if (!request.action || !isLegal(need.view, request.action)) {
+            request.reply({ ok: false, reason: 'illegal' });
+            options.log('逐手对传：对面这一手不合法，按掉线');
+            return finish(null);
+          }
+          actions[need.side].push(request.action);
+          request.reply({ ok: true });
+          await playing;
+        }
+        result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]]);
+      }
+    } catch (error) {
+      options.log(`逐手对传：这一场中断了（${error instanceof Error ? error.message : String(error)}）`);
+      finish(null);
+    }
+  })();
+
+  return {
+    done,
+    skip() {
+      if (fastForward || disposed || settled) return;
+      fastForward = true;
+      abort.abort();
+      current?.dispose();
+    },
+    dispose() {
+      if (disposed || settled) return;
+      disposed = true;
+      fastForward = true;
+      abort.abort();
+      current?.dispose();
+      wake?.();
+      for (const request of inbound.splice(0)) request.reply({ ok: false, reason: 'not-visiting' });
+      finish(null);
+    },
+    turn(index, action) {
+      if (disposed || settled) return Promise.resolve({ ok: false, reason: 'not-visiting' as const });
+      return new Promise<LiveTurnReply>((resolve) => {
+        inbound.push({ index, action, reply: resolve });
+        wake?.();
+      });
     },
   };
 }

@@ -14,20 +14,22 @@
  *       对方应战后亮随机数、打印这一场谁赢。
  *
  * 用法（strip-types 与 test-register 的说明见 scripts/test-ts-resolver.mjs）：
- *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--duel auto|ask|no] [--identity <路径>|none]
+ *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--duel auto|ask|no] [--drop <序号>] [--identity <路径>|none]
  *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs listen
- *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]
- *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs duel  [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]
+ *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--live] [--drop <序号>] [--identity <路径>|none]
+ *   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs duel  [--port N] [--host-id <32位十六进制>] [--live] [--drop <序号>] [--identity <路径>|none]
  *
  * --identity 给了路径才落盘（脚本与真 app 互相验明正身、日志里看 verified 用）；缺省在内存里生成，不写文件；
  *   --identity none 模拟旧版本，不签名。visit 模式签名需要主人家的 id（来自信标）：脚本连脚本自测时
  *   从 host 模式打印的「身份」里抄过来，用 --host-id 带上；不带 --host-id 就不签名（当旧版本客人）。
  *
- * host 的标准输入命令：line <话> / poke / play <项> / gift <项> / note <话>（捎给客人的主人）/ friend <y|n>（收不收客人的捎话，默认收）/ spar（邀客人切磋）/ home（请客人回家）；ask 模式下 y / n 答复敲门，--duel ask 时 y / n 答复隔空切磋。
+ * host 的标准输入命令：line <话> / poke / play <项> / gift <项> / note <话>（捎给客人的主人）/ friend <y|n>（收不收客人的捎话，默认收）/ spar [live]（邀客人切磋，live = 逐手局）/ home（请客人回家）；ask 模式下 y / n 答复敲门，--duel ask 时 y / n 答复隔空切磋。
  * duel 不给 --port / --host-id 时往 127.0.0.1:47340 发一条探测，从回信标里读对方的身份 id 与接待端口（真 app 要开着接待）。
- * visit 的标准输入命令：say <话> / note <话>（捎给对方主人）/ spar（找主人家的宠物切磋；收到邀约不自动应战，也输 spar）/ leave（告辞，后面可以带告别的话）。
+ * visit 的标准输入命令：say <话> / note <话>（捎给对方主人）/ spar [live]（找主人家的宠物切磋；收到邀约不自动应战，也输 spar）/ leave（告辞，后面可以带告别的话）。
  * 两种模式 10 分钟后自动退出。切磋按 X5 的协议走：名帖都是脚本里这份假的（境界 2、水枪、化鸽遁），
  * host 模式按它应战、两边各自算出同一场后打印输赢；visit 模式发名帖与承诺、亮随机数，主人家的屏幕上开演。
+ * 逐手局（X19）按 mode: live 对传：脚本这边每一手都按后备挑法出（fallbackAction），等对面那一手时挂着；
+ * 加 --drop <序号> 时在这一手故意不回，对面 35 秒（测试里可调短）没收到就按掉线。
  */
 import { randomUUID } from 'node:crypto';
 import { createSocket } from 'node:dgram';
@@ -38,6 +40,7 @@ import { createInterface } from 'node:readline';
 import {
   BEACON_PORT,
   PING_MS,
+  SPAR_LIVE_MODE,
   SPAR_MODE,
   VisitHost,
   cardFighter,
@@ -48,14 +51,17 @@ import {
   randomSparNonce,
   sendDuel,
   sendDuelReveal,
+  sendDuelTurn,
   sendNote,
   sendReveal,
   sendSpar,
+  sendSparTurn,
   sparCardOf,
   sparCommit,
   sparFight,
   tripRequest,
 } from '../../src/app/visit.ts';
+import { fallbackAction, fightUntilDecision, legalActions } from '../../src/app/battle.ts';
 import { generateVisitIdentity, loadVisitIdentity } from '../../src/app/visit-identity.ts';
 
 const OWNER_DEFAULT = '测试邻居';
@@ -82,11 +88,120 @@ const fakeFighter = {
 };
 const fakeCard = sparCardOf(fakeFighter, 2);
 
+// ---------- 逐手局（X19）的共用小工具 ----------
+
+/** 两个动作是不是同一个 */
+function sameAction(a, b) {
+  if (!a || !b || a.kind !== b.kind) return false;
+  if (a.kind === 'weapon') return a.weapon === b.weapon;
+  if (a.kind === 'skill') return a.skill === b.skill;
+  if (a.kind === 'move') return a.move === b.move;
+  return true;
+}
+
+/** 这一手在不在 legalActions 里 */
+function isLegal(view, action) {
+  return legalActions(view).some((item) => sameAction(item, action));
+}
+
+/** 新开一场逐手局：local = 这边是引擎 0 号还是 1 号（假主人家 / 假应战方是 0，假客人 / 挑战方是 1） */
+function newLiveMatch(a, b, seed, local, selfName, foeName) {
+  return { a, b, seed, local, selfName, foeName, actions: [[], []], finished: false, events: null };
+}
+
+function liveResult(match) {
+  return fightUntilDecision(match.a, match.b, match.seed, [match.actions[0], match.actions[1]]);
+}
+
+function liveTotal(match) {
+  return match.actions[0].length + match.actions[1].length;
+}
+
+/** 打完了就打印结果（只打印一次） */
+function liveFinish(match, events) {
+  if (match.finished || !events) return;
+  match.finished = true;
+  match.events = events;
+  const end = events[events.length - 1];
+  const won = end.kind === 'end' && end.winner === match.local;
+  print(
+    `逐手开打（${events.length} 个事件）：${won ? match.selfName : match.foeName} 赢${
+      end.kind === 'end' && end.reason === 'ko' ? '，打到分晓' : '，满 30 手按比例判'
+    }`,
+  );
+}
+
+/**
+ * 假对面按后备挑法出一手（host 模式的 sparTurn / duelTurn）。
+ * `dropAt` = 在这个序号故意不回（返回一个永远不 resolve 的 Promise），用来试对面判掉线。
+ */
+function serveLiveTurn(match, index, action, dropAt) {
+  if (!match || match.finished) return Promise.resolve({ ok: false, reason: 'not-visiting' });
+  if (dropAt === index) {
+    print(`故意不回第 ${index} 手，等对面判掉线`);
+    return new Promise(() => undefined);
+  }
+  const result = liveResult(match);
+  const total = liveTotal(match);
+  if (!result.need || index !== total) return Promise.resolve({ ok: false, reason: 'late' });
+  if (result.need.side === match.local) {
+    if (action) return Promise.resolve({ ok: false, reason: 'illegal' });
+    const pick = fallbackAction(result.need.view, match.seed, index);
+    match.actions[match.local].push(pick);
+    const after = liveResult(match);
+    if (!after.need) liveFinish(match, after.events);
+    return Promise.resolve({ ok: true, action: pick });
+  }
+  if (!action || !isLegal(result.need.view, action)) return Promise.resolve({ ok: false, reason: 'illegal' });
+  match.actions[result.need.side].push(action);
+  const after = liveResult(match);
+  if (!after.need) liveFinish(match, after.events);
+  return Promise.resolve({ ok: true });
+}
+
+/**
+ * 假挑战方 / 假客人的逐手循环：轮到自家按后备挑法出，轮到对面挂着等它回。
+ * `send(body)` 发 /v1/spar/turn 或 /v1/duel/turn；`dropAt` = 到这一手故意不发。
+ */
+async function runLiveClient(match, send, dropAt) {
+  let result = liveResult(match);
+  while (result.need) {
+    const index = liveTotal(match);
+    if (dropAt === index) {
+      print(`故意不回第 ${index} 手，等对面判掉线`);
+      return null;
+    }
+    const need = result.need;
+    if (need.side === match.local) {
+      const action = fallbackAction(need.view, match.seed, index);
+      const reply = await send({ index, action });
+      if (!reply.ok) {
+        print(`这一手没被对面收下（${reply.reason}），按掉线`);
+        return null;
+      }
+      match.actions[match.local].push(action);
+    } else {
+      const reply = await send({ index });
+      if (!reply.ok || !reply.action || !isLegal(need.view, reply.action)) {
+        print(`对面这一手不合法（${reply.reason ?? '没给招'}），按掉线`);
+        return null;
+      }
+      match.actions[need.side].push(reply.action);
+    }
+    result = liveResult(match);
+  }
+  liveFinish(match, result.events);
+  return match.events;
+}
+
 const USAGE = `用法：
-  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--duel auto|ask|no] [--identity <路径>|none]
+  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs host  [--owner 测试邻居] [--pet 小测] [--accept auto|ask] [--duel auto|ask|no] [--drop <序号>] [--identity <路径>|none]
   node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs listen
-  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]
-  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs duel  [--port N] [--host-id <32位十六进制>] [--identity <路径>|none]`;
+  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs visit [--port N] [--host-id <32位十六进制>] [--live] [--drop <序号>] [--identity <路径>|none]
+  node --experimental-strip-types --import ./scripts/test-register.mjs scripts/dev/visit-peer.mjs duel  [--port N] [--host-id <32位十六进制>] [--live] [--drop <序号>] [--identity <路径>|none]
+
+逐手局（X19）：host 模式输「spar live」邀客人逐手，或直接应战 app 发来的 mode: live；
+visit / duel 加 --live 扮逐手局；--drop <序号> 在那一手故意不回，用来试对面判掉线。`;
 
 function parseArgs(argv) {
   const [mode, ...rest] = argv;
@@ -100,6 +215,9 @@ function parseArgs(argv) {
     port: 0,
     hostId: '',
     identity: '',
+    // 逐手局（X19）：duel / visit 模式带 --live 发起；--drop <序号> 故意不回那一手，试对面判掉线
+    live: false,
+    drop: -1,
   };
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i];
@@ -124,6 +242,11 @@ function parseArgs(argv) {
       i += 1;
     } else if (flag === '--identity' && value) {
       options.identity = value;
+      i += 1;
+    } else if (flag === '--live') {
+      options.live = true;
+    } else if (flag === '--drop' && /^\d+$/.test(value ?? '')) {
+      options.drop = Number(value);
       i += 1;
     } else {
       return null;
@@ -156,6 +279,9 @@ async function runHost(options) {
   // 隔空切磋（X15）：应战中的挑战方（承诺、名帖、随机数）；ask 模式下等标准输入答复的函数
   let pendingDuel = null;
   let answerDuel = null;
+  // 逐手局（X19）：亮随机数以后一手一手对传的那一场（spar / duel 各一个槽位）
+  let liveSpar = null;
+  let liveDuel = null;
   const host = new VisitHost(
     {
       canHost: () => true,
@@ -182,10 +308,12 @@ async function runHost(options) {
         return true;
       },
       // 切磋（X5）：按假名帖应战，亮随机数后两边各自算同一场，打印输赢
-      async spar(visitor, card, commit) {
+      async spar(visitor, card, commit, live) {
         const hostNonce = randomSparNonce();
-        pendingSpar = { commit, guestCard: card, hostNonce };
-        print(`${visitor.pet} 应战（它报的境界 ${card.stage}，气血 ${card.hp}），承诺收下`);
+        pendingSpar = { commit, guestCard: card, hostNonce, live: live === true, pet: visitor.pet };
+        print(
+          `${visitor.pet} 应战（它报的境界 ${card.stage}，气血 ${card.hp}，${live ? '逐手局' : '自动'}），承诺收下`,
+        );
         return { ok: true, card: fakeCard, nonce: hostNonce };
       },
       async reveal(visitor, nonce, line) {
@@ -194,6 +322,20 @@ async function runHost(options) {
           print(`${visitor.pet} 亮的随机数${pendingSpar ? '对不上' : '迟到了'}，按它认输记`);
           pendingSpar = null;
           return { ok: false, reason };
+        }
+        if (pendingSpar.live) {
+          liveSpar = newLiveMatch(
+            fakeFighter,
+            cardFighter(visitor.pet, pendingSpar.guestCard),
+            `${nonce}:${pendingSpar.hostNonce}`,
+            0,
+            options.pet,
+            visitor.pet,
+          );
+          print(`${visitor.pet} 亮了随机数，开始逐手对传（这边按后备挑法出）`);
+          if (line) print(`它家宠物的赛后感言：${line}`);
+          pendingSpar = null;
+          return { ok: true };
         }
         const events = sparFight(
           fakeFighter,
@@ -210,17 +352,22 @@ async function runHost(options) {
         pendingSpar = null;
         return { ok: true };
       },
+      sparTurn(_visitor, index, action) {
+        return serveLiveTurn(liveSpar, index, action, options.drop);
+      },
       // 隔空切磋（X15）：按 --duel 自动应战 / 等标准输入 / 一律不应战
-      async duel(visitor, card, commit) {
-        print(`${visitor.owner} 家的 ${visitor.pet} 来隔空切磋（它报的境界 ${card.stage}，气血 ${card.hp}），承诺收下`);
+      async duel(visitor, card, commit, live) {
+        print(
+          `${visitor.owner} 家的 ${visitor.pet} 来隔空切磋（它报的境界 ${card.stage}，气血 ${card.hp}${live ? '，逐手局' : ''}），承诺收下`,
+        );
         if (options.duel === 'no') {
           print('不应战（--duel no）');
           return { ok: false, reason: 'declined' };
         }
         const hostNonce = randomSparNonce();
-        pendingDuel = { card, commit, hostNonce };
+        pendingDuel = { card, commit, hostNonce, live: live === true, pet: visitor.pet };
         if (options.duel === 'auto') {
-          print('自动应战');
+          print(live ? '自动应战（逐手局，这边按后备挑法出）' : '自动应战');
           return { ok: true, card: fakeCard, nonce: hostNonce };
         }
         print('等标准输入：y 应战 / n 不应战');
@@ -243,10 +390,23 @@ async function runHost(options) {
           print(`${visitor.pet} 亮了随机数，可这边没有应战中的挑战（当没看见）`);
           return;
         }
-        const { card, commit, hostNonce } = pendingDuel;
+        const { card, commit, hostNonce, live } = pendingDuel;
         pendingDuel = null;
         if (sparCommit(nonce) !== commit) {
           print(`${visitor.pet} 亮的随机数对不上承诺，按它认输记`);
+          return;
+        }
+        if (live) {
+          liveDuel = newLiveMatch(
+            fakeFighter,
+            cardFighter(visitor.pet, card),
+            `${nonce}:${hostNonce}`,
+            0,
+            options.pet,
+            visitor.pet,
+          );
+          print(`${visitor.pet} 亮了随机数，开始隔空逐手对传（这边按后备挑法出）`);
+          if (line) print(`它家宠物的赛后感言：${line}`);
           return;
         }
         const events = sparFight(fakeFighter, cardFighter(visitor.pet, card), nonce, hostNonce);
@@ -256,6 +416,9 @@ async function runHost(options) {
           `隔空开打（${events.length} 个事件）：${won ? options.pet : visitor.pet} 赢${end.reason === 'ko' ? '，打到分晓' : '，满 30 手按比例判'}`,
         );
         if (line) print(`它家宠物的赛后感言：${line}`);
+      },
+      duelTurn(_visitor, index, action) {
+        return serveLiveTurn(liveDuel, index, action, options.drop);
       },
       duelConceded(visitor, reason) {
         pendingDuel = null;
@@ -342,7 +505,15 @@ async function runHost(options) {
         return;
       }
       case 'spar': {
-        print(host.tell({ type: 'spar-invite' }) ? '邀客人切磋：它应战就会发 /v1/spar 来' : '没有客人在，邀不了');
+        const live = text === 'live';
+        const sent = host.tell(live ? { type: 'spar-invite', mode: 'live' } : { type: 'spar-invite' });
+        print(
+          sent
+            ? live
+              ? '邀客人逐手切磋：它应战就会发 /v1/spar（mode: live）来'
+              : '邀客人切磋：它应战就会发 /v1/spar 来'
+            : '没有客人在，邀不了',
+        );
         return;
       }
       case 'home': {
@@ -413,7 +584,8 @@ function printEvent(event) {
   else if (event.type === 'note') print(`它家宠物带回它主人的话：${event.text}`);
   else if (event.type === 'poke') print('它家主人摸了你一下');
   else if (event.type === 'play') print(`它家请你一起玩：${event.what}`);
-  else if (event.type === 'spar-invite') print('它家邀你切磋（脚本不自动应战，输 spar 应战）');
+  else if (event.type === 'spar-invite')
+    print(`它家邀你切磋${event.mode === 'live' ? '（逐手局）' : ''}（脚本不自动应战，输 spar 应战）`);
   else print(`它家请你吃：${event.what}`);
 }
 
@@ -487,20 +659,27 @@ async function runVisit(options) {
     const command = input.split(/\s+/)[0];
     const text = input.slice(command.length).trim();
     if (command !== 'say' && command !== 'note' && command !== 'spar' && command !== 'leave') {
-      if (input) print(`不认识的命令：${command}（say / note / spar / leave）`);
+      if (input) print(`不认识的命令：${command}（say / note / spar [live] / leave）`);
       return;
     }
     if (command !== 'leave' && command !== 'spar' && !text) {
       print(`用法：${command} <话>`);
       return;
     }
-    // 切磋（X5 第 2–4 步）：发名帖与承诺 → 拿到主人家的随机数后两边各自算同一场 → 亮随机数（带句感言）
+    // 切磋（X5 第 2–4 步）：发名帖与承诺 → 拿到主人家的随机数后两边各自算同一场 → 亮随机数（带句感言）。
+    // `spar live`（X19）是逐手局：亮随机数后一手一手对传，这边按后备挑法出；`--drop <序号>` 故意不回
     if (command === 'spar') {
       void (async () => {
         const ownNonce = randomSparNonce();
+        const live = options.live || text === 'live';
         let reply;
         try {
-          reply = await sendSpar(host, { token, mode: SPAR_MODE, card: fakeCard, commit: sparCommit(ownNonce) });
+          reply = await sendSpar(host, {
+            token,
+            mode: live ? SPAR_LIVE_MODE : SPAR_MODE,
+            card: fakeCard,
+            commit: sparCommit(ownNonce),
+          });
         } catch (error) {
           print(`切磋的请求没送到：${errorText(error)}`);
           return;
@@ -509,7 +688,28 @@ async function runVisit(options) {
           print(`没打成：${reply.reason}`);
           return;
         }
-        print(`主人家应战（它报的境界 ${reply.card.stage}，气血 ${reply.card.hp}）`);
+        print(`主人家应战（它报的境界 ${reply.card.stage}，气血 ${reply.card.hp}，${live ? '逐手局' : '自动'}）`);
+        if (live) {
+          const revealed = await sendReveal(host, { token, nonce: ownNonce, line: '' }).catch((error) => ({
+            ok: false,
+            reason: errorText(error),
+          }));
+          if (!revealed.ok) {
+            print(`没亮成：${revealed.reason}`);
+            return;
+          }
+          const match = newLiveMatch(
+            cardFighter('主人家的宠物', reply.card),
+            fakeFighter,
+            `${ownNonce}:${reply.nonce}`,
+            1,
+            options.pet,
+            '主人家的宠物',
+          );
+          print('亮了随机数，逐手对传开始（这边按后备挑法出）');
+          await runLiveClient(match, (body) => sendSparTurn(host, { token, ...body }), options.drop);
+          return;
+        }
         const events = sparFight(cardFighter('主人家的宠物', reply.card), fakeFighter, ownNonce, reply.nonce);
         const end = events[events.length - 1];
         const won = end.kind === 'end' && end.winner === 1;
@@ -595,8 +795,11 @@ async function runDuel(options) {
     print('没等到信标：开真 app 的接待，或者用 --port 与 --host-id 指定（host 模式会打印身份 id）');
     process.exit(1);
   }
+  const targetLabel = target.pet || '对方';
   print(
-    `挑战 ${target.owner ? `${target.owner} 家的 ` : ''}${target.pet || '对方'}（${target.address}:${target.port}，id ${target.hostId}）……`,
+    `挑战 ${target.owner ? `${target.owner} 家的 ` : ''}${targetLabel}（${target.address}:${target.port}，id ${target.hostId}）${
+      options.live ? '，逐手局' : ''
+    }……`,
   );
   const ownNonce = randomSparNonce();
   let reply;
@@ -606,7 +809,7 @@ async function runDuel(options) {
       target.hostId,
       { owner: options.owner, pet: options.pet },
       identity,
-      { mode: SPAR_MODE, card: fakeCard, commit: sparCommit(ownNonce) },
+      { mode: options.live ? SPAR_LIVE_MODE : SPAR_MODE, card: fakeCard, commit: sparCommit(ownNonce) },
     );
   } catch (error) {
     print(`挑战没送到：${errorText(error)}`);
@@ -616,15 +819,39 @@ async function runDuel(options) {
     print(`没打成：${reply.reason}${reply.reason === 'old-host' ? '（对方的桌宠还不会隔空切磋）' : ''}`);
     process.exit(1);
   }
-  print(`对方应战（它报的境界 ${reply.card.stage}，气血 ${reply.card.hp}）`);
-  const events = sparFight(cardFighter(target.pet || '对方', reply.card), fakeFighter, ownNonce, reply.nonce);
+  print(`对方应战（它报的境界 ${reply.card.stage}，气血 ${reply.card.hp}，${options.live ? '逐手局' : '自动'}）`);
+  const hostAddress = { address: target.address, port: target.port };
+  if (options.live) {
+    const revealed = await sendDuelReveal(hostAddress, { token: reply.token, nonce: ownNonce, line: '' }).catch(
+      (error) => ({ ok: false, reason: errorText(error) }),
+    );
+    if (!revealed.ok) {
+      print(`没亮成：${revealed.reason}`);
+      process.exit(1);
+    }
+    const match = newLiveMatch(
+      cardFighter(targetLabel, reply.card),
+      fakeFighter,
+      `${ownNonce}:${reply.nonce}`,
+      1,
+      options.pet,
+      targetLabel,
+    );
+    print('亮了随机数，隔空逐手对传开始（这边按后备挑法出）');
+    const events = await runLiveClient(
+      match,
+      (body) => sendDuelTurn(hostAddress, { token: reply.token, ...body }),
+      options.drop,
+    );
+    process.exit(events ? 0 : 1);
+  }
+  const events = sparFight(cardFighter(targetLabel, reply.card), fakeFighter, ownNonce, reply.nonce);
   const end = events[events.length - 1];
   const won = end.kind === 'end' && end.winner === 1;
-  print(`两边各自算的这场（${events.length} 个事件）：${won ? options.pet : target.pet || '对方'} 赢`);
-  const revealed = await sendDuelReveal(
-    { address: target.address, port: target.port },
-    { token: reply.token, nonce: ownNonce, line: '承让承让～' },
-  ).catch((error) => ({ ok: false, reason: errorText(error) }));
+  print(`两边各自算的这场（${events.length} 个事件）：${won ? options.pet : targetLabel} 赢`);
+  const revealed = await sendDuelReveal(hostAddress, { token: reply.token, nonce: ownNonce, line: '承让承让～' }).catch(
+    (error) => ({ ok: false, reason: errorText(error) }),
+  );
   print(revealed.ok ? '亮了随机数，对方的屏幕上该开演了' : `没亮成：${revealed.reason}`);
   process.exit(revealed.ok ? 0 : 1);
 }

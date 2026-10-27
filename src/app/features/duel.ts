@@ -1,3 +1,5 @@
+import type { Action, BattleEvent } from '../battle';
+import type { TurnMode } from '../action-panel-window';
 import { stageLabel } from '../cultivation';
 import { orderNeighbors, shouldAutoAdmit } from '../neighbors';
 import {
@@ -7,16 +9,27 @@ import {
   randomSparNonce,
   sendDuel,
   sendDuelReveal,
+  sendDuelTurn,
   sparCardOf,
   sparCommit,
   sparFight,
   sparLineRng,
+  SPAR_LIVE_MODE,
   SPAR_MODE,
 } from '../visit';
-import type { DuelAnswer, DuelFailure, DuelReply, DuelRevealReply, Neighbor, SparCard, Visitor } from '../visit';
+import type {
+  DuelAnswer,
+  DuelFailure,
+  DuelReply,
+  DuelRevealReply,
+  Neighbor,
+  SparCard,
+  SparTurnReply,
+  Visitor,
+} from '../visit';
 import { MENU_CULTIVATION_GROUP, lazyFns } from './context';
 import type { DuelAccepted, DuelChallenge, DuelWait, FeatureContext } from './context';
-import { SPAR_REMARK_CAP_MS } from './spar';
+import { pickTurnMode, SPAR_REMARK_CAP_MS } from './spar';
 import { errorText } from './util';
 
 /** 「修炼/切磋/…」最多列几个邻居（X15；熟人在前，照邻居列表的排序） */
@@ -25,9 +38,10 @@ const DUEL_NEIGHBORS_MAX = 3;
 /** 隔空切磋（X15）：挑战方与应战方两侧的协议、菜单与演出 */
 export interface Duel {
   cancelDuels(): void;
-  hostDuel(visitor: Visitor, card: SparCard, commit: string): Promise<DuelAnswer>;
-  answerDuel(accept: boolean): void;
+  hostDuel(visitor: Visitor, card: SparCard, commit: string, live?: boolean): Promise<DuelAnswer>;
+  answerDuel(accept: boolean): Promise<void>;
   hostDuelReveal(visitor: Visitor, nonce: string, line: string): void;
+  duelTurn(visitor: Visitor, index: number, action?: Action): Promise<SparTurnReply>;
   hostDuelConceded(visitor: Visitor, why: 'mismatch' | 'late'): void;
   duelChallengeActions(): Map<string, () => unknown>;
 }
@@ -45,14 +59,25 @@ export function createDuel(ctx: FeatureContext): Duel {
     }
     ctx.state.duelAccepted = null;
     ctx.state.duel = null;
+    // 逐手局（X19）留着认 /v1/duel/turn 令牌的协议会话也一起收掉
+    ctx.state.visitHost?.finishDuel();
   }
 
-  /** 主人答复 / 超时 / 自动应战都走这里：清掉等待状态，答应时把这边自己的名帖与随机数交回去 */
-  function settleDuel(state: DuelWait, answer: DuelAnswer): void {
+  /**
+   * 主人答复 / 超时 / 自动应战都走这里：清掉等待状态，答应时把这边自己的名帖与随机数交回去。
+   * 逐手局把这边选的方式一起记下；熟人自动应战固定按自动。
+   */
+  function settleDuel(state: DuelWait, answer: DuelAnswer, mode: TurnMode = 'auto'): void {
     if (ctx.state.duelWait !== state) return;
     ctx.state.duelWait = null;
     if (state.timer !== null) clearTimeout(state.timer);
-    if (answer.ok) ctx.state.duelAccepted = { visitor: state.visitor, card: state.card, hostNonce: state.hostNonce };
+    if (answer.ok)
+      ctx.state.duelAccepted = {
+        visitor: state.visitor,
+        card: state.card,
+        hostNonce: state.hostNonce,
+        ...(state.live ? { live: true, mode } : {}),
+      };
     state.resolve(answer);
     void refreshMenu();
   }
@@ -61,7 +86,7 @@ export function createDuel(ctx: FeatureContext): Duel {
    * 应战方这一侧收到 /v1/duel（X15）：off / busy 在这里答；能接就冒一句、挂出「应战 / 不应战」，
    * 熟人在「直接请进」打开且主人在电脑前时直接应战，不挂菜单。
    */
-  function hostDuel(visitor: Visitor, card: SparCard, commit: string): Promise<DuelAnswer> {
+  function hostDuel(visitor: Visitor, card: SparCard, commit: string, live = false): Promise<DuelAnswer> {
     const practice = cultivationOn();
     if (!practice) return Promise.resolve({ ok: false, reason: 'off' });
     if (
@@ -78,16 +103,21 @@ export function createDuel(ctx: FeatureContext): Duel {
     )
       return Promise.resolve({ ok: false, reason: 'busy' });
     return new Promise<DuelAnswer>((resolve) => {
-      const state: DuelWait = { visitor, card, commit, hostNonce: randomSparNonce(), resolve, timer: null };
+      const state: DuelWait = { visitor, card, commit, hostNonce: randomSparNonce(), live, resolve, timer: null };
       state.timer = setTimeout(() => settleDuel(state, { ok: false, reason: 'timeout' }), sparWaitMs);
       ctx.state.duelWait = state;
       if (shouldAutoAdmit(neighbors, visitor, deps.appConfig().visit.autoAdmitFriends, tracker.snapshot()?.present)) {
         void say(`熟人 ${visitor.owner} 家的 ${visitor.pet} 来隔空切磋，直接应战～`);
-        settleDuel(state, {
-          ok: true,
-          card: sparCardOf(practice.fighter(petName()), practice.view().stage),
-          nonce: state.hostNonce,
-        });
+        // 熟人自动应战时按自动（§X19）：逐手局也由这边自动出招
+        settleDuel(
+          state,
+          {
+            ok: true,
+            card: sparCardOf(practice.fighter(petName()), practice.view().stage),
+            nonce: state.hostNonce,
+          },
+          'auto',
+        );
         return;
       }
       void say(`${visitor.owner} 家的 ${visitor.pet} 想跟我切磋～`);
@@ -95,10 +125,12 @@ export function createDuel(ctx: FeatureContext): Duel {
     });
   }
 
-  /** 主人点了「应战 / 不应战」 */
-  function answerDuel(accept: boolean): void {
+  /** 主人点了「应战 / 不应战」；逐手局在答应以后选自家方式（10 秒不点按自动） */
+  async function answerDuel(accept: boolean): Promise<void> {
     const state = ctx.state.duelWait;
     if (!state) return;
+    // 逐手局正在选出招方式：再点一次「应战」不要把这场的面板顶掉
+    if (accept && state.live && ctx.state.actionPanel) return;
     if (!accept) {
       settleDuel(state, { ok: false, reason: 'declined' });
       void say(`好，那就不跟 ${state.visitor.pet} 切磋啦～`);
@@ -109,11 +141,25 @@ export function createDuel(ctx: FeatureContext): Duel {
       settleDuel(state, { ok: false, reason: 'off' });
       return;
     }
-    settleDuel(state, {
-      ok: true,
-      card: sparCardOf(practice.fighter(petName()), practice.view().stage),
-      nonce: state.hostNonce,
-    });
+    let mode: TurnMode = 'auto';
+    if (state.live) {
+      const picked = await pickTurnMode(ctx);
+      if (ctx.state.duelWait !== state) return;
+      if (!picked) {
+        settleDuel(state, { ok: false, reason: 'busy' });
+        return;
+      }
+      mode = picked;
+    }
+    settleDuel(
+      state,
+      {
+        ok: true,
+        card: sparCardOf(practice.fighter(petName()), practice.view().stage),
+        nonce: state.hostNonce,
+      },
+      mode,
+    );
     void say(`来，跟 ${state.visitor.pet} 过两招～`);
   }
 
@@ -148,39 +194,77 @@ export function createDuel(ctx: FeatureContext): Duel {
     void refreshMenu();
   }
 
-  /** 应战方这一侧的隔空切磋演出：两边各自用同一对随机数算同一场，这边演全套 */
+  /**
+   * 应战方这一侧的隔空切磋演出：全自动局两边各自用同一对随机数算同一场，开打前记账；
+   * 逐手局（X19）一手一手对传，打完才记账，掉线两边都不记。
+   */
   async function runDuelHost(state: DuelAccepted, guestNonce: string, guestLine: string): Promise<void> {
     const practice = cultivationOn();
     const visitorId = state.visitor.id;
-    if (!practice || !visitorId) return;
+    if (!practice || !visitorId) {
+      if (state.live) ctx.state.visitHost?.finishDuel();
+      return;
+    }
     const you = practice.fighter(petName());
     const foe = cardFighter(state.visitor.pet, state.card);
-    const events = sparFight(you, foe, guestNonce, state.hostNonce);
-    const end = events[events.length - 1];
-    const won = end.kind === 'end' && end.winner === 0;
-    // 记账（同 X5，在开打这一步记；演出只是回放）
-    onCultivation(Date.now(), practice.sparDone(Date.now(), visitorId, won), { anim: false });
-    neighbors.dueled(visitorId, { owner: state.visitor.owner, pet: state.visitor.pet }, won, Date.now());
-    diary.note(
-      Date.now(),
-      'cultivate',
-      `和 ${state.visitor.owner} 家的 ${state.visitor.pet} 隔空切磋，${won ? '赢了' : '输了'}`,
-    );
-    // 自家宠物在家：不碰 AWAY_OPACITY / fadeHome，台词直接走 say(..., { anim: false })
-    await runSparShow({
+    const baseShow = {
       zero: you,
       one: foe,
       zeroStage: practice.view().label,
       oneStage: stageLabel(state.card.stage),
-      events,
       lineRng: sparLineRng(guestNonce, state.hostNonce),
-      local: 0,
+      local: 0 as const,
       foeLabel: `${state.visitor.owner} 家的 ${state.visitor.pet}`,
-      selfSay: (line, durationMs) => void say(line, { anim: false, durationMs }),
+      // 自家宠物在家：不碰 AWAY_OPACITY / fadeHome，台词直接走 say(..., { anim: false })
+      selfSay: (line: string, durationMs: number) => void say(line, { anim: false, durationMs }),
+      think: () => void say('想一想…', { anim: false }),
       foeLine: guestLine,
       cancelled: () => ctx.state.disposed,
-    });
-    if (ctx.state.disposed) return;
+    };
+    let won: boolean;
+    if (state.live) {
+      let events: BattleEvent[] | null;
+      try {
+        events = await runSparShow({
+          ...baseShow,
+          events: [],
+          live: { role: 'server', mode: state.mode ?? 'auto', seed: `${guestNonce}:${state.hostNonce}` },
+        });
+      } finally {
+        // 演出中途抛错也得收：留着的会话会让之后的隔空挑战一直回 busy
+        ctx.state.visitHost?.finishDuel();
+      }
+      if (ctx.state.disposed) return;
+      if (!events) {
+        void say('切磋断了', { anim: false });
+        void refreshMenu();
+        return;
+      }
+      const end = events[events.length - 1];
+      won = end.kind === 'end' && end.winner === 0;
+      // 打完才记账（§X19）
+      onCultivation(Date.now(), practice.sparDone(Date.now(), visitorId, won), { anim: false });
+      neighbors.dueled(visitorId, { owner: state.visitor.owner, pet: state.visitor.pet }, won, Date.now());
+      diary.note(
+        Date.now(),
+        'cultivate',
+        `和 ${state.visitor.owner} 家的 ${state.visitor.pet} 隔空切磋，${won ? '赢了' : '输了'}`,
+      );
+    } else {
+      const events = sparFight(you, foe, guestNonce, state.hostNonce);
+      const end = events[events.length - 1];
+      won = end.kind === 'end' && end.winner === 0;
+      // 记账（同 X5，在开打这一步记；演出只是回放）
+      onCultivation(Date.now(), practice.sparDone(Date.now(), visitorId, won), { anim: false });
+      neighbors.dueled(visitorId, { owner: state.visitor.owner, pet: state.visitor.pet }, won, Date.now());
+      diary.note(
+        Date.now(),
+        'cultivate',
+        `和 ${state.visitor.owner} 家的 ${state.visitor.pet} 隔空切磋，${won ? '赢了' : '输了'}`,
+      );
+      await runSparShow({ ...baseShow, events });
+      if (ctx.state.disposed) return;
+    }
     void refreshMenu();
     const instruction =
       `你刚和隔空来切磋的${state.visitor.pet}（${state.visitor.owner} 家的）打了一场，${won ? '你赢了' : '你输了'}。` +
@@ -217,6 +301,10 @@ export function createDuel(ctx: FeatureContext): Duel {
       ctx.state.adventure?.blocking === true
     )
       return;
+    // 发起方先在出招面板里选方式（X19）：自动照旧整场算好，AI / 手动是逐手局
+    const mode = await pickTurnMode(ctx);
+    if (!mode || ctx.state.disposed) return;
+    const live = mode !== 'auto';
     const state: DuelChallenge = { neighbor, stage: 'asking', since: Date.now(), nonce: randomSparNonce() };
     ctx.state.duel = state;
     void refreshMenu();
@@ -229,7 +317,7 @@ export function createDuel(ctx: FeatureContext): Duel {
         { owner: nickname(), pet: petName() },
         ctx.state.visitIdentity,
         {
-          mode: SPAR_MODE,
+          mode: live ? SPAR_LIVE_MODE : SPAR_MODE,
           card: sparCardOf(practice.fighter(petName()), practice.view().stage),
           commit: sparCommit(state.nonce),
         },
@@ -240,20 +328,108 @@ export function createDuel(ctx: FeatureContext): Duel {
         `串门：隔空切磋的请求没送到 ${neighbor.owner} 家：${errorText(error)}${cause ? `（${errorText(cause)}）` : ''}`,
       );
       if (ctx.state.duel === state) ctx.state.duel = null;
-      await say(duelFailText(neighbor.owner, 'unreachable'));
+      await say(duelFailText(neighbor.owner, 'unreachable', live));
       void refreshMenu();
       return;
     }
     if (ctx.state.duel !== state || ctx.state.disposed) return;
     if (!reply.ok) {
       ctx.state.duel = null;
-      await say(duelFailText(neighbor.owner, reply.reason));
+      await say(duelFailText(neighbor.owner, reply.reason, live));
       void refreshMenu();
       return;
     }
     const you = practice.fighter(petName());
     const foe = cardFighter(neighbor.pet, reply.card);
     // 引擎里应战方是 0 号、挑战方是 1 号：两边各自算同一场
+    const baseShow = {
+      zero: foe,
+      one: you,
+      zeroStage: stageLabel(reply.card.stage),
+      oneStage: practice.view().label,
+      lineRng: sparLineRng(state.nonce, reply.nonce),
+      local: 1 as const,
+      foeLabel: `${neighbor.owner} 家的 ${neighbor.pet}`,
+      // 自家宠物在家：不碰 AWAY_OPACITY / fadeHome，台词直接走 say(..., { anim: false })
+      selfSay: (line: string, durationMs: number) => void say(line, { anim: false, durationMs }),
+      think: () => void say('想一想…', { anim: false }),
+      cancelled: () => ctx.state.duel !== state,
+    };
+    if (live) {
+      // 逐手局：先亮随机数（赛后感言打完再编），再一手一手对传；打完才记账
+      let revealed: DuelRevealReply;
+      try {
+        revealed = await sendDuelReveal(
+          { address: neighbor.address, port: neighbor.port },
+          { token: reply.token, nonce: state.nonce, line: '' },
+        );
+      } catch (error) {
+        log(`串门：隔空切磋的随机数没亮出去：${errorText(error)}`);
+        if (ctx.state.duel !== state) return;
+        ctx.state.duel = null;
+        onCultivation(Date.now(), practice.sparDone(Date.now(), neighbor.id, false), { anim: false });
+        neighbors.dueled(neighbor.id, { owner: neighbor.owner, pet: neighbor.pet }, false, Date.now());
+        diary.note(
+          Date.now(),
+          'cultivate',
+          `和 ${neighbor.owner} 家的 ${neighbor.pet} 隔空切磋，输了（没按时亮随机数）`,
+        );
+        await say('亮随机数迟了，算我认输', { anim: false });
+        void refreshMenu();
+        return;
+      }
+      if (ctx.state.duel !== state || ctx.state.disposed) return;
+      if (!revealed.ok) {
+        ctx.state.duel = null;
+        if (revealed.reason === 'mismatch' || revealed.reason === 'late') {
+          onCultivation(Date.now(), practice.sparDone(Date.now(), neighbor.id, false), { anim: false });
+          neighbors.dueled(neighbor.id, { owner: neighbor.owner, pet: neighbor.pet }, false, Date.now());
+          diary.note(
+            Date.now(),
+            'cultivate',
+            `和 ${neighbor.owner} 家的 ${neighbor.pet} 隔空切磋，输了（${
+              revealed.reason === 'late' ? '没按时亮随机数' : '随机数没对上'
+            }）`,
+          );
+        }
+        await say(duelFailText(neighbor.owner, revealed.reason, true), { anim: false });
+        void refreshMenu();
+        return;
+      }
+      state.stage = 'showing';
+      const events = await runSparShow({
+        ...baseShow,
+        events: [],
+        live: {
+          role: 'client',
+          mode,
+          seed: `${state.nonce}:${reply.nonce}`,
+          sendTurn: (body, signal) =>
+            sendDuelTurn({ address: neighbor.address, port: neighbor.port }, { token: reply.token, ...body }, signal),
+        },
+      });
+      if (ctx.state.duel !== state || ctx.state.disposed) return;
+      ctx.state.duel = null;
+      if (!events) {
+        void say('切磋断了', { anim: false });
+        void refreshMenu();
+        return;
+      }
+      const end = events[events.length - 1];
+      const won = end.kind === 'end' && end.winner === 1;
+      // 打完才记账（§X19）
+      onCultivation(Date.now(), practice.sparDone(Date.now(), neighbor.id, won), { anim: false });
+      neighbors.dueled(neighbor.id, { owner: neighbor.owner, pet: neighbor.pet }, won, Date.now());
+      diary.note(
+        Date.now(),
+        'cultivate',
+        `和 ${neighbor.owner} 家的 ${neighbor.pet} 隔空切磋，${won ? '赢了' : '输了'}`,
+      );
+      void say(won ? '这场隔空切磋我赢啦！' : '这场隔空切磋输了，下次再战～', { anim: false });
+      void say(await duelRemark(neighbor, won), { anim: false });
+      void refreshMenu();
+      return;
+    }
     const events = sparFight(foe, you, state.nonce, reply.nonce);
     const end = events[events.length - 1];
     const won = end.kind === 'end' && end.winner === 1;
@@ -270,11 +446,8 @@ export function createDuel(ctx: FeatureContext): Duel {
       log(`串门：隔空切磋的随机数没亮出去：${errorText(error)}`);
       if (ctx.state.duel !== state) return;
       ctx.state.duel = null;
-      // 对面超时后会按它赢记账：这边同样按输记，两边才对得上
-      onCultivation(Date.now(), practice.sparDone(Date.now(), neighbor.id, false), { anim: false });
-      neighbors.dueled(neighbor.id, { owner: neighbor.owner, pet: neighbor.pet }, false, Date.now());
-      diary.note(Date.now(), 'cultivate', `和 ${neighbor.owner} 家的 ${neighbor.pet} 隔空切磋，输了（没按时亮随机数）`);
-      await say('亮随机数迟了，算我认输', { anim: false });
+      // 逐手局：亮随机数没送到就是掉线，两边都不记账（不能确定对面有没有开打）
+      await say('切磋断了', { anim: false });
       void refreshMenu();
       return;
     }
@@ -301,24 +474,19 @@ export function createDuel(ctx: FeatureContext): Duel {
     neighbors.dueled(neighbor.id, { owner: neighbor.owner, pet: neighbor.pet }, won, Date.now());
     diary.note(Date.now(), 'cultivate', `和 ${neighbor.owner} 家的 ${neighbor.pet} 隔空切磋，${won ? '赢了' : '输了'}`);
     state.stage = 'showing';
-    // 自家宠物在家：不碰 AWAY_OPACITY / fadeHome，台词直接走 say(..., { anim: false })
-    await runSparShow({
-      zero: foe,
-      one: you,
-      zeroStage: stageLabel(reply.card.stage),
-      oneStage: practice.view().label,
-      events,
-      lineRng: sparLineRng(state.nonce, reply.nonce),
-      local: 1,
-      foeLabel: `${neighbor.owner} 家的 ${neighbor.pet}`,
-      selfSay: (line, durationMs) => void say(line, { anim: false, durationMs }),
-      cancelled: () => ctx.state.duel !== state,
-    });
+    await runSparShow({ ...baseShow, events });
     if (ctx.state.duel !== state || ctx.state.disposed) return;
     ctx.state.duel = null;
     void say(won ? '这场隔空切磋我赢啦！' : '这场隔空切磋输了，下次再战～', { anim: false });
     void say(remark, { anim: false });
     void refreshMenu();
+  }
+
+  /** 逐手局应战方这一侧收到的一手（X19）：协议层已核过令牌 / 来源地址，递进正在跑的那一场 */
+  async function duelTurn(_visitor: Visitor, index: number, action?: Action): Promise<SparTurnReply> {
+    const turn = ctx.state.liveTurn;
+    if (!turn) return { ok: false, reason: 'not-visiting' };
+    return turn(index, action);
   }
 
   /** 挑战方的赛后感言：按人设编一句（只带人设，§2.2 的口径），编太久退回模板（模型卡住别拖垮 reveal） */
@@ -373,6 +541,7 @@ export function createDuel(ctx: FeatureContext): Duel {
   function duelFailText(
     owner: string,
     reason: DuelFailure | 'mismatch' | 'late' | 'not-visiting' | 'unreachable',
+    live = false,
   ): string {
     switch (reason) {
       case 'old-host':
@@ -384,7 +553,7 @@ export function createDuel(ctx: FeatureContext): Duel {
       case 'version':
         return '两边版本不一样，切磋不了';
       case 'unsupported-mode':
-        return '对方不支持这种打法';
+        return live ? '对方的桌宠还不会逐手切磋' : '对方不支持这种打法';
       case 'bad-card':
         return '对方没看懂我的名帖';
       case 'bad-sig':
@@ -407,5 +576,13 @@ export function createDuel(ctx: FeatureContext): Duel {
     }
   }
 
-  return { cancelDuels, hostDuel, answerDuel, hostDuelReveal, hostDuelConceded, duelChallengeActions };
+  return {
+    cancelDuels,
+    hostDuel,
+    answerDuel,
+    hostDuelReveal,
+    duelTurn,
+    hostDuelConceded,
+    duelChallengeActions,
+  };
 }

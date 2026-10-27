@@ -273,6 +273,8 @@ export async function withFeatures(
     modeTimeoutMs?: number;
     aiTurnTimeoutMs?: number;
     actionTimeoutMs?: number;
+    /** 逐手对传（X19）：等对面一手多久算掉线；测试调短 */
+    turnWaitMs?: number;
     /** 信标的端口、发往地址与手动邻居的发往端口（测试注入：绑随机端口、不往真实广播地址发） */
     beacon?: {
       port?: number;
@@ -353,6 +355,7 @@ export async function withFeatures(
     modeTimeoutMs: options.modeTimeoutMs,
     aiTurnTimeoutMs: options.aiTurnTimeoutMs,
     actionTimeoutMs: options.actionTimeoutMs,
+    turnWaitMs: options.turnWaitMs,
     beacon: options.beacon,
     petBase: `http://127.0.0.1:${(server.address() as AddressInfo).port}/dsh-pet-7340`,
     log: (message) => logs.push(message),

@@ -19,14 +19,19 @@ import {
   Neighborhood,
   parseBeacon,
   parseEvents,
+  parseSparAction,
   parseSparCard,
+  parseTurnIndex,
   PING_MS,
   randomSparNonce,
   sendDuel,
   sendDuelReveal,
+  sendDuelTurn,
   sendNote,
   sendReveal,
   sendSpar,
+  sendSparTurn,
+  SPAR_LIVE_MODE,
   shouldReply,
   sparCardOf,
   sparCommit,
@@ -37,9 +42,12 @@ import {
   VisitHost,
 } from './visit.ts';
 import type { Beacon, DuelAnswer, HostHandlers, SparCard, Visitor } from './visit.ts';
-import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS } from './battle.ts';
+import { BATTLE_VERSION, SKILL_IDS, WEAPON_IDS, rngFrom } from './battle.ts';
 import type { Fighter, SkillId, WeaponId } from './battle.ts';
+import { startLiveClient, startLiveServer } from './battle-live.ts';
+import type { LiveVersus } from './battle-live.ts';
 import { swapSides, timeline } from './battle-show.ts';
+import type { ShowSides } from './battle-show.ts';
 import { duelMessage, generateVisitIdentity, knockMessage, welcomeMessage } from './visit-identity.ts';
 import type { VisitIdentity } from './visit-identity.ts';
 
@@ -1177,6 +1185,8 @@ test("the guest also checks the host's reply card, nonce and reasons like everyt
 
 test('a spar invite rides the next ping, and parseEvents keeps it while still dropping unknown kinds', async () => {
   assert.deepEqual(parseEvents([{ type: 'spar-invite' }]), [{ type: 'spar-invite' }]);
+  assert.deepEqual(parseEvents([{ type: 'spar-invite', mode: 'live' }]), [{ type: 'spar-invite', mode: 'live' }]);
+  assert.deepEqual(parseEvents([{ type: 'spar-invite', mode: '别的' }]), [{ type: 'spar-invite' }]);
   assert.deepEqual(parseEvents([{ type: 'spar-invite' }, { type: 'dance' }, null]), [{ type: 'spar-invite' }]);
   await withHost({}, async (host, port) => {
     const target = { address: '127.0.0.1', port };
@@ -1746,4 +1756,190 @@ test('隔空切磋：旧对端（404 / 被 session 挡回）映射成 old-host�
   } finally {
     await close(stranger.server);
   }
+});
+
+// ---------- 逐手对传（X19） ----------
+
+test('parseSparAction / parseTurnIndex：只认图鉴里的编号，序号从 0 起', () => {
+  assert.deepEqual(parseSparAction({ kind: 'weapon', weapon: 'water-gun' }), { kind: 'weapon', weapon: 'water-gun' });
+  assert.deepEqual(parseSparAction({ kind: 'unarmed' }), { kind: 'unarmed' });
+  assert.deepEqual(parseSparAction({ kind: 'skill', skill: 'dove' }), { kind: 'skill', skill: 'dove' });
+  assert.equal(parseSparAction({ kind: 'weapon', weapon: 'nope' }), null);
+  assert.equal(parseSparAction({ kind: 'skill', skill: 'nope' }), null);
+  assert.equal(parseSparAction('unarmed'), null);
+  assert.equal(parseSparAction(null), null);
+  assert.equal(parseTurnIndex(0), 0);
+  assert.equal(parseTurnIndex(12), 12);
+  assert.equal(parseTurnIndex(-1), null);
+  assert.equal(parseTurnIndex(1.5), null);
+  assert.equal(parseTurnIndex('0'), null);
+  assert.equal(parseTurnIndex(10_000), null);
+});
+
+test('逐手局：两边走 /v1/spar/turn 对传，算出同一串事件；坏令牌、坏形状都被拒', async () => {
+  const silent: ShowSides = {
+    self: { play: () => undefined, say: () => undefined },
+    foe: { play: () => undefined, say: () => undefined },
+    arena: () => undefined,
+    shoot: () => undefined,
+  };
+  const guestNonce = 'c'.repeat(64);
+  const hostNonce = 'b'.repeat(64);
+  const seed = `${guestNonce}:${hostNonce}`;
+  let live: LiveVersus | null = null;
+  let sawLive: boolean | null = null;
+  await withHost(
+    {
+      spar: async (_visitor, _card, _commit, isLive) => {
+        sawLive = isLive === true;
+        return { ok: true, card: sparCardOf(aFighter, 4), nonce: hostNonce };
+      },
+      reveal: async () => ({ ok: true }),
+      sparTurn: async (_visitor, index, action) => {
+        assert.ok(live, '先亮随机数才有一手');
+        return live!.turn(index, action);
+      },
+    },
+    async (host, port) => {
+      const target = { address: '127.0.0.1', port };
+      const [answer] = await knockAndAnswer(host, port, true);
+      const token = answer.ok ? answer.token : '';
+      const reply = await sendSpar(target, {
+        token,
+        mode: SPAR_LIVE_MODE,
+        card: aCard,
+        commit: sparCommit(guestNonce),
+      });
+      assert.ok(reply.ok, `逐手切磋应战没成：${JSON.stringify(reply)}`);
+      assert.equal(sawLive, true, 'mode: live 传到了 handlers.spar');
+      assert.deepEqual(await sendReveal(target, { token, nonce: guestNonce, line: '' }), { ok: true });
+      // 坏令牌 / 坏出手形状都在协议层挡掉（不会递进这一场）
+      assert.deepEqual(await sendSparTurn(target, { token: '0'.repeat(32), index: 0 }), {
+        ok: false,
+        reason: 'not-visiting',
+      });
+      assert.deepEqual(
+        await sendSparTurn(target, { token, index: 0, action: { kind: 'weapon', weapon: 'nope' } as never }),
+        { ok: false, reason: 'bad-request' },
+      );
+      // 应战方（主人家）这一侧按后备挑法出；发起方（客人）这一侧也走同一套驱动
+      live = startLiveServer({
+        a: cardFighter('小鱼', reply.ok ? reply.card : aCard),
+        b: { ...aFighter, name: '小王' },
+        seed,
+        local: 0,
+        show: silent,
+        lineRng: rngFrom(`${seed}:lines`),
+        decide: async () => null,
+        think: () => undefined,
+        log: () => undefined,
+        waitMs: 2_000,
+      });
+      live.skip();
+      const client = startLiveClient({
+        a: cardFighter('小鱼', reply.ok ? reply.card : aCard),
+        b: { ...aFighter, name: '小王' },
+        seed,
+        local: 1,
+        show: silent,
+        lineRng: rngFrom(`${seed}:lines`),
+        decide: async () => null,
+        think: () => undefined,
+        log: () => undefined,
+        waitMs: 2_000,
+        sendTurn: (body, signal) => sendSparTurn(target, { token, ...body }, signal),
+      });
+      client.skip();
+      const [clientEvents, serverEvents] = await Promise.all([client.done, live.done]);
+      assert.ok(clientEvents, '发起方打完了');
+      assert.ok(serverEvents, '应战方打完了');
+      assert.deepEqual(clientEvents, serverEvents, '两边逐条事件相同');
+    },
+  );
+});
+
+test('逐手局：对面出的招不合法、等超时，都按掉线', async () => {
+  // 这一条在 battle-live.test.ts 里按驱动测过；这里核 features 的出口能拿到同样的原因
+  let illegal: Awaited<ReturnType<typeof sendSparTurn>> | undefined;
+  await withHost(
+    {
+      spar: async () => ({ ok: true, card: sparCardOf(aFighter, 4), nonce: 'b'.repeat(64) }),
+      reveal: async () => ({ ok: true }),
+      sparTurn: async () => ({ ok: false, reason: 'illegal' }),
+    },
+    async (_host, port) => {
+      const target = { address: '127.0.0.1', port };
+      const [answer] = await knockAndAnswer(_host, port, true);
+      const token = answer.ok ? answer.token : '';
+      await sendSpar(target, { token, mode: SPAR_LIVE_MODE, card: aCard, commit: sparCommit('c'.repeat(64)) });
+      await sendReveal(target, { token, nonce: 'c'.repeat(64), line: '' });
+      illegal = await sendSparTurn(target, { token, index: 0, action: { kind: 'weapon', weapon: 'poker' } });
+    },
+  );
+  assert.deepEqual(illegal, { ok: false, reason: 'illegal' });
+});
+
+test('隔空切磋逐手局：/v1/duel/turn 用应战后留着的令牌；自动局 reveal 后会话收掉', async () => {
+  const hostIdentity = generateVisitIdentity();
+  const challenger = generateVisitIdentity();
+  const hostNonce = 'b'.repeat(64);
+  const guestNonce = 'c'.repeat(64);
+  let live = false;
+  await withHost(
+    {
+      identity: hostIdentity,
+      duel: async (_visitor, _card, _commit, isLive) => {
+        live = isLive === true;
+        return { ok: true, card: sparCardOf(aFighter, 4), nonce: hostNonce };
+      },
+      duelReveal: () => undefined,
+      duelTurn: async (_visitor, index) =>
+        index === 0 ? { ok: true, action: { kind: 'weapon', weapon: 'poker' } } : { ok: true },
+    },
+    async (_host, port) => {
+      const target = { address: '127.0.0.1', port };
+      const liveReply = await sendDuel(target, hostIdentity.id, me, challenger, {
+        mode: SPAR_LIVE_MODE,
+        card: aCard,
+        commit: sparCommit(guestNonce),
+      });
+      assert.ok(liveReply.ok, `逐手挑战没应：${JSON.stringify(liveReply)}`);
+      assert.equal(live, true);
+      const token = liveReply.ok ? liveReply.token : '';
+      assert.deepEqual(await sendDuelReveal(target, { token, nonce: guestNonce, line: '' }), { ok: true });
+      // 令牌错了不认；对了才递进 handlers.duelTurn
+      assert.deepEqual(await sendDuelTurn(target, { token: '0'.repeat(32), index: 0 }), {
+        ok: false,
+        reason: 'not-visiting',
+      });
+      assert.deepEqual(await sendDuelTurn(target, { token, index: 0 }), {
+        ok: true,
+        action: { kind: 'weapon', weapon: 'poker' },
+      });
+    },
+  );
+
+  // 自动局：reveal 之后不再留会话，/v1/duel/turn 回 not-visiting
+  await withHost(
+    {
+      identity: hostIdentity,
+      duel: async () => ({ ok: true, card: sparCardOf(aFighter, 4), nonce: hostNonce }),
+      duelReveal: () => undefined,
+    },
+    async (_host, port) => {
+      const target = { address: '127.0.0.1', port };
+      const reply = await sendDuel(target, hostIdentity.id, me, challenger, {
+        mode: SPAR_MODE,
+        card: aCard,
+        commit: sparCommit('d'.repeat(64)),
+      });
+      assert.ok(reply.ok);
+      const token = reply.ok ? reply.token : '';
+      await sendDuelReveal(target, { token, nonce: 'd'.repeat(64), line: '' });
+      assert.deepEqual(await sendDuelTurn(target, { token, index: 0 }), {
+        ok: false,
+        reason: 'not-visiting',
+      });
+    },
+  );
 });

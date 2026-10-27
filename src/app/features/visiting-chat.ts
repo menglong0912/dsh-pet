@@ -67,7 +67,7 @@ export function createVisitingChat(ctx: FeatureContext): VisitingChat {
     current.lastLineAt = Date.now();
     ctx.state.visitHost?.tell({ type: 'line', text });
     // 正在演一场（切磋）时起话题：不联动说话动画（带 anim 的气泡会顶掉演出的动画）
-    await say(text, ctx.state.battle ? { anim: false } : undefined);
+    await say(text, ctx.state.battle || ctx.state.liveBattle ? { anim: false } : undefined);
     if (ctx.state.hosting === current && current.openers < HOST_OPENERS) {
       current.openerTimer = setTimeout(() => void openTopic(current), openerGap(false));
     }
@@ -85,7 +85,7 @@ export function createVisitingChat(ctx: FeatureContext): VisitingChat {
   async function playTogether(thing: PlayThing): Promise<void> {
     const current = ctx.state.hosting;
     // 正在演一场（切磋）：一起玩的动画会把演出的动画顶掉，先不玩
-    if (!current || ctx.state.battle) return;
+    if (!current || ctx.state.battle || ctx.state.liveBattle) return;
     current.window.play(thing.anim);
     current.lines.push(`（一起${thing.label}）`);
     if (Date.now() - current.lastNudgeAt >= NUDGE_GAP_MS) {
@@ -105,7 +105,7 @@ export function createVisitingChat(ctx: FeatureContext): VisitingChat {
   function treatGuest(snack: Snack): void {
     const current = ctx.state.hosting;
     // 正在演一场（切磋）：吃东西的动画会把演出的动画顶掉，先不吃
-    if (!current || ctx.state.battle || !pouch.take(snack.label)) return;
+    if (!current || ctx.state.battle || ctx.state.liveBattle || !pouch.take(snack.label)) return;
     const { owner, pet } = current.visitor;
     current.window.play(snack.anim);
     current.lines.push(`（请 ${pet} 吃了${snack.label}）`);
@@ -203,8 +203,9 @@ export function createVisitingChat(ctx: FeatureContext): VisitingChat {
       relay(`（在 ${owner} 家吃到了${snack.label}）`);
       ask = GUEST_ASK.treat(snack.label);
     } else if (event.type === 'spar-invite') {
-      // 主人家邀战（X5）：开着修炼就自动应战（§X5 的口径——客人那边关了切磋就忽略，不回话）
-      void startGuestSpar();
+      // 主人家邀战（X5）：开着修炼就自动应战（§X5 的口径——客人那边关了切磋就忽略，不回话）；
+      // 逐手局（X19）带 mode: 'live'，客人应战后在自己的出招面板里选自家方式
+      void startGuestSpar(event.mode === 'live' ? { live: true } : undefined);
       return;
     } else {
       ask = GUEST_ASK.poke;
@@ -232,7 +233,7 @@ export function createVisitingChat(ctx: FeatureContext): VisitingChat {
   function showRelay(text: string, durationMs: number): void {
     // 切磋演出期间（battle 在跑、人在别人家）转播的台词只出气泡，不改亮度：
     // 开演时 fadeHome(1)，收摊后由 startGuestSpar 退回 AWAY_OPACITY
-    if (!(ctx.state.trip !== null && ctx.state.battle !== null)) {
+    if (!(ctx.state.trip !== null && (ctx.state.battle !== null || ctx.state.liveBattle !== null))) {
       fadeHome(electron, RELAY_OPACITY);
       if (ctx.state.relayTimer !== null) clearTimeout(ctx.state.relayTimer);
       ctx.state.relayTimer = setTimeout(() => {

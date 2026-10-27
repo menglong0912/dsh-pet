@@ -7,9 +7,9 @@ import type { StandaloneAiService } from '../../standalone/ai-provider';
 import type { ActivitySnapshot, ActivityTracker } from '../activity';
 import type { AdventureFlow } from '../adventure-flow';
 import type { AppConfig } from '../app-config';
-import type { ActionPanelWindow, PanelView } from '../action-panel-window';
+import type { ActionPanelWindow, PanelView, TurnMode } from '../action-panel-window';
 import type { ArenaWindow } from '../arena-window';
-import type { BattleEvent, Fighter } from '../battle';
+import type { Action, BattleEvent, Fighter } from '../battle';
 import type { LiveBattle } from '../battle-live';
 import type { BattleShow } from '../battle-show';
 import type { Step } from '../battle-show';
@@ -29,6 +29,7 @@ import type {
   SparCard,
   SparReply,
   SparRevealReply,
+  SparTurnReply,
   VisitHost,
   Visitor,
 } from '../visit';
@@ -112,6 +113,8 @@ export interface FeatureDeps {
   aiTurnTimeoutMs?: number;
   /** 逐手出招：手动一手 20 秒不点按后备；只给测试调短用 */
   actionTimeoutMs?: number;
+  /** 逐手对传（X19）：等对面一手 35 秒没来就当掉线；只给测试调短用 */
+  turnWaitMs?: number;
   /** 信标的端口与发往地址（默认 BEACON_PORT + 每块网卡的广播地址）；只给测试注入用，不往真实网络发 */
   beacon?: {
     port?: number;
@@ -214,6 +217,9 @@ export interface SparState {
   commit?: string;
   guestCard?: SparCard;
   hostNonce?: string;
+  /** X19 逐手局：这一场是不是逐手、自己这一侧选的方式（auto 也走逐手对传） */
+  live?: boolean;
+  mode?: TurnMode;
 }
 
 /**
@@ -225,6 +231,8 @@ export interface SparWindows {
   foe: GuestWindow | null;
   arena: ArenaWindow;
   fx: FxWindow;
+  /** 逐手局手动出招时的出招面板（X19）；自动 / AI 局没有 */
+  panel?: ActionPanelWindow | null;
 }
 
 /** 挑战方这一侧的一场隔空切磋（发出邀约到演出结束） */
@@ -242,6 +250,8 @@ export interface DuelWait {
   card: SparCard;
   commit: string;
   hostNonce: string;
+  /** X19 逐手局：挑战方选了逐手 */
+  live: boolean;
   resolve: (answer: DuelAnswer) => void;
   timer: ReturnType<typeof setTimeout> | null;
 }
@@ -251,6 +261,8 @@ export interface DuelAccepted {
   visitor: Visitor;
   card: SparCard;
   hostNonce: string;
+  live?: boolean;
+  mode?: TurnMode;
 }
 
 /**
@@ -270,8 +282,23 @@ export interface SparShow {
   local: 0 | 1;
   /** 对手窗口的名牌（「X 家的 Y」） */
   foeLabel: string;
+  /** 已经开着的对手窗口（主人家这一侧复用串门的客人窗口）；不给就新开一个 /app/guest */
+  foeWindow?: GuestWindow;
   /** 自家宠物的台词出口（做客时是 showRelay，在家是 say(anim:false)） */
   selfSay: (line: string, durationMs: number) => void;
+  /** 演完一段、本地这一手还没定：宠物头上「想一想…」（AI 出招；没有就不说） */
+  think?: () => void;
+  /** X19 逐手局：给了就按每一手对传一段一段演，不走整场 `events` 时间线 */
+  live?: {
+    /** 发起方 / 客人是 client（发 HTTP），应战方 / 主人家是 server（等请求） */
+    role: 'client' | 'server';
+    /** 本地这一侧选的方式：auto 每手按后备挑法，ai / manual 每手定 */
+    mode: TurnMode;
+    /** 这一场的种子：`客人 / 挑战方随机数:主人家 / 应战方随机数` */
+    seed: string;
+    /** client：把这一手发给对面（轮到自家带 action，轮到对面不带） */
+    sendTurn?: (body: { index: number; action?: Action }, signal: AbortSignal) => Promise<SparTurnReply>;
+  };
   /** 对手随 reveal 带来的赛后感言（演完上对手窗口；没有就不说） */
   foeLine?: string;
   /** 开演前 / 收摊后（做客时用来亮回原色、退回半透明） */
@@ -351,6 +378,11 @@ export interface FeatureState {
   liveBattle: LiveBattle | null;
   /** 出招面板（X17）：开打前选方式 / 手动出招时等一手；收摊、退出一起关 */
   actionPanel: ActionPanelWindow | null;
+  /**
+   * 逐手对传（X19）应战方那一侧的入口：协议层收到 /v1/spar/turn、/v1/duel/turn 时递一手进来；
+   * 只有一场，收摊时清掉。发起方（发 HTTP）那边没有。
+   */
+  liveTurn: ((index: number, action?: Action) => Promise<SparTurnReply>) | null;
   /** 下次平时打坐最早什么时候（40–60 分钟一次） */
   meditateAt: number;
   /** 正在进行的那一场切磋（见 SparState） */
@@ -421,17 +453,19 @@ export interface FeatureFunctions {
   tribulationActions(practice: Cultivation, actions: Map<string, () => unknown>): void;
   cancelSpar(): void;
   cancelDuels(): void;
-  runSparShow(show: SparShow): Promise<void>;
+  runSparShow(show: SparShow): Promise<BattleEvent[] | null>;
   inviteSpar(): void;
-  hostSpar(visitor: Visitor, card: SparCard, commit: string): Promise<SparReply>;
+  hostSpar(visitor: Visitor, card: SparCard, commit: string, live?: boolean): Promise<SparReply>;
   hostReveal(visitor: Visitor, nonce: string, line: string): Promise<SparRevealReply>;
-  hostDuel(visitor: Visitor, card: SparCard, commit: string): Promise<DuelAnswer>;
+  sparTurn(visitor: Visitor, index: number, action?: Action): Promise<SparTurnReply>;
+  hostDuel(visitor: Visitor, card: SparCard, commit: string, live?: boolean): Promise<DuelAnswer>;
   hostDuelReveal(visitor: Visitor, nonce: string, line: string): void;
+  duelTurn(visitor: Visitor, index: number, action?: Action): Promise<SparTurnReply>;
   hostDuelConceded(visitor: Visitor, why: 'mismatch' | 'late'): void;
-  startGuestSpar(): Promise<void>;
+  startGuestSpar(invite?: { live: boolean }): Promise<void>;
   runHostSparShow(visitor: Visitor, state: SparState, guestNonce: string, guestLine: string): Promise<void>;
   duelChallengeActions(): Map<string, () => unknown>;
-  answerDuel(accept: boolean): void;
+  answerDuel(accept: boolean): Promise<void>;
   wantedLabels(): string[];
   refreshMenu(force?: boolean): Promise<void>;
   pollMenu(): Promise<void>;

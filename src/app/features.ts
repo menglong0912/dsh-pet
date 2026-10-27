@@ -113,6 +113,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     tribulationFx: null,
     liveBattle: null,
     actionPanel: null,
+    liveTurn: null,
     meditateAt: 0,
     spar: null,
     sparWindows: new Set(),
