@@ -42,7 +42,13 @@ import { settingsHandler, testHandler } from '../standalone/server';
 import { settingsPage, settingsScript, settingsStyle } from '../standalone/settings-page';
 import type { StandaloneAiService } from '../standalone/ai-provider';
 import { createAppConfig } from './app-config';
-import { appCultivationHandler, appNeighborsHandler, appSettingsHandler, createAppRoutes, petSettingsHandler } from './app-routes';
+import {
+  appCultivationHandler,
+  appNeighborsHandler,
+  appSettingsHandler,
+  createAppRoutes,
+  petSettingsHandler,
+} from './app-routes';
 import { removeDiscovery, writeDiscovery } from './discovery';
 import { MENU_OWNER, startAppFeatures } from './features';
 import type { AppFeatures, FeatureElectron } from './features';
@@ -78,12 +84,33 @@ const helperMain = join(packageRoot, 'runtime', 'electron-helper', 'main.js');
 
 const log = (message: string): void => console.log(`[dsh-pet-app] ${message}`);
 
-/** 单实例：第二次双击直接退出（共用 userData 的 Chromium profile 会互踢） */
-const locked = app.requestSingleInstanceLock();
-if (!locked) {
-  app.exit(0);
+/**
+ * DPI 探测子进程（`runtime/electron-helper/main.js` 的 probePrimaryScale）。
+ *
+ * 【Windows 必须在这里拦】打包版的 `process.execPath` 就是 dsh-pet.exe，探测子进程跑的还是本文件。
+ * 若让它走单实例锁：第二个实例要把命令行交给父进程、等 `second-instance` 的回应才退出，
+ * 而父进程正卡在同步的 `execFileSync` 里等子进程的 stdout —— 两边互等到 20 秒超时，
+ * 每次启动白等 20 秒（macOS 上 shouldLinearize 直接返回 false，根本不会探测，所以只有 Windows 踩）。
+ * 只报主屏 scaleFactor 就退，不建服务、不建窗口、不碰锁。
+ * 输出格式与 helper 的 DPI_MARK 逐字一致（改那里要同步这里）。
+ */
+if (process.env.DSH_PET_DPI_PROBE === '1') {
+  const { screen } = createRequire(import.meta.url)('electron') as {
+    screen: { getPrimaryDisplay(): { scaleFactor: number } };
+  };
+  void app.whenReady().then(() => {
+    process.stdout.write(`dsh-pet-primary-scale:${screen.getPrimaryDisplay().scaleFactor}\n`);
+    // 推迟一拍再退：ready 回调里直接 exit 会赶在 stdout 落盘前拆掉进程
+    setTimeout(() => app.exit(0), 0);
+  });
 } else {
-  await boot();
+  /** 单实例：第二次双击直接退出（共用 userData 的 Chromium profile 会互踢） */
+  const locked = app.requestSingleInstanceLock();
+  if (!locked) {
+    app.exit(0);
+  } else {
+    await boot();
+  }
 }
 
 /**

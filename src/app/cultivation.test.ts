@@ -150,6 +150,20 @@ test('presence xp is capped at 240 per day', () => {
   });
 });
 
+test('speed multiplies both the per-minute gain and the daily cap', () => {
+  withPath((path) => {
+    const c = open(path, 1);
+    let now = at(0);
+    c.tick(now, false);
+    for (let i = 0; i < 3; i++) c.tick((now += MIN), true, 10);
+    assert.equal(progressOf(path), 30);
+    // ×10 的封顶是 2400：一直挂着，当天正好攒满 2400 就停
+    for (let i = 0; i < 400; i++) c.tick((now += MIN), true, 10);
+    const today = JSON.parse(readFileSync(path, 'utf8')).today;
+    assert.equal(today.presence, 2400);
+  });
+});
+
 test('restless halves the rate and leaving clears it', () => {
   withPath((path) => {
     const c = open(path, 1);

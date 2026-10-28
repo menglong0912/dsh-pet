@@ -188,8 +188,11 @@ export interface CultivationView {
   record: { wins: number; losses: number };
 }
 
-/** 这一段修为每天从在电脑前攒多少（tick 的封顶） */
+/** 这一段修为每天从在电脑前攒多少（tick 的封顶；修炼倍速下按倍数放大） */
 export const PRESENCE_DAILY_MAX = 240;
+/** 设置里能选的修炼倍速：每分钟攒的点数和每天的封顶一起乘 */
+export const CULTIVATION_SPEEDS = [1, 2, 5, 10] as const;
+export type CultivationSpeed = (typeof CULTIVATION_SPEEDS)[number];
 /** 调息加多少修为 */
 const REST_GAIN = 20;
 /** 调息：每天最多几次、离开离久坐提醒多近才算 */
@@ -508,8 +511,11 @@ export class Cultivation {
     return { events, added: amount - left };
   }
 
-  /** 在电脑前每满 1 分钟 +1（心浮气躁时攒 2 分钟才 +1）；本地 0–4 点不涨；每天封顶 240 */
-  tick(now: number, present: boolean): CultivationEvent[] {
+  /**
+   * 在电脑前每满 1 分钟 +1（心浮气躁时攒 2 分钟才 +1）；本地 0–4 点不涨；每天封顶 240。
+   * @param speed 修炼倍速：每满一分钟涨 speed 点，当天封顶也是 240 × speed
+   */
+  tick(now: number, present: boolean, speed: CultivationSpeed = 1): CultivationEvent[] {
     this.rollDay(now);
     // 二选一挂到点：没人挑就随机定一个（§X4）
     const events: CultivationEvent[] = this.expireOffer(now);
@@ -530,15 +536,17 @@ export class Cultivation {
       // 本地 0–4 点不涨：这段不算进分钟债
       if (new Date(now).getHours() >= 4) this.minuteDebtMs += elapsed;
       const perPoint = this.restless ? 2 * MINUTE_MS : MINUTE_MS;
-      while (this.today.presence < PRESENCE_DAILY_MAX && this.minuteDebtMs >= perPoint) {
+      const dailyMax = PRESENCE_DAILY_MAX * speed;
+      while (this.today.presence < dailyMax && this.minuteDebtMs >= perPoint) {
         this.minuteDebtMs -= perPoint;
-        this.today.presence += 1;
+        const gain = Math.min(speed, dailyMax - this.today.presence);
+        this.today.presence += gain;
         this.dirty = true;
         // 在场涨的这点修为不另发 xp 事件：tick 一分钟一条会把冒泡刷满，
         // 需要照实报进账的地方（心魔、切磋）自己有收益
-        events.push(...this.addXp(1).events);
+        events.push(...this.addXp(gain).events);
       }
-      if (this.today.presence >= PRESENCE_DAILY_MAX) this.minuteDebtMs = 0;
+      if (this.today.presence >= dailyMax) this.minuteDebtMs = 0;
     }
     this.save();
     return events;

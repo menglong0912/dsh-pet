@@ -442,6 +442,7 @@ export interface FeatureFunctions {
   activityContext(): string;
   tick(): Promise<void>;
   schedule(): void;
+  disposeFront(): void;
   catchUpDiary(date: string): Promise<void>;
   openDiary(now: number): Promise<void>;
   refreshStatus(now: number): Promise<void>;

@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import { isPeerAddress, PEER_MAX } from './visit';
+import { CULTIVATION_SPEEDS } from './cultivation';
 
 const schema = z
   .object({
@@ -80,8 +81,10 @@ const schema = z
       .object({
         /** 修炼总开关：关着时不建档、不涨修为、菜单里没有「修炼」 */
         enabled: z.boolean().default(true),
+        /** 修炼倍速：每分钟攒的修为和每天的封顶一起乘（1 是原速） */
+        speed: z.union(CULTIVATION_SPEEDS.map((n) => z.literal(n))).default(1),
       })
-      .default({ enabled: true }),
+      .default({ enabled: true, speed: 1 }),
   })
   .strict();
 
@@ -144,7 +147,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     notes: true,
     peers: [],
   },
-  cultivation: { enabled: true },
+  cultivation: { enabled: true, speed: 1 },
 };
 
 /**

@@ -353,7 +353,7 @@ test('settings browser script shows and saves the app section when the app serve
       notes: true,
       peers: ['192.168.11.23', '10.0.0.2'],
     },
-    cultivation: { enabled: true },
+    cultivation: { enabled: true, speed: 1 },
   };
   runInNewContext(settingsScript, {
     URLSearchParams,
@@ -822,6 +822,7 @@ test('settings browser script renders the cultivation view and saves its switch 
     ({ url, options }) => url === '/standalone-ai/app-settings' && options.method === 'POST',
   );
   assert.equal(JSON.parse(post?.options.body ?? '{}').cultivation.enabled, false);
+  assert.equal(JSON.parse(post?.options.body ?? '{}').cultivation.speed, 1);
 
   // 200 但状态是 null（开关关着、还没建档）：整节显示（要能重新打开），只读视图保持隐藏
   const second = boot({ status: 200, json: null }, config);

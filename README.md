@@ -345,17 +345,24 @@ dsh-pet activity      # 打印「主人此刻」的采样（调试用）
 }
 ```
 
+**Windows**：没有软链和 shebang，直接用 node 跑打包目录里的那份（`win-unpacked\resources\pet-cli.mjs`），上面四个事件的 `command` 换成：
+
+```json
+"command": "node \"C:/路径/到/win-unpacked/resources/pet-cli.mjs\" hook"
+```
+
+命令行同理：`node "C:/路径/到/win-unpacked/resources/pet-cli.mjs" say 你好`。CLI 默认到 `%APPDATA%\dsh-pet\dsh-pet\app.json` 找桌宠，与应用写的位置一致。
+
 </details>
 
 ## Windows 版的限制
 
 Windows 版由 CI 构建（`.github/workflows/windows-check.yml` 手动触发：安装依赖 → 测试 → 打包 → 启动冒烟截图 → 安装包静默装、启动、卸载一遍；发版时 `release-app.yml` 把绿色版和安装包挂到 Release）。**没有 Windows 真机，只在 CI 上验证过能装、能启动、`/health` 应答和截到宠物窗口**，日常使用没有实测。
 
-以下功能只在 macOS 版有，Windows 版没有：
+本 fork（`windows` 分支）补上了作者版里 Windows 缺的几项，并在真机上用：
 
-- 前台应用采样（`lsappinfo`）：依赖它的「知道你在干嘛」（看屏幕降级时随口说的那句、对话里说你在用哪个应用）和宠物日记里的应用用时记录；没有它时仍能判断你在不在电脑前，只是不知道在用哪个应用；
-- `dsh-pet` 命令行（`say` / `look` / `activity` / `hook`）；
-- Claude Code hook。
+- 前台应用采样：Windows 下常驻一个 PowerShell 读前台窗口的进程名（`src/app/front-app.ts`），「知道你在干嘛」和日记里的应用用时都能用；
+- `dsh-pet` 命令行与 Claude Code hook：用 `node` 跑打包目录里的 `pet-cli.mjs`，见上面「Claude Code hook」一节末尾的 Windows 写法。
 
 其余应用内功能（桌面宠物、右键菜单、设置页、看屏幕、对话、串门、修炼）两边是同一份代码，但 Windows 上没有真机验证。
 

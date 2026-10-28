@@ -100,6 +100,20 @@ export function cleanName(value: unknown): string {
   return cleanText(value, NAME_MAX).replace(/\//g, '／');
 }
 
+/**
+ * 邻居列表的昵称排序：按码位比，不按 ICU 本地化拼音序。
+ *
+ * 【为什么不用 localeCompare】`localeCompare` 跟随运行机器的系统区域：
+ *   中文 Windows（zh-CN）走拼音序，「张」(zhang) 排在「李」(li) 后面；
+ *   英文环境的 macOS 走 root 序（按脚本/码位），「张」又排在「李」前面。
+ *   同一份邻居名单在两台机器上顺序不同，右键「串门」子菜单就没法预期，
+ *   单测也会只在某一种系统语言下红（本仓库在中文 Windows 上即如此）。
+ *   这里要的是「到处都一样、且稳定」，码位序正好满足；要拼音序得引额外分词依赖。
+ */
+export function byNickname(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 // ---------- 切磋（X5） ----------
 
 /** 切磋模式：auto = 开打前整场算好；live = 逐手对传（X19），收到不认识的回 unsupported-mode */
@@ -438,7 +452,7 @@ export class Neighborhood {
     for (const [id, neighbor] of this.neighbors) {
       if (now - neighbor.seenAt > NEIGHBOR_TTL_MS) this.neighbors.delete(id);
     }
-    return [...this.neighbors.values()].sort((a, b) => a.owner.localeCompare(b.owner) || a.pet.localeCompare(b.pet));
+    return [...this.neighbors.values()].sort((a, b) => byNickname(a.owner, b.owner) || byNickname(a.pet, b.pet));
   }
 
   get(id: string): Neighbor | undefined {

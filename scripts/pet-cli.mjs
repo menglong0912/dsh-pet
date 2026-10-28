@@ -9,16 +9,22 @@
  *   dsh-pet hook           给 Claude Code hook 用：从 stdin 读 hook JSON 转给桌宠；任何失败都静默退出 0，
  *                          绝不因为桌宠没开而打断 Claude Code
  *
- * 找桌宠：读应用写的 app.json（默认 ~/Library/Application Support/dsh-pet/dsh-pet/app.json，
- * 可用 DSH_PET_APP_FILE 覆盖），里面有本次启动的随机端口与 pid。
+ * 找桌宠：读应用写的 app.json（默认 macOS 在 ~/Library/Application Support/dsh-pet/dsh-pet/app.json，
+ * Windows 在 %APPDATA%\dsh-pet\dsh-pet\app.json；可用 DSH_PET_APP_FILE 覆盖），里面有本次启动的随机端口与 pid。
  * 零依赖、只连 127.0.0.1；请求不带 Origin，与应用 /app/* 接口的安全线一致。
  */
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const APP_FILE =
-  process.env.DSH_PET_APP_FILE || join(homedir(), 'Library', 'Application Support', 'dsh-pet', 'dsh-pet', 'app.json');
+const APP_FILE = process.env.DSH_PET_APP_FILE || join(appDataDir(), 'dsh-pet', 'dsh-pet', 'app.json');
+
+/** 与 Electron 的 app.getPath('appData') 一致：应用把 DSH_HOME 放在它下面（见 src/app/main.ts） */
+function appDataDir() {
+  if (process.platform === 'win32') return process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support');
+  return process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+}
 
 const [command, ...rest] = process.argv.slice(2);
 const quiet = command === 'hook';

@@ -8,7 +8,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
 import { durationText } from './activity';
-import { cleanName, cleanText, LINE_MAX } from './visit';
+import { byNickname, cleanName, cleanText, LINE_MAX } from './visit';
 
 /** 一条邻居记录 */
 export interface NeighborRecord {
@@ -251,7 +251,7 @@ export function orderNeighbors<T extends NeighborLike>(
     .sort(byLastMet);
   const strangers = rest
     .filter((neighbor) => record(neighbor) === undefined)
-    .sort((a, b) => a.owner.localeCompare(b.owner));
+    .sort((a, b) => byNickname(a.owner, b.owner));
   return { revisit, list: [...friends, ...met, ...strangers] };
 }
 

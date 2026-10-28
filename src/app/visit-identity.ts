@@ -16,7 +16,9 @@ import {
   verify as cryptoVerify,
 } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
+
+import { writePrivateJson } from '../standalone/ai-storage';
 
 /**
  * 一台电脑的串门身份。
@@ -83,9 +85,9 @@ export function loadVisitIdentity(path: string, warn: (message: string) => void)
     }
   }
   const privateKey = generateKeyPairSync('ed25519').privateKey;
-  writeFileSync(path, fileOf(privateKey), { mode: 0o600 });
-  // 显式 chmod：mode 只在新建文件时全生效，改过的文件（上面那条路）也要保证是 0600
-  chmodSync(path, 0o600);
+  // 走 ai-storage 的 writePrivateJson：POSIX 上 0600，Windows 上 chmod 是摆设，
+  // 那里会改用 icacls 只授当前用户（串门身份是私钥，不能落到 Everyone 可读的默认 ACL 上）
+  writePrivateJson(path, JSON.parse(fileOf(privateKey)));
   return identityOf(privateKey);
 }
 

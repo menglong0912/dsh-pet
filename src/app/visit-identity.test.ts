@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,7 +38,7 @@ test('an identity survives reload, and its pub checks out as Ed25519 SPKI', () =
   }
 });
 
-test('the identity file is 0600 and holds a v1 PKCS8 PEM', () => {
+test('the identity file is private and holds a v1 PKCS8 PEM', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-pet-identity-'));
   try {
     const path = join(dir, 'visit-identity.json');
@@ -47,8 +48,15 @@ test('the identity file is 0600 and holds a v1 PKCS8 PEM', () => {
     assert.match(saved.key, /^-----BEGIN PRIVATE KEY-----/);
     // 换个身份文件签名验证不过：存的确实是这把私钥
     assert.equal(verifyWithPub(identity.pub, 'dsh-pet/test', identity.sign('dsh-pet/test')), true);
-    // Windows 没有 POSIX 权限位：mode 恒报 0o666（只读文件 0o444），0600 在那里无从谈起
-    if (process.platform !== 'win32') assert.equal(statSync(path).mode & 0o777, 0o600);
+    // POSIX 按 mode 位断言；Windows 的 mode 位是摆设（恒 0666，真权限在 ACL），
+    // 改问 icacls：出现 Everyone / Users / Authenticated Users 的显式授权就是不私密。
+    // 与 ai-storage.test.ts 对同一件事的处理保持一个口径。
+    if (process.platform === 'win32') {
+      const acl = execFileSync('icacls.exe', [path], { encoding: 'utf8', windowsHide: true });
+      assert.doesNotMatch(acl, /\b(?:Everyone|BUILTIN\\Users|Authenticated Users)\s*:/i, acl);
+    } else {
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

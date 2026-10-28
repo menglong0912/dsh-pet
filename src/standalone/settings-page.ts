@@ -98,6 +98,8 @@ export const settingsPage = `<!doctype html>
 <fieldset id="cultivation-settings" data-page="cultivation" hidden><legend>修炼</legend>
 <label class="check"><input id="cultivationEnabled" type="checkbox" aria-describedby="cultivation-note">开启修炼</label>
 <p id="cultivation-note" class="hint">开着时，桌宠在电脑前就攒修为，右键「修炼」里能看境界、渡劫、心魔试炼，串门时还能和邻居切磋；修为、法宝与战绩都只存本机。关掉后不再攒，已攒的不丢，重新打开接着修。</p>
+<label for="cultivationSpeed">修炼倍速</label><select id="cultivationSpeed" aria-describedby="speed-note"><option value="1">×1（原速）</option><option value="2">×2</option><option value="5">×5</option><option value="10">×10</option></select>
+<p id="speed-note" class="hint">在电脑前每分钟攒的修为和每天的封顶（240）一起乘；随时能调回 ×1，已攒的修为不变。</p>
 <div id="cultivation-view" hidden></div>
 </fieldset>
 </div>
@@ -263,6 +265,7 @@ export const settingsScript = `
     get('visitStayMin').value = String(data.visit.stayMin);
     get('visitPeers').value = Array.isArray(data.visit.peers) ? data.visit.peers.join('\\n') : '';
     get('cultivationEnabled').checked = data.cultivation.enabled !== false;
+    get('cultivationSpeed').value = String(data.cultivation.speed ?? 1);
     syncVisitDetails();
   }
   // 「邻居」一节（/standalone-ai/app-neighbors）：邻居簿与串门身份；这里点的操作立即生效，不跟整页的保存按钮走
@@ -503,7 +506,7 @@ export const settingsScript = `
             chat: get('visitChat').checked, autoAdmitFriends: get('visitAutoAdmit').checked, notes: get('visitNotes').checked,
             nickname: get('visitNickname').value.trim(), stayMin: num('visitStayMin'), peers: peerList()
           },
-          cultivation: { enabled: get('cultivationEnabled').checked }
+          cultivation: { enabled: get('cultivationEnabled').checked, speed: num('cultivationSpeed') }
         }));
       }
       let relaunching = false;

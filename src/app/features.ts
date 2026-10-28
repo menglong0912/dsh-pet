@@ -3,6 +3,7 @@
  *
  * 纯逻辑都在旁边的模块里（activity / reminders / claude-hooks / status，各有单测）；这里只做接线：
  *   - 每 TICK_MS 采样一次：系统空闲秒数与锁屏（Electron powerMonitor）+ 前台应用（`lsappinfo`，无需授权）；
+ *     前台应用在 macOS 走 `lsappinfo`，Windows 走常驻 PowerShell 读进程（见 front-app.ts）；
  *   - 根据采样推进久坐 / 喝水 / 下班提醒、回来打招呼、定时看屏幕；
  *   - 看屏幕是唯一的自动说话节拍：模型不支持看图或没授权屏幕录制时，降级成按人设随口说一句；
  *   - 把 Claude Code 与串门合成为一个外部工作状态（桌宠只有一个外部槽）；
@@ -220,6 +221,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       state.disposed = true;
       if (state.tickTimer !== null) clearTimeout(state.tickTimer);
       noteOpener.dispose();
+      fns.disposeFront();
       // 正在切磋：定时器、擂台、演出（或转播）都收掉
       fns.cancelSpar();
       // 正在演一场：停掉剩下的步骤、立刻收窗口（不留下空转的心魔与擂台）

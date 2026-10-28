@@ -221,9 +221,12 @@ test('an older file without cultivation still loads, filling the default (on)', 
     writeFileSync(path, JSON.stringify(older));
     const config = createAppConfig(path, (m) => warnings.push(m));
     // 修炼默认开：升级后照常涨修为
-    assert.deepEqual(config().cultivation, { enabled: true });
+    assert.deepEqual(config().cultivation, { enabled: true, speed: 1 });
     assert.deepEqual(warnings, []);
     assert.throws(() => saveAppConfig(path, { ...DEFAULT_APP_CONFIG, cultivation: { enabled: 'yes' } }));
+    // 倍速只收设置页里那几档
+    assert.throws(() => saveAppConfig(path, { ...DEFAULT_APP_CONFIG, cultivation: { enabled: true, speed: 3 } }));
+    assert.equal(saveAppConfig(path, { ...DEFAULT_APP_CONFIG, cultivation: { enabled: true, speed: 10 } }).cultivation.speed, 10);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

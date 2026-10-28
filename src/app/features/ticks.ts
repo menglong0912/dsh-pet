@@ -1,8 +1,10 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { describeActivity, durationText } from '../activity';
 import { diaryDate } from '../diary';
+import { createWindowsFrontSource, makeFrontNameFilter, windowsPowerShellPath } from '../front-app';
+import type { FrontAppSource } from '../front-app';
 import type { HealthEvent } from '../reminders';
 import type { FeatureContext } from './context';
 import { lazyFns } from './context';
@@ -21,6 +23,8 @@ const MEDITATE_JITTER_MIN = 20;
 const run = promisify(execFile);
 /** 前台是这些应用时视为「取不到」（桌宠自己的窗口被点到前台） */
 const SELF_APP_NAMES = new Set(['dsh-pet', 'Electron']);
+/** Windows 的 Get-Process 报的是进程名（不带扩展名、全小写），同一批名字的 Windows 写法 */
+const WIN_SELF_APP_NAMES = ['dsh-pet', 'electron'];
 
 /** 平时打坐的间隔（40–60 分钟随机） */
 function meditateGapMs(): number {
@@ -32,6 +36,8 @@ export interface Ticks {
   activityContext(): string;
   tick(): Promise<void>;
   schedule(): void;
+  /** 收掉前台应用采样的常驻读进程（Windows） */
+  disposeFront(): void;
 }
 
 export function createTicks(ctx: FeatureContext): Ticks {
@@ -48,7 +54,19 @@ export function createTicks(ctx: FeatureContext): Ticks {
   } = lazyFns(ctx);
   const { deps, log, electron, tracker, diary, pouch, health, offWork } = ctx;
   ctx.state.meditateAt = Date.now() + meditateGapMs();
+  /** 前台应用采样源：只在 Windows 建（macOS 沿用 lsappinfo，其它平台拿不到） */
+  const frontSource: FrontAppSource | null =
+    process.platform === 'win32'
+      ? createWindowsFrontSource({
+          powershellPath: () => windowsPowerShellPath(),
+          spawn: (command, args) => spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }),
+          filter: makeFrontNameFilter(WIN_SELF_APP_NAMES),
+          log,
+        })
+      : null;
   async function frontApp(): Promise<string | null> {
+    // Windows：`lsappinfo` 是 macOS 专有命令，这里改问常驻读进程（front-app.ts）
+    if (frontSource) return frontSource.current();
     try {
       const { stdout: asn } = await run('lsappinfo', ['front'], { timeout: 2_000 });
       const { stdout } = await run('lsappinfo', ['info', '-only', 'name', asn.trim()], { timeout: 2_000 });
@@ -122,7 +140,7 @@ export function createTicks(ctx: FeatureContext): Ticks {
     // 修炼：在电脑前就涨修为（事件冒泡、记日记在 onCultivation）；平时在电脑前、没出门、没在说话时偶尔打坐
     const practice = cultivationOn();
     if (practice) {
-      onCultivation(now, practice.tick(now, snap?.present ?? false));
+      onCultivation(now, practice.tick(now, snap?.present ?? false, config.cultivation.speed));
       if (
         snap?.present &&
         ctx.state.trip === null &&
@@ -188,5 +206,8 @@ export function createTicks(ctx: FeatureContext): Ticks {
         )
       : speak(`已经过了主人的下班时间 ${time}，主人还在电脑前。提醒主人收拾一下准备下班。`, '到点啦，该下班啦～');
   }
-  return { activityContext, tick, schedule };
+  // 前台应用采样读进程：不杀掉就留一个没人管的 powershell 在后台每秒输出一行
+  const disposeFront = (): void => frontSource?.dispose();
+
+  return { activityContext, tick, schedule, disposeFront };
 }
