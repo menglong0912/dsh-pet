@@ -7,7 +7,8 @@
 #   3. npm run dist  —— 先 bundle + build:desktop-core，再出 dist-app/win-unpacked；
 #   4. 冒烟脚本      —— 用临时 DSH_HOME 启动 dsh-pet.exe，等 app.json / GET /health，
 #                       借 helper 的 DSH_PET_SMOKE=1 截宠物窗口图，然后让它自己退出；
-#   5. 上传截图与日志作为 artifact。
+#   5. 上传截图与日志作为 artifact；冒烟通过时把 win-unpacked 也传上去（dsh-pet-win-x64），
+#      解压后双击 dsh-pet.exe 就能用——不打 tag、不建 Release 也能从 CI 拿到 Windows 包。
 #
 # 这是正式发版（release-app.yml）之外的「先跑通」检查；release-app 只负责打 zip 挂 Release。
 # 推送/触发由人来做：这个仓库没有 Windows 机器，本地不能替代 CI 的这次真启动。
@@ -56,6 +57,14 @@ jobs:
 
       - name: 启动应用冒烟（app.json → /health → 截图 → 自行退出）
         run: node scripts/smoke-app.mjs
+
+      - name: 上传 Windows 包（冒烟通过才传）
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-pet-win-x64
+          path: dist-app/win-unpacked/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: 上传冒烟截图
         if: always()
