@@ -85,6 +85,8 @@ const SKILL_EFFECT: Record<SkillId, string> = {
   'myriad-self': '召出三重魂影替自己挨打',
   'dream-chant': '必中伤害并把对方牵进梦里一拍',
   'finger-sword': '必中且穿护体',
+  'dragon-palm': '必中伤害，下一手法宝或空手带后劲',
+  'farewell-wind': '必中伤害并让对方飘过下一拍',
   'jelly-clone': '挨打时可能用水母替身挡下',
 };
 
@@ -440,6 +442,8 @@ export interface LiveVersusOptions {
   /** 解说台词的随机数（两边同一种子） */
   lineRng: () => number;
   timeline?: TimelineOptions;
+  /** 串门切磋的逐手局两边都传 true（X16）；隔空切磋、心魔、秘境都不传 */
+  farewell?: boolean;
   /** 本地这一手：返回 null（超时 / 没选 / 收摊）就按后备挑法出 */
   decide: (view: BattleView, index: number, signal: AbortSignal) => Promise<TurnDecision | null>;
   /** 演完一段、本地这一手还没定：宠物头上「想一想…」 */
@@ -573,7 +577,9 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
 
   void (async () => {
     try {
-      let result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]]);
+      let result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]], {
+        farewell: options.farewell,
+      });
       while (true) {
         if (disposed) return finish(null);
         if (!result.need) {
@@ -621,7 +627,9 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
           if (!reply || !reply.ok) return finish(null);
         }
         actions[need.side].push(picked.action);
-        result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]]);
+        result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]], {
+          farewell: options.farewell,
+        });
       }
     } catch (error) {
       options.log(`逐手对传：这一场中断了（${error instanceof Error ? error.message : String(error)}）`);
@@ -728,7 +736,9 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
 
   void (async () => {
     try {
-      let result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]]);
+      let result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]], {
+        farewell: options.farewell,
+      });
       while (true) {
         if (disposed) return finish(null);
         if (!result.need) {
@@ -781,7 +791,9 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
           request.reply({ ok: true });
           await playing;
         }
-        result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]]);
+        result = fightUntilDecision(options.a, options.b, options.seed, [actions[0], actions[1]], {
+          farewell: options.farewell,
+        });
       }
     } catch (error) {
       options.log(`逐手对传：这一场中断了（${error instanceof Error ? error.message : String(error)}）`);

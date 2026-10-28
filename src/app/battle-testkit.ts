@@ -8,7 +8,32 @@
 import { WEAPONS, WEAPON_IDS, SKILL_IDS, majorBreaks, type Fighter, type WeaponId, type SkillId } from './battle';
 import { drawInitialStats } from './cultivation';
 
-export function fighterAt(stage: number, rng: () => number): Fighter {
+/**
+ * X16 之前的 17 门招式：Y0 历练的平衡夹具仍按这批配招（图鉴扩到 19 后，
+ * `fighterAt` 的随机组合会整体换一批，Y0 的目标区间就不再是同一批角色）。
+ * 只给「旧内容回归」用；修炼成长和 X16 的平衡照样读 `SKILL_IDS`。
+ */
+export const Y0_SKILL_IDS: readonly SkillId[] = [
+  'play-dead',
+  'dove',
+  'bubble',
+  'sixth-sense',
+  'shadow-fists',
+  'critical',
+  'spirit-beast',
+  'bloom',
+  'lion-roar',
+  'blue-whale',
+  'whale-song',
+  'ink',
+  'whale-gulp',
+  'jelly-clone',
+  'myriad-self',
+  'dream-chant',
+  'finger-sword',
+];
+
+export function fighterAt(stage: number, rng: () => number, skillPool: readonly SkillId[] = SKILL_IDS): Fighter {
   // 初始属性用正式建档的同一套抽法（一次抽成，不拒绝重抽）
   const initial = drawInitialStats(rng);
   let power = initial.power;
@@ -40,7 +65,7 @@ export function fighterAt(stage: number, rng: () => number): Fighter {
       const grade = roll < 0.7 ? '凡器' : roll < 0.95 ? '灵器' : '神器';
       const drop = drawWeapon(grade) ?? drawWeapon('凡器') ?? drawWeapon('灵器') ?? drawWeapon('神器');
       if (drop) weapons.push(drop);
-      const missing = SKILL_IDS.filter((id) => !skills.includes(id));
+      const missing = skillPool.filter((id) => !skills.includes(id));
       if (missing.length > 0) skills.push(missing[Math.floor(rng() * missing.length)]);
     } else {
       bump();

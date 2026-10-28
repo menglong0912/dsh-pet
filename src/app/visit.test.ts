@@ -994,6 +994,41 @@ test('sparFight: both sides compute the same fight, the host is actor 0, and the
   assert.notDeepEqual(sparFight(aFighter, guest, hostNonce, guestNonce), events);
 });
 
+test('sparFight: 串门送友风开关两边各算同一场，不传就没有 farewell 收场（X16）', () => {
+  const host: Fighter = {
+    ...aFighter,
+    name: '主人家',
+    hp: 9_999,
+    weapons: [],
+    skills: ['farewell-wind'],
+  };
+  const guest: Fighter = {
+    name: '客人',
+    hp: 9_999,
+    power: 5,
+    agility: 5,
+    speed: 6,
+    weapons: [],
+    skills: [],
+  };
+  const hostNonce = 'b'.repeat(64);
+  let sent: { guestNonce: string; events: ReturnType<typeof sparFight> } | null = null;
+  for (let i = 0; i < 80 && sent === null; i++) {
+    const guestNonce = i.toString(16).padStart(64, '0');
+    const events = sparFight(host, guest, guestNonce, hostNonce, { farewell: true });
+    const end = events[events.length - 1];
+    if (end.kind === 'end' && end.reason === 'farewell') sent = { guestNonce, events };
+  }
+  assert.ok(sent, '该有一个种子在串门里把客人送走');
+  // 两边各自调 sparFight（主人家 / 客人）算出同一串；种子顺序仍钉住
+  assert.deepEqual(sparFight(host, guest, sent!.guestNonce, hostNonce, { farewell: true }), sent!.events);
+  const last = sent!.events[sent!.events.length - 1];
+  assert.equal(last?.kind === 'end' && last.winner, 0, '主人家（施放方）赢');
+  // 不传 farewell：同一对随机数不会再送走
+  const plain = sparFight(host, guest, sent!.guestNonce, hostNonce);
+  assert.ok(!plain.some((event) => event.kind === 'end' && event.reason === 'farewell'));
+});
+
 test('sparLineRng: 同一对随机数给出同一串、换个顺序就不同（两边的解说才会一致）', () => {
   const guestNonce = 'a'.repeat(64);
   const hostNonce = 'b'.repeat(64);

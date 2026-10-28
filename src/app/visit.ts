@@ -45,6 +45,7 @@ import type { AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { z } from 'zod';
 import { BATTLE_VERSION, MOVE_IDS, SKILL_IDS, WEAPON_IDS, fight, rngFrom, statCap } from './battle';
+import type { FightOptions } from './battle';
 import type { Action, BattleEvent, Fighter, MoveId, SkillId, WeaponId } from './battle';
 import { MAX_STAGE } from './cultivation';
 import { idOfPub, duelAcceptMessage, duelMessage, knockMessage, verifyWithPub, welcomeMessage } from './visit-identity';
@@ -222,8 +223,14 @@ export function parseTurnIndex(raw: unknown): number | null {
  * 两边各自算的同一场（§X5）：主人家是 a（事件里 actor 0），种子是「客人随机数:主人家随机数」。
  * 两边都调它、传同一对随机数，事件序列逐个相同——顺序反了就是另一场，测试里钉住这条。
  */
-export function sparFight(host: Fighter, guest: Fighter, guestNonce: string, hostNonce: string): BattleEvent[] {
-  return fight(host, guest, `${guestNonce}:${hostNonce}`);
+export function sparFight(
+  host: Fighter,
+  guest: Fighter,
+  guestNonce: string,
+  hostNonce: string,
+  options?: FightOptions,
+): BattleEvent[] {
+  return fight(host, guest, `${guestNonce}:${hostNonce}`, undefined, options);
 }
 
 /**

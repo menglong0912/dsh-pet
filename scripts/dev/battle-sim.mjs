@@ -24,9 +24,9 @@ function fighters(stage) {
   return [a, b];
 }
 
-function winRate(make) {
+function winRate(make, options) {
   let wins = 0;
-  for (let i = 0; i < pairs; i++) if (fight(...make(i), seedOf(i)).at(-1).winner === 0) wins++;
+  for (let i = 0; i < pairs; i++) if (fight(...make(i), seedOf(i), undefined, options).at(-1).winner === 0) wins++;
   return wins / pairs;
 }
 
@@ -159,6 +159,17 @@ for (const id of Object.keys(SKILLS)) {
     return [withSkill(a, id), b];
   });
   console.log(`招式 ${SKILLS[id].name}：持有方胜率 ${rate.toFixed(3)}`);
+}
+// 送友风（串门，X16）：只有串门切磋会打开 farewell；超了 0.65 就降 battle.ts 的 FAREWELL_SEND_CHANCE
+{
+  const rate = winRate(
+    () => {
+      const [a, b] = fighters(HOLDOUT_STAGE);
+      return [withSkill(a, 'farewell-wind'), b];
+    },
+    { farewell: true },
+  );
+  console.log(`招式 送友风（串门）：持有方胜率 ${rate.toFixed(3)}`);
 }
 console.log('');
 

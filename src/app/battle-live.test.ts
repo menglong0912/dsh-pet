@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startLiveClient, startLiveServer } from './battle-live.ts';
 import type { LiveVersus } from './battle-live.ts';
-import { rngFrom } from './battle.ts';
-import type { Fighter } from './battle.ts';
+import { fight, rngFrom } from './battle.ts';
+import type { Controller, Fighter } from './battle.ts';
 import type { ShowSides } from './battle-show.ts';
 
 const a: Fighter = {
@@ -92,6 +92,68 @@ test('X19 逐手对传：两边按同一串出手，算出同一串事件', asyn
     clientEvents.some((event) => event.kind === 'decide'),
     '逐手局每一手都记 decide',
   );
+});
+
+test('X16 逐手对传：farewell 开关传到底，两边按同一串出手算出同一场（含送走）', async () => {
+  const fa: Fighter = {
+    name: '甲',
+    hp: 9_999,
+    power: 6,
+    agility: 0,
+    speed: 50,
+    weapons: [],
+    skills: ['farewell-wind'],
+  };
+  const fb: Fighter = { name: '乙', hp: 9_999, power: 5, agility: 0, speed: 1, weapons: [], skills: [] };
+  const pick: Controller = {
+    decide: (view) =>
+      view.you.skills.includes('farewell-wind') && !view.you.used.includes('farewell-wind')
+        ? { kind: 'skill', skill: 'farewell-wind' }
+        : { kind: 'unarmed' },
+  };
+  let chosen: { seed: string; events: ReturnType<typeof fight> } | null = null;
+  for (let i = 0; i < 60 && chosen === null; i++) {
+    const trial = `farewell-live-${i}`;
+    const events = fight(fa, fb, trial, [pick, pick], { farewell: true });
+    const end = events[events.length - 1];
+    if (end.kind === 'end' && end.reason === 'farewell') chosen = { seed: trial, events };
+  }
+  assert.ok(chosen, '该有一个种子在逐手局里送走');
+  const server = startLiveServer({
+    a: fa,
+    b: fb,
+    seed: chosen!.seed,
+    local: 0,
+    show: silent,
+    lineRng: rngFrom(chosen!.seed + ':lines'),
+    farewell: true,
+    decide: async (view) => ({ action: pick.decide(view) }),
+    think: noop,
+    log: noop,
+    waitMs: 2_000,
+  });
+  const client = startLiveClient({
+    a: fa,
+    b: fb,
+    seed: chosen!.seed,
+    local: 1,
+    show: silent,
+    lineRng: rngFrom(chosen!.seed + ':lines'),
+    farewell: true,
+    decide: async (view) => ({ action: pick.decide(view) }),
+    think: noop,
+    log: noop,
+    waitMs: 2_000,
+    sendTurn: async (body) => server.turn(body.index, body.action),
+  });
+  client.skip();
+  server.skip();
+  const [clientEvents, serverEvents] = await Promise.all([client.done, server.done]);
+  assert.ok(clientEvents && serverEvents);
+  assert.deepEqual(clientEvents, chosen!.events, '逐手局和整场（同一个 farewell 开关）算出同一串');
+  assert.deepEqual(serverEvents, chosen!.events);
+  const end = clientEvents[clientEvents.length - 1];
+  assert.equal(end.kind === 'end' && end.reason, 'farewell');
 });
 
 test('X19 逐手对传：对面出了不合法的招按掉线，不替它编招', async () => {

@@ -584,7 +584,8 @@ function showOf(action: Action, who: 0 | 1, prefix?: string): AttackShow {
     return ATTACK_SHOW.unarmed;
   }
   const key = action.kind === 'weapon' ? action.weapon : action.kind === 'skill' ? action.skill : 'unarmed';
-  return ATTACK_SHOW[key];
+  // 新招式的演出表还没补（X16 的降龙十八掌 / 送友风）时先按空手演：保证这场演得完、不报错
+  return ATTACK_SHOW[key] ?? ATTACK_SHOW.unarmed;
 }
 
 /**

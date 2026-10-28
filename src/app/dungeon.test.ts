@@ -30,11 +30,13 @@ import {
 } from './dungeon.ts';
 import { SANWANG } from './dungeon-sanwang.ts';
 import { MOVES, fallbackAction, fightUntilDecision } from './battle.ts';
-import { fighterAt, seededRng } from './battle-testkit.ts';
+import { Y0_SKILL_IDS, fighterAt as baseFighterAt, seededRng } from './battle-testkit.ts';
 import type { Action, BattleEvent, Fighter } from './battle.ts';
 
 const NOW = 0;
 const DEF: DungeonDef = SANWANG;
+/** Y0 历练的平衡夹具按 X16 之前的 17 门招式配招：新招式加入后目标区间仍是同一批角色（X16 只加图鉴） */
+const fighterAt = (stage: number, rng: () => number): Fighter => baseFighterAt(stage, rng, Y0_SKILL_IDS);
 
 /** 新开一趟（now 固定 0，赶路要走 5 秒） */
 function fresh(

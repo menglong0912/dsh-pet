@@ -191,6 +191,40 @@ test('X9：魂影替挨、入梦、穿护体、三个新主动都有台词，不
   }
 });
 
+test('X16：降龙十八掌 / 送友风、后劲、飘起来、送走都有台词，不超过 40 字', () => {
+  const names: [string, string] = ['小鱼', '心魔'];
+  const cases: Array<[BattleEvent, (line: string) => boolean]> = [
+    [
+      { actor: 0, kind: 'hit', weapon: 'water-gun', damage: 18, crit: false, blocked: false, surge: true, hp: [10, 4] },
+      (l) => l.includes('18') && /后劲|余劲/.test(l),
+    ],
+    [
+      { actor: 0, kind: 'skill', skill: 'dragon-palm', damage: 28, hp: [10, 4] },
+      (l) => l.includes('28') && /亢龙有悔|龙影/.test(l),
+    ],
+    [
+      { actor: 0, kind: 'skill', skill: 'farewell-wind', damage: 22, hp: [10, 4] },
+      (l) => l.includes('22') && /清风|一路顺风/.test(l),
+    ],
+    [{ actor: 1, kind: 'skip', cause: 'float', hp: [10, 10] }, (l) => l.includes(names[1]) && /飘/.test(l)],
+    [
+      { actor: 0, kind: 'end', winner: 0, reason: 'farewell', hp: [10, 4] },
+      (l) => l.includes(names[0]) && /送回家|送走/.test(l),
+    ],
+  ];
+  for (const [event, check] of cases) {
+    const seen = new Set<string>();
+    for (const roll of [0.01, 0.5, 0.99]) {
+      const line = lineOf(event, names, () => roll);
+      assert.ok(line !== null, `${event.kind} 应该有台词`);
+      assert.ok(check(line!), `${event.kind} 台词内容不对：${line}`);
+      assert.ok(line!.length <= 40, `${event.kind} 台词超长：${line}`);
+      seen.add(line!);
+    }
+    assert.ok(seen.size >= 2, `${event.kind} 至少两句`);
+  }
+});
+
 test('X11：名字以「的」结尾时，所有 {a}的 / {b}的 模板都不重复「的」', () => {
   const deNames: [string, string] = ['吃白饭的', '吃白饭的'];
   const hp: [number, number] = [10, 10];
@@ -208,6 +242,7 @@ test('X11：名字以「的」结尾时，所有 {a}的 / {b}的 模板都不重
     { actor: 0, kind: 'hit', damage: 9, crit: false, blocked: false, hp },
     { actor: 0, kind: 'hit', weapon: 'duster', damage: 9, crit: false, blocked: false, slowed: true, hp },
     { actor: 0, kind: 'hit', weapon: 'slingshot', damage: 9, crit: false, blocked: false, twin: true, hp },
+    { actor: 0, kind: 'hit', weapon: 'water-gun', damage: 9, crit: false, blocked: false, surge: true, hp },
     { actor: 0, kind: 'combo', damage: 9, crit: false, blocked: false, hp },
     { actor: 0, kind: 'dodge', hp },
     { actor: 0, kind: 'counter', damage: 9, blocked: false, hp },
@@ -216,6 +251,7 @@ test('X11：名字以「的」结尾时，所有 {a}的 / {b}的 模板都不重
     { actor: 0, kind: 'skip', cause: 'freeze', hp },
     { actor: 0, kind: 'skip', cause: 'sleep', hp },
     { actor: 0, kind: 'skip', cause: 'dream', hp },
+    { actor: 0, kind: 'skip', cause: 'float', hp },
     { actor: 0, kind: 'miss', hp },
     { actor: 0, kind: 'decoy', hp },
     { actor: 0, kind: 'mirror', hp },
@@ -231,6 +267,7 @@ test('X11：名字以「的」结尾时，所有 {a}的 / {b}的 模板都不重
     { actor: 0, kind: 'skill', skill: 'finger-sword', damage: 9, pierce: true, hp },
     { actor: 0, kind: 'strike', index: 0, damage: 9, blocked: false, hp },
     { actor: 0, kind: 'end', winner: 0, reason: 'ko', hp },
+    { actor: 0, kind: 'end', winner: 0, reason: 'farewell', hp },
   ];
   const seen = new Set<string>();
   for (const event of events) {

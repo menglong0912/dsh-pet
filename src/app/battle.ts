@@ -110,7 +110,9 @@ export type SkillId =
   | 'jelly-clone'
   | 'myriad-self'
   | 'dream-chant'
-  | 'finger-sword';
+  | 'finger-sword'
+  | 'dragon-palm'
+  | 'farewell-wind';
 
 export interface SkillDef {
   id: SkillId;
@@ -143,6 +145,8 @@ export const SKILLS: Record<SkillId, SkillDef> = {
   'myriad-self': skill('myriad-self', '万我', '主动'),
   'dream-chant': skill('dream-chant', '魂牵梦绕', '主动'),
   'finger-sword': skill('finger-sword', '五指拳心剑', '主动'),
+  'dragon-palm': skill('dragon-palm', '降龙十八掌', '主动'),
+  'farewell-wind': skill('farewell-wind', '送友风', '主动'),
 };
 
 export const SKILL_IDS = Object.keys(SKILLS) as SkillId[];
@@ -220,7 +224,7 @@ export const MOVE_IDS = Object.keys(MOVES) as MoveId[];
  * 引擎版本（X5 名帖的 v）：结算规则、图鉴内容变了就 +1。切磋双方在名帖里各带一份，
  * 两边不同就切不了（谁也不知道对方那版引擎会打出什么）。
  */
-export const BATTLE_VERSION = 3;
+export const BATTLE_VERSION = 4;
 
 /** 主动招式（Action 里允许出现的） */
 const ACTIVE_SKILLS: readonly SkillId[] = [
@@ -233,6 +237,8 @@ const ACTIVE_SKILLS: readonly SkillId[] = [
   'myriad-self',
   'dream-chant',
   'finger-sword',
+  'dragon-palm',
+  'farewell-wind',
 ];
 
 export interface Fighter {
@@ -302,8 +308,8 @@ export interface FightUntilDecisionResult {
   need: DecisionNeed | null;
 }
 
-/** 跳过出手的原因：陀螺 / 狮子吼是晕，雪球是冻住，鲸歌是睡着，魂牵梦绕是入梦（X9） */
-export type SkipCause = 'stun' | 'freeze' | 'sleep' | 'dream';
+/** 跳过出手的原因：陀螺 / 狮子吼是晕，雪球是冻住，鲸歌是睡着，魂牵梦绕是入梦，送友风是飘起来（X16） */
+export type SkipCause = 'stun' | 'freeze' | 'sleep' | 'dream' | 'float';
 
 export type BattleEvent =
   | { actor: 0 | 1; kind: 'start'; hp: [number, number] }
@@ -321,6 +327,8 @@ export type BattleEvent =
       slowed?: true;
       /** 弹弓这一下打了两颗（X8） */
       twin?: true;
+      /** 这一下带着降龙十八掌的后劲（X16） */
+      surge?: true;
       hp: [number, number];
     }
   | {
@@ -334,6 +342,8 @@ export type BattleEvent =
       blocked: boolean;
       slowed?: true;
       twin?: true;
+      /** 这一下带着降龙十八掌的后劲（X16） */
+      surge?: true;
       hp: [number, number];
     }
   | { actor: 0 | 1; kind: 'dodge'; hp: [number, number] }
@@ -361,7 +371,7 @@ export type BattleEvent =
       hp: [number, number];
     }
   | { actor: 0 | 1; kind: 'strike'; index: number; damage: number; blocked: boolean; hp: [number, number] }
-  | { actor: 0 | 1; kind: 'end'; winner: 0 | 1; reason: 'ko' | 'timeout'; hp: [number, number] };
+  | { actor: 0 | 1; kind: 'end'; winner: 0 | 1; reason: 'ko' | 'timeout' | 'farewell'; hp: [number, number] };
 
 /** 一个小 PRNG（sfc32），种子取 sha256 摘要的前 16 字节，不引依赖 */
 function sfc32(seed: Buffer): () => number {
@@ -440,6 +450,8 @@ interface Side {
   moveUses: Map<MoveId, number>;
   /** 替挡还剩几下（Y0） */
   guardLeft: number;
+  /** 降龙十八掌的后劲还挂着（X16）：下一次法宝 / 空手出手的第一下打中时加伤，打空就作废 */
+  surge: boolean;
 }
 
 function makeSide(f: Fighter, initialDelay: number): Side {
@@ -456,6 +468,7 @@ function makeSide(f: Fighter, initialDelay: number): Side {
     beastLeft: f.skills.includes('spirit-beast') ? 3 : 0,
     moveUses: new Map(),
     guardLeft: f.guard ? f.guard.times : 0,
+    surge: false,
   };
 }
 
@@ -644,11 +657,14 @@ const POWER_FACTOR = 0.75;
  * 旧值 0.54 / 0.024 / 0.35 下成功率 0.30–0.72 不齐（早期偏难），调后不吃丹全站 0.59–0.67、吃丹 0.83–0.89。
  * X8 招式表从 10 个扩到 14 个（2026-10-26）：同样四五次二选一，攒到泡泡 / 化鸽 / 假死 / 生花这几门防身的
  * 概率变低，后期偏难（不吃丹 0.44–0.59）；网格重标为 0.47 / 0.0198 / 0.002 / 0.368，七站不吃丹 0.59–0.70、吃丹 0.83–0.91。
+ * X16 招式表再扩到 19 门（降龙十八掌、送友风）：后期攒到防身招式的概率又被摊薄，不吃丹掉到 0.52–0.66；
+ * 重扫七个分界后把炼虚往上的附加斜率改成 -0.0065（仍是随境界涨，只是涨得慢一些），
+ * 现值为 0.47 / 0.0198 / -0.0065 / 0.368，七站不吃丹 0.55–0.71、吃丹 0.86–0.90。
  */
 const TRIBULATION_BASE = 0.47;
 const TRIBULATION_STEP = 0.0198;
-/** 炼虚往上升的额外斜率：技能攒得全，扛雷能力一路变强 */
-const TRIBULATION_LATE_STEP = 0.002;
+/** 炼虚往上的附加斜率（X16 起为负）：技能攒得全，单道雷随境界涨得慢一些 */
+const TRIBULATION_LATE_STEP = -0.0065;
 /** 渡劫：单道雷按渡劫者自身气血加成的比例（吃丹加的血也走这里，丹的收益不至于陡成必过） */
 const TRIBULATION_HP_CUT = 0.368;
 /** 破势：伤害里随防守方气血上限加成的比例 */
@@ -683,13 +699,38 @@ const CHANT_HP_SHARE = 0.5;
 const FIST_HP_SHARE = 0.8;
 /** 万我：分出几重魂影（X9；用户选了 3 重，再往上就是「七重战神」） */
 const MYRIAD_MIRRORS = 3;
+/** 降龙十八掌（X16）：必中伤害基数、吃的破势份额、后劲的固定与灵力份额 */
+const DRAGON_PALM_BASE = 15;
+const DRAGON_PALM_HP_SHARE = 0.6;
+const DRAGON_SURGE_BASE = 4;
+const DRAGON_SURGE_POWER = 0.25;
+/** 送友风（X16）：必中伤害基数、吃的破势份额 */
+const FAREWELL_BASE = 12;
+const FAREWELL_HP_SHARE = 0.4;
+/**
+ * 串门切磋里送友风打中后把对方送走的概率（X16）。起点 0.3；battle-sim 的「送友风（串门）」
+ * 超过 0.65 就往下调（数值记在 X16 的落地情况里）。
+ */
+export const FAREWELL_SEND_CHANCE = 0.3;
 
-export function fight(a: Fighter, b: Fighter, seed: string, controllers?: [Controller, Controller]): BattleEvent[] {
+/** 一场对战的额外开关（X16）：`farewell` 只在串门切磋里传，隔空 / 心魔 / 秘境 / 渡劫都不传 */
+export interface FightOptions {
+  /** 送友风打中、对方还活着时，按 `FAREWELL_SEND_CHANCE` 抽一签把对方送走 */
+  farewell?: boolean;
+}
+
+export function fight(
+  a: Fighter,
+  b: Fighter,
+  seed: string,
+  controllers?: [Controller, Controller],
+  options?: FightOptions,
+): BattleEvent[] {
   if (!controllers) {
     const decideRng = rngFrom(seed + ':decide');
     controllers = [autoController(decideRng), autoController(decideRng)];
   }
-  return runFight(a, b, seed, controllers);
+  return runFight(a, b, seed, controllers, options);
 }
 
 /** 一次「要决策但那一串已经用完」的信号（只在 fightUntilDecision 内部抛，不落到外层） */
@@ -710,6 +751,7 @@ export function fightUntilDecision(
   b: Fighter,
   seed: string,
   sources: readonly [ActionSource, ActionSource],
+  options?: FightOptions,
 ): FightUntilDecisionResult {
   const decideRng = rngFrom(seed + ':decide');
   let need: DecisionNeed | null = null;
@@ -728,7 +770,7 @@ export function fightUntilDecision(
   }) as [Controller, Controller];
   const events: BattleEvent[] = [];
   try {
-    runFight(a, b, seed, controllers, events);
+    runFight(a, b, seed, controllers, options, events);
   } catch (error) {
     if (error instanceof DecisionNeeded) return { events, need };
     throw error;
@@ -741,10 +783,13 @@ function runFight(
   b: Fighter,
   seed: string,
   controllers: [Controller, Controller],
+  options?: FightOptions,
   events: BattleEvent[] = [],
 ): BattleEvent[] {
   // 结算随机数只由种子决定，是这一场内部的局部状态
   const rng = rngFrom(seed + ':resolve');
+  // 送走用单独一条种子流（X16）：只在串门切磋里送友风打中时抽，不挪结算序列
+  const farewellRng = options?.farewell ? rngFrom(seed + ':farewell') : null;
   const sides = [makeSide(a, 0.8 + 0.4 * rng()), makeSide(b, 0.8 + 0.4 * rng())];
   events.push({ actor: 0, kind: 'start', hp: [sides[0].hp, sides[1].hp] });
 
@@ -770,8 +815,9 @@ function runFight(
     };
   };
 
-  /** 对方睡着 / 被牵进梦里（鲸歌、魂牵梦绕）：这会儿挨的攻击都不判闪避 */
-  const asleep = (side: Side): boolean => side.skip && (side.skipCause === 'sleep' || side.skipCause === 'dream');
+  /** 对方睡着 / 被牵进梦里 / 被送友风吹得飘起来：这会儿挨的攻击都不判闪避 */
+  const asleep = (side: Side): boolean =>
+    side.skip && (side.skipCause === 'sleep' || side.skipCause === 'dream' || side.skipCause === 'float');
 
   /**
    * 一次攻击（法宝、招式或空手）：命中、会心、连击、定身、反击、灵兽、替挡都从这进。
@@ -788,7 +834,12 @@ function runFight(
     const comboCap = MAX_COMBOS;
     let combos = 0;
     const hits = spec ? spec.hits : 1;
+    // 降龙十八掌的后劲只跟法宝 / 空手走（X16）；招式表里的招和别的主动招式不消耗它
+    const surgeArmed = me.surge && (action.kind === 'weapon' || action.kind === 'unarmed');
     for (let hit = 0; hit < hits + combos && foe.hp > 0; hit++) {
+      // 后劲只加在这一手的第一下：打空 / 被闪避 / 打分身 / 魂影 / 替挡都算没打中，直接作废
+      const surgeHere = surgeArmed && hit === 0;
+      if (surgeHere) me.surge = false;
       // 每次挥击固定抽满六个，抽了不用的也抽：换出招者不挪动结算序列
       const dodgeRoll = rng();
       const dmgRoll = rng();
@@ -844,6 +895,8 @@ function runFight(
       // 背水一战（Y0）：自己气血低于三成时这一段伤害翻倍率（不带 mods 时 ×1，结算不变）
       const desperate = desperateFactor(me.f, me.hp);
       if (desperate !== 1) damage = Math.floor(damage * desperate);
+      // 亢龙有悔的后劲（X16）：这一下打中才加，加在会心 / 背水之后
+      if (surgeHere) damage += DRAGON_SURGE_BASE + Math.floor(me.f.power * DRAGON_SURGE_POWER);
       const applied = applyDamage(foe, damage);
       const kind = hit < hits ? 'hit' : 'combo';
       // 鸡毛掸子：打中（含被泡泡挡下）就笑岔气，对方下次出手往后推半个间隔
@@ -858,6 +911,7 @@ function runFight(
         blocked: applied.blocked,
         ...(slowed ? { slowed: true as const } : {}),
         ...(twin ? { twin: true as const } : {}),
+        ...(surgeHere ? { surge: true as const } : {}),
         hp: hpPair(sides[0], sides[1]),
       });
       if (applied.playDead)
@@ -934,6 +988,9 @@ function runFight(
     }
     return { kind: 'unarmed' };
   };
+
+  /** 送友风把对方送走了（X16）：这一场到此为止，`end` 已经推进事件里，不再排后面的事件 */
+  let farewellEnd = false;
 
   /** 一次出手（含主动招式），返回实际执行的动作；凭空生花的「马上再出手一次」在里面就地补一次 */
   const takeAction = (self: 0 | 1): Action => {
@@ -1059,6 +1116,50 @@ function runFight(
         if (applied.playDead)
           events.push({ actor: (self ^ 1) as 0 | 1, kind: 'play-dead', hp: hpPair(sides[0], sides[1]) });
       }
+      if (action.skill === 'dragon-palm') {
+        // 降龙十八掌（X16）：必中；「亢龙有悔」的后劲留给下一次法宝 / 空手的第一下
+        const applied = applyDamage(
+          foe,
+          DRAGON_PALM_BASE +
+            Math.floor(me.f.power * POWER_FACTOR) +
+            Math.floor(foe.f.hp * HP_BONUS * DRAGON_PALM_HP_SHARE),
+        );
+        me.surge = true;
+        events.push({
+          actor: self,
+          kind: 'skill',
+          skill: 'dragon-palm',
+          damage: applied.damage,
+          hp: hpPair(sides[0], sides[1]),
+        });
+        if (applied.playDead)
+          events.push({ actor: (self ^ 1) as 0 | 1, kind: 'play-dead', hp: hpPair(sides[0], sides[1]) });
+      }
+      if (action.skill === 'farewell-wind') {
+        // 送友风（X16）：必中；打中后对方还活着就飘起来跳过下一拍（飘着时挨打不判闪避）
+        const applied = applyDamage(
+          foe,
+          FAREWELL_BASE + Math.floor(me.f.power * POWER_FACTOR) + Math.floor(foe.f.hp * HP_BONUS * FAREWELL_HP_SHARE),
+        );
+        if (foe.hp > 0) {
+          foe.skip = true;
+          foe.skipCause = 'float';
+        }
+        events.push({
+          actor: self,
+          kind: 'skill',
+          skill: 'farewell-wind',
+          damage: applied.damage,
+          hp: hpPair(sides[0], sides[1]),
+        });
+        if (applied.playDead)
+          events.push({ actor: (self ^ 1) as 0 | 1, kind: 'play-dead', hp: hpPair(sides[0], sides[1]) });
+        // 串门切磋里另有一次送走判定：单独一条 `:farewell` 种子流，抽中就当场收场
+        if (foe.hp > 0 && farewellRng && farewellRng() < FAREWELL_SEND_CHANCE) {
+          events.push({ actor: self, kind: 'end', winner: self, reason: 'farewell', hp: hpPair(sides[0], sides[1]) });
+          farewellEnd = true;
+        }
+      }
     } else {
       attack(self, action, blinded);
     }
@@ -1066,7 +1167,7 @@ function runFight(
   };
 
   let actions = 0;
-  while (sides[0].hp > 0 && sides[1].hp > 0 && actions < MAX_ACTIONS) {
+  while (sides[0].hp > 0 && sides[1].hp > 0 && actions < MAX_ACTIONS && !farewellEnd) {
     const self: 0 | 1 = sides[0].next <= sides[1].next ? 0 : 1; // 同一时刻 a 先
     const me = sides[self];
     const now = me.next;
@@ -1085,6 +1186,9 @@ function runFight(
     }
     me.next = now + intervalOf(me);
   }
+
+  // 送友风已经推过 end（X16）：别再补一条普通收场
+  if (farewellEnd) return events;
 
   const alive = [sides[0].hp > 0, sides[1].hp > 0];
   let winner: 0 | 1;

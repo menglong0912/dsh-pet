@@ -296,6 +296,8 @@ export interface SparShow {
     mode: TurnMode;
     /** 这一场的种子：`客人 / 挑战方随机数:主人家 / 应战方随机数` */
     seed: string;
+    /** 串门切磋的逐手局传 true（X16）：送友风打中时按 `:farewell` 那一路抽送走；隔空切磋不传 */
+    farewell?: boolean;
     /** client：把这一手发给对面（轮到自家带 action，轮到对面不带） */
     sendTurn?: (body: { index: number; action?: Action }, signal: AbortSignal) => Promise<SparTurnReply>;
   };

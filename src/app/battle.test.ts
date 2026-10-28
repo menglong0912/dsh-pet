@@ -224,6 +224,8 @@ test('主动招式都会被用出来，事件里带招式编号', () => {
     'myriad-self',
     'dream-chant',
     'finger-sword',
+    'dragon-palm',
+    'farewell-wind',
   ];
   for (const skill of actives) {
     const events = findFight(
@@ -490,7 +492,7 @@ test('平衡：渡劫不吃丹约 65%、吃丹约 80%——七个渡劫分界全
 
 // ---------------------------------------------------------------------------
 // Y0 兼容快照：改引擎（hpNow / moves / mods / guard）之前先录下来的 200 场事件序列。
-// 不带新字段的 Fighter 必须逐条打出同一串事件，所以 `BATTLE_VERSION` 不升、`visit.ts` 不动。
+// 不带新字段的 Fighter 必须逐条打出同一串事件；X16 只扩图鉴（BATTLE_VERSION 3 → 4），旧角色的结算不变。
 // ---------------------------------------------------------------------------
 
 /**
@@ -501,6 +503,30 @@ test('平衡：渡劫不吃丹约 65%、吃丹约 80%——七个渡劫分界全
  * 全默认 `autoController`。200 场合计 4620 个事件。
  */
 const COMPAT_SNAPSHOT = 'c3288ca172dc78df12cda4c13f63d74cf4e8a5524678052221be39fd434d2224';
+
+/**
+ * 快照里配招用的旧图鉴（X16 之前的 17 门招式）：X16 把 `SKILL_IDS` 扩到 19，
+ * 这里钉住旧清单，让这份快照继续守「加新招式不改变旧角色行为」——不重算摘要。
+ */
+const COMPAT_SKILLS: readonly SkillId[] = [
+  'play-dead',
+  'dove',
+  'bubble',
+  'sixth-sense',
+  'shadow-fists',
+  'critical',
+  'spirit-beast',
+  'bloom',
+  'lion-roar',
+  'blue-whale',
+  'whale-song',
+  'ink',
+  'whale-gulp',
+  'jelly-clone',
+  'myriad-self',
+  'dream-chant',
+  'finger-sword',
+];
 
 function compatEvents(): BattleEvent[][] {
   const out: BattleEvent[][] = [];
@@ -515,9 +541,9 @@ function compatEvents(): BattleEvent[][] {
     const a = fighterAt(stage, seededRng(i * 3 + 1));
     const b = fighterAt(stage, seededRng(i * 5 + 2));
     a.weapons = take(WEAPON_IDS, 4);
-    a.skills = take(SKILL_IDS, 6);
+    a.skills = take(COMPAT_SKILLS, 6);
     b.weapons = take(WEAPON_IDS, 4);
-    b.skills = take(SKILL_IDS, 6);
+    b.skills = take(COMPAT_SKILLS, 6);
     out.push(fight(named(a, '甲'), named(b, '乙'), `compat-${i}`));
   }
   return out;
@@ -535,7 +561,7 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-test('Y0 兼容快照：不带新字段的 Fighter 逐条打出同一串事件（BATTLE_VERSION 不升的依据）', () => {
+test('Y0 兼容快照：不带新字段的 Fighter 逐条打出同一串事件（X16 只加图鉴条目，旧角色结算不变）', () => {
   const digest = createHash('sha256')
     .update(
       compatEvents()
@@ -867,6 +893,184 @@ test('X9 五指拳心剑：必中、穿护体（不减伤也不消耗泡泡）�
   const e = events.find((x) => x.kind === 'skill' && x.skill === 'finger-sword');
   assert.ok(e, '这一招该用出来');
   assert.equal(e.kind === 'skill' && e.pierce, undefined, '没护体就不标 pierce');
+});
+
+test('X16 降龙十八掌：必中，后劲只跟下一次法宝 / 空手的第一下', () => {
+  const castThenGun: Controller = {
+    decide: (view) =>
+      view.you.used.includes('dragon-palm')
+        ? { kind: 'weapon', weapon: 'water-gun' }
+        : { kind: 'skill', skill: 'dragon-palm' },
+  };
+  const a = {
+    ...fighterAt(8, seededRng(61)),
+    weapons: ['water-gun' as const],
+    skills: ['dragon-palm' as const],
+    agility: 0,
+    hp: 9_999,
+  };
+  // 必中：身法拉满、带化鸽遁也躲不开；伤害按 15 + 灵力×0.75 + 破势×0.6
+  const dodgy = {
+    ...fighterAt(8, seededRng(62)),
+    weapons: [],
+    skills: ['dove' as const],
+    agility: 30,
+    hp: 9_999,
+  };
+  const events = fight(named(a, '甲'), named(dodgy, '乙'), 'dragon-sure', [castThenGun, unarmedOnly()]);
+  const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'dragon-palm');
+  assert.ok(k > 0, '这一招该用出来');
+  const skill = events[k];
+  assert.equal(events[k - 1]?.kind, 'decide', '降龙十八掌不判闪避，decide 之后直接结算');
+  assert.equal(
+    skill.kind === 'skill' && skill.damage,
+    15 + Math.floor(a.power * 0.75) + Math.floor(dodgy.hp * 0.25 * 0.6),
+    '必中且按公式结算',
+  );
+
+  // 后劲：打中的那一记带 surge，只带一次；之后的连击 / 下一手都不再带
+  const steady = { ...fighterAt(8, seededRng(63)), weapons: [], skills: [], agility: 0, hp: 9_999 };
+  const ev = fight(named(a, '甲'), named(steady, '乙'), 'dragon-surge', [castThenGun, unarmedOnly()]);
+  const k2 = ev.findIndex((e) => e.kind === 'skill' && e.skill === 'dragon-palm');
+  assert.ok(k2 > 0);
+  const hits = ev
+    .slice(k2 + 1)
+    .filter((e): e is Extract<BattleEvent, { kind: 'hit' | 'combo' }> => e.kind === 'hit' || e.kind === 'combo')
+    .filter((e) => e.actor === 0);
+  assert.ok(hits.length >= 2, '后劲之后还有普通出手');
+  assert.equal(hits[0]?.surge, true, '下一次法宝的第一下带后劲');
+  assert.ok(
+    hits.slice(1).every((hit) => hit.surge === undefined),
+    '后劲只加一次',
+  );
+
+  // 那一下没打中（闪避）：后劲作废，后面再打中也不带 surge
+  const fast = { ...a, speed: 50 };
+  const evasive = {
+    ...fighterAt(8, seededRng(64)),
+    weapons: [],
+    skills: ['dove' as const],
+    agility: 30,
+    speed: 1,
+    hp: 9_999,
+  };
+  let expired = false;
+  for (let i = 0; i < 40 && !expired; i++) {
+    const e = fight(named(fast, '甲'), named(evasive, '乙'), `dragon-miss-${i}`, [castThenGun, unarmedOnly()]);
+    const at = e.findIndex((x) => x.kind === 'skill' && x.skill === 'dragon-palm');
+    if (at < 0) continue;
+    const firstAttack = e.findIndex((x, j) => j > at && x.kind === 'decide' && x.actor === 0);
+    if (firstAttack < 0) continue;
+    const outcome = e[firstAttack + 1];
+    if (outcome?.kind !== 'dodge' || outcome.actor !== 1) continue;
+    expired = true;
+    assert.ok(
+      !e.slice(at).some((x) => (x.kind === 'hit' || x.kind === 'combo') && x.surge === true),
+      '第一下没打中，后劲作废',
+    );
+  }
+  assert.ok(expired, '该有一个种子让后劲那一下被闪避');
+});
+
+test('X16 送友风：必中，打中后飘起来跳过一拍，飘着挨打不判闪避', () => {
+  const a = {
+    ...fighterAt(8, seededRng(65)),
+    weapons: [],
+    skills: ['farewell-wind' as const],
+    agility: 0,
+    speed: 20,
+    hp: 9_999,
+  };
+  const b = {
+    ...fighterAt(8, seededRng(66)),
+    weapons: [],
+    skills: ['dove' as const],
+    agility: 30,
+    speed: 1,
+    hp: 9_999,
+  };
+  const events = fight(named(a, '甲'), named(b, '乙'), 'farewell-base', [castOnce('farewell-wind'), unarmedOnly()]);
+  const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'farewell-wind');
+  assert.ok(k > 0, '这一招该用出来');
+  const skill = events[k];
+  assert.equal(
+    skill.kind === 'skill' && skill.damage,
+    12 + Math.floor(a.power * 0.75) + Math.floor(b.hp * 0.25 * 0.4),
+    '必中且按公式结算',
+  );
+  const turn = nextTurn(events, k, 1);
+  assert.deepEqual([turn?.kind, turn?.kind === 'skip' && turn.cause], ['skip', 'float'], '下一拍飘着');
+  const wake = events.findIndex((e, j) => j > k && e.kind === 'skip' && e.actor === 1);
+  const between = events.slice(k + 1, wake < 0 ? undefined : wake);
+  assert.equal(between.filter((e) => e.kind === 'dodge' && e.actor === 1).length, 0, '飘着时躲不开');
+});
+
+test('X16 送友风：不传 farewell 绝不出现 farewell 收场', () => {
+  for (let i = 0; i < 40; i++) {
+    const a = {
+      ...fighterAt(8, seededRng(i)),
+      weapons: [],
+      skills: ['farewell-wind' as const],
+      hp: 9_999,
+    };
+    const b = {
+      ...fighterAt(8, seededRng(i + 100)),
+      weapons: [],
+      skills: ['farewell-wind' as const],
+      hp: 9_999,
+    };
+    const events = fight(named(a, '甲'), named(b, '乙'), `no-farewell-${i}`, [
+      castOnce('farewell-wind'),
+      castOnce('farewell-wind'),
+    ]);
+    assert.ok(
+      events.some((e) => e.kind === 'skill' && e.skill === 'farewell-wind'),
+      `第 ${i} 场该用出送友风`,
+    );
+    assert.ok(!events.some((e) => e.kind === 'end' && e.reason === 'farewell'), '没有 farewell 开关就不该送走');
+  }
+});
+
+test('X16 串门送走：抽中立刻收场、施放方赢，没抽中照普通效果；同样的出手逐手重算一致', () => {
+  const a = {
+    ...fighterAt(8, seededRng(67)),
+    weapons: [],
+    skills: ['farewell-wind' as const],
+    agility: 0,
+    speed: 50,
+    hp: 9_999,
+  };
+  const b = { ...fighterAt(8, seededRng(68)), weapons: [], skills: [], agility: 0, speed: 1, hp: 9_999 };
+  const cast = castOnce('farewell-wind');
+  let sent: { seed: string; events: BattleEvent[] } | null = null;
+  let plain: BattleEvent[] | null = null;
+  for (let i = 0; i < 80 && (sent === null || plain === null); i++) {
+    const seed = `farewell-${i}`;
+    const events = fight(named(a, '甲'), named(b, '乙'), seed, [cast, unarmedOnly()], { farewell: true });
+    const end = events[events.length - 1];
+    if (end.kind === 'end' && end.reason === 'farewell') {
+      if (sent === null) sent = { seed, events };
+    } else if (plain === null && events.some((e) => e.kind === 'skip' && e.cause === 'float')) {
+      plain = events;
+    }
+  }
+  assert.ok(sent, '该有一个种子抽中送走');
+  const { seed, events } = sent!;
+  const end = events[events.length - 1];
+  assert.equal(end.kind === 'end' && end.winner, 0, '施放方赢');
+  assert.equal(end.kind === 'end' && end.reason, 'farewell');
+  const beforeEnd = events[events.length - 2];
+  assert.equal(beforeEnd?.kind, 'skill', '送走紧跟在送友风这一下后面');
+  assert.equal(beforeEnd?.kind === 'skill' && beforeEnd.skill, 'farewell-wind');
+  // 同样的种子、同一串出手，逐手重算与整场一字不差（两边各算一遍也一致）
+  const actions: [Action[], Action[]] = [[], []];
+  for (const event of events) if (event.kind === 'decide') actions[event.actor].push(event.action);
+  const stepwise = fightUntilDecision(a, b, seed, actions, { farewell: true });
+  assert.equal(stepwise.need, null);
+  assert.deepEqual(stepwise.events, events);
+  assert.deepEqual(fightUntilDecision(a, b, seed, actions, { farewell: true }).events, stepwise.events);
+  assert.ok(plain, '也该有没抽中的种子');
+  assert.ok(!plain!.some((e) => e.kind === 'end' && e.reason === 'farewell'), '没抽中就照普通效果打下去');
 });
 
 test('Y0 引擎：hpNow 从残血开打（夹在 1..上限），不带时仍是满血', () => {

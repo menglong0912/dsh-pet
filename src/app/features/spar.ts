@@ -263,6 +263,7 @@ export function createSpar(ctx: FeatureContext): Spar {
               local: show.local,
               show: sides,
               lineRng: show.lineRng,
+              farewell: show.live.farewell === true,
               decide: decideLive,
               think: () => show.think?.(),
               log: ctx.log,
@@ -276,6 +277,7 @@ export function createSpar(ctx: FeatureContext): Spar {
               local: show.local,
               show: sides,
               lineRng: show.lineRng,
+              farewell: show.live.farewell === true,
               decide: decideLive,
               think: () => show.think?.(),
               log: ctx.log,
@@ -514,6 +516,7 @@ export function createSpar(ctx: FeatureContext): Spar {
         role: 'server',
         mode: state.mode,
         seed: `${guestNonce}:${state.hostNonce}`,
+        farewell: true,
       },
       foeLine: guestLine,
       cancelled: () => ctx.state.spar !== state || ctx.state.disposed,
@@ -562,7 +565,7 @@ export function createSpar(ctx: FeatureContext): Spar {
       await runHostLiveSparShow(visitor, state, current, you, foe, guestCard, guestNonce, guestLine);
       return;
     }
-    const events = sparFight(you, foe, guestNonce, state.hostNonce);
+    const events = sparFight(you, foe, guestNonce, state.hostNonce, { farewell: true });
     const end = events[events.length - 1];
     const won = end.kind === 'end' && end.winner === 0;
     // 记账：修为进账、战绩、邻居簿、日记（冒泡的 anim 一律 false，演出马上开场）
@@ -727,7 +730,7 @@ export function createSpar(ctx: FeatureContext): Spar {
       cancelled: () => ctx.state.trip !== current || ctx.state.spar !== state,
     };
     if (!live) {
-      const events = sparFight(hostFighter, you, ownNonce, reply.nonce);
+      const events = sparFight(hostFighter, you, ownNonce, reply.nonce, { farewell: true });
       const end = events[events.length - 1];
       const won = end.kind === 'end' && end.winner === 1;
       // 感言先编好（跟着 reveal 带过去，在主人家的客人窗口里说）；编太久退回模板，别拖过主人家的时限
@@ -792,6 +795,7 @@ export function createSpar(ctx: FeatureContext): Spar {
         role: 'client',
         mode,
         seed: `${ownNonce}:${reply.nonce}`,
+        farewell: true,
         sendTurn: (body, signal) => sendSparTurn(current.host, { token: current.token, ...body }, signal),
       },
     });
