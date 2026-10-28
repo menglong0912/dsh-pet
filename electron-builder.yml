@@ -68,7 +68,8 @@ nsis:
   installerLanguages:
     - zh_CN
   language: '2052'
-  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
+  # 固定名（不带版本号），和 zip 一样让 releases/latest/download/dsh-pet-win-x64-setup.exe 这条永久链接成立
+  artifactName: ${productName}-win-${arch}-setup.${ext}
 
 # macOS：同样只出解包形态（dist-app/mac-arm64/dsh-pet.app），自用、不公证。
 #   identity "-"：ad-hoc 签名。Apple Silicon 要求可执行代码带有效签名，改名/改 Info.plist 后必须重签；

@@ -10,8 +10,9 @@
 #   ① push tag v*        —— 推 v0.3.9 / 或在网页发布带新 tag 的 Release 时触发
 #   ② workflow_dispatch  —— 手动输入 tag，重跑构建并重挂资产（检出该 tag 的代码）
 #
-# 产物：dsh-pet-win-x64.zip（固定名，内含 dsh-pet-<版本>-win-x64/ 目录）
-#   固定名是为了让 releases/latest/download/dsh-pet-win-x64.zip 这条永久链接成立。
+# 产物（都是固定名，让 releases/latest/download/<文件名> 这条永久链接成立）：
+#   dsh-pet-win-x64.zip        —— 绿色版，内含 dsh-pet-<版本>-win-x64/ 目录
+#   dsh-pet-win-x64-setup.exe  —— 安装包（electron-builder 的 nsis，配置见 electron-builder.yml）
 #
 # 前置：该 tag 的 Release 必须已经存在，否则第「确认 Release」步会失败并给出提示。
 # 权限：只需要内置 GITHUB_TOKEN 的 contents: write，不需要配置任何 secret。
@@ -92,8 +93,8 @@ jobs:
       - name: 运行测试
         run: npm test
 
-      - name: 打包解包目录
-        run: npm run dist
+      - name: 打包（解包目录 + 安装包）
+        run: node scripts/dist.mjs nsis
 
       - name: 压缩为固定名 zip
         run: |
@@ -121,7 +122,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dsh-pet-win-x64
-          path: dsh-pet-win-x64.zip
+          path: |
+            dsh-pet-win-x64.zip
+            dist-app/dsh-pet-win-x64-setup.exe
           retention-days: 7
           if-no-files-found: error
 
@@ -147,6 +150,9 @@ jobs:
           # zip 打在仓库根（GITHUB_WORKSPACE）：用绝对路径，不依赖 run 步骤的 cwd
           # （以前包在子目录时用相对路径踩过 gh 报 no matches found）。
           $zip = Join-Path $env:GITHUB_WORKSPACE 'dsh-pet-win-x64.zip'
-          if (-not (Test-Path $zip)) { Write-Error "找不到待上传的 zip：$zip"; exit 1 }
-          "上传 {0}（{1:N1} MB）→ release {2}" -f $zip, ((Get-Item $zip).Length / 1MB), $env:TAG
-          gh release upload $env:TAG $zip --clobber
+          $setup = Join-Path $env:GITHUB_WORKSPACE 'dist-app/dsh-pet-win-x64-setup.exe'
+          foreach ($file in $zip, $setup) {
+            if (-not (Test-Path $file)) { Write-Error "找不到待上传的文件：$file"; exit 1 }
+            "上传 {0}（{1:N1} MB）→ release {2}" -f $file, ((Get-Item $file).Length / 1MB), $env:TAG
+          }
+          gh release upload $env:TAG $zip $setup --clobber

@@ -7,7 +7,7 @@
  *                                    # macOS 上则出 dist-app/mac-arm64/dsh-pet.app
  *   node scripts/dist.mjs dir        # 同上，显式写法
  *   node scripts/dist.mjs nsis       # 只在 Windows：解包目录之外再出安装包
- *                                    # dist-app\dsh-pet-<版本>-win-x64-setup.exe（配置见 electron-builder.yml 的 nsis 段）
+ *                                    # dist-app\dsh-pet-win-x64-setup.exe（配置见 electron-builder.yml 的 nsis 段）
  *
  * 默认只出「解包目录」，安装包按需：
  *   - portable（单文件）是 NSIS 自解压壳，每次启动都要把整个应用目录解压到 %TEMP%
@@ -102,7 +102,9 @@ console.log(`[dist] target:        ${platformFlag.slice(2)}:${target}`);
 // 直接调用 electron-builder 的 CLI 文件而不是 `pnpm exec`：路径里有 `p'c` 这种单引号，
 // 走 shell 传参会把参数切碎；node 直接 spawn 没有这层转义问题。
 const cli = join(root, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js');
-const args = [cli, platformFlag, target, `--config.electronDist=${electronDist}`];
+// --publish never：electron-builder 在 CI 上会对 nsis 目标「隐式发布」到 GitHub，没 token 就整步失败；
+// 发 Release 由 release-app.yml 自己 gh release upload，这里只出文件。
+const args = [cli, platformFlag, target, `--config.electronDist=${electronDist}`, '--publish', 'never'];
 if (process.platform === 'darwin') args.push(`--config.mac.icon=${macIcon()}`);
 const child = spawn(process.execPath, args, {
   cwd: root,
