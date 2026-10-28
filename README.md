@@ -128,7 +128,7 @@ dsh-pet look          # 看一眼屏幕吐槽；模型不支持看图时按人�
 
 ## Windows 版的限制
 
-Windows 版只出 zip 绿色版，由 CI 构建（`.github/workflows/windows-check.yml` 手动触发：安装依赖 → 测试 → 打包 → 启动冒烟截图）。**没有 Windows 真机，只在 CI 上验证过能启动、`/health` 应答和截到宠物窗口**，日常使用没有实测。
+Windows 版有 zip 绿色版和安装包（`dsh-pet-<版本>-win-x64-setup.exe`，向导式、建桌面和开始菜单快捷方式，卸载不删宠物数据），由 CI 构建（`.github/workflows/windows-check.yml` 手动触发：安装依赖 → 测试 → 打包 → 启动冒烟截图 → 安装包静默装、启动、卸载一遍）。没签名，第一次运行 Windows 会提示「已保护你的电脑」，点「更多信息 → 仍要运行」。**没有 Windows 真机，只在 CI 上验证过能启动、`/health` 应答和截到宠物窗口**，日常使用没有实测。
 
 以下功能只在 macOS 版有，Windows 版没有：
 

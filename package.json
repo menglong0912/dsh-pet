@@ -23,7 +23,7 @@
     "icon —— 应用图标：相对 package.json 的图片路径，打包时使用 assets/logo.png",
     "scripts.bundle —— tsdown 构建 src → lib（只有 app 一个入口）",
     "scripts.build:desktop-core —— 构建桌面共享核心 runtime/electron-helper/shared-core.js（window.PetShared）",
-    "scripts.dist —— 先 bundle / build:desktop-core，再用 electron-builder 打解包目录（macOS 出 .app，Windows 出 win-unpacked）",
+    "scripts.dist —— 先 bundle / build:desktop-core，再用 electron-builder 打解包目录（macOS 出 .app，Windows 出 win-unpacked）；Windows 上 `node scripts/dist.mjs nsis` 另出安装包",
     "scripts.postinstall —— electron 42 起不自带 postinstall，装上后补跑 install.js 下载二进制（.npmrc 的 electron_mirror）",
     "scripts.start —— 开发期用 node_modules/electron 直接跑 lib/app.js（先 npm run bundle）",
     "scripts.install:mac —— 打包并替换 /Applications/dsh-pet.app（只在 macOS）",

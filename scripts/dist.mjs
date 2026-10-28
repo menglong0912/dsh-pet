@@ -6,11 +6,13 @@
  *   node scripts/dist.mjs            # 出解包目录 dist-app\win-unpacked（分发时压成 zip 即可）
  *                                    # macOS 上则出 dist-app/mac-arm64/dsh-pet.app
  *   node scripts/dist.mjs dir        # 同上，显式写法
+ *   node scripts/dist.mjs nsis       # 只在 Windows：解包目录之外再出安装包
+ *                                    # dist-app\dsh-pet-<版本>-win-x64-setup.exe（配置见 electron-builder.yml 的 nsis 段）
  *
- * 只出「解包目录」这一种形态：
+ * 默认只出「解包目录」，安装包按需：
  *   - portable（单文件）是 NSIS 自解压壳，每次启动都要把整个应用目录解压到 %TEMP%
- *     （约 400 MB、几十秒起），对 Electron 这种体量得不偿失；
- *   - nsis（安装包）对自用/绿色分发没有增量价值，配置已移除（要恢复见 electron-builder.yml 注释）。
+ *     （约 400 MB、几十秒起），对 Electron 这种体量得不偿失，不做；
+ *   - nsis（安装包）给想要桌面 / 开始菜单快捷方式、在系统里登记卸载的人用；装好后也是「摊开」的目录。
  *   目录版与 zip 分发都是「摊开」的，启动只要 2–3 秒。
  *
  * 为什么要这层封装：
@@ -61,8 +63,10 @@ function resolveElectronDist() {
 }
 
 const target = process.argv[2] ?? 'dir';
-if (target !== 'dir') {
-  console.error(`[dist] 未知目标：${target}（只出解包目录，直接运行 node scripts/dist.mjs）`);
+/** 安装包只在 Windows 上出；macOS 只有解包目录 */
+const targets = process.platform === 'win32' ? ['dir', 'nsis'] : ['dir'];
+if (!targets.includes(target)) {
+  console.error(`[dist] 未知目标：${target}（本平台可选：${targets.join(' / ')}）`);
   process.exit(2);
 }
 

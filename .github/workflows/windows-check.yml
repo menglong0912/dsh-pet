@@ -4,11 +4,12 @@
 # 没有 Windows 真机，CI 是唯一能验证「Windows 上装依赖、测试、打包、真启动」的地方：
 #   1. pnpm install  —— 确认 lockfile 与 Electron 二进制（.npmrc 的 electron_mirror）能装上；
 #   2. npm test      —— 先跑测试，测试不过就别打包；
-#   3. npm run dist  —— 先 bundle + build:desktop-core，再出 dist-app/win-unpacked；
+#   3. dist.mjs nsis —— 先 bundle + build:desktop-core，再出 dist-app/win-unpacked 和安装包 *-setup.exe；
 #   4. 冒烟脚本      —— 用临时 DSH_HOME 启动 dsh-pet.exe，等 app.json / GET /health，
 #                       借 helper 的 DSH_PET_SMOKE=1 截宠物窗口图，然后让它自己退出；
-#   5. 上传截图与日志作为 artifact；冒烟通过时把 win-unpacked 也传上去（dsh-pet-win-x64），
-#      解压后双击 dsh-pet.exe 就能用——不打 tag、不建 Release 也能从 CI 拿到 Windows 包。
+#   5. 安装包冒烟    —— 静默装到临时目录、查桌面快捷方式、启动装好的 dsh-pet.exe 冒烟、静默卸载；
+#   6. 上传截图与日志作为 artifact；冒烟通过时把绿色版（dsh-pet-win-x64，win-unpacked）
+#      和安装包（dsh-pet-win-x64-setup）也传上去——不打 tag、不建 Release 也能从 CI 拿到 Windows 包。
 #
 # 这是正式发版（release-app.yml）之外的「先跑通」检查；release-app 只负责打 zip 挂 Release。
 # 推送/触发由人来做：这个仓库没有 Windows 机器，本地不能替代 CI 的这次真启动。
@@ -52,8 +53,8 @@ jobs:
       - name: 运行测试
         run: npm test
 
-      - name: 打包解包目录
-        run: npm run dist
+      - name: 打包（解包目录 + 安装包）
+        run: node scripts/dist.mjs nsis
 
       - name: 启动应用冒烟（app.json → /health → 截图 → 自行退出）
         run: node scripts/smoke-app.mjs
@@ -66,12 +67,39 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # 静默安装：/currentuser 不弹管理员授权，/D= 必须放最后、不加引号（RUNNER_TEMP 没有空格）。
+      # 卸载程序会把自己拷到 %TEMP% 再跑，Start-Process -Wait 等不到它，所以轮询 exe 消失。
+      - name: 安装包冒烟（静默安装 → 快捷方式 → 启动 → 静默卸载）
+        run: |
+          $setup = Get-ChildItem dist-app -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $setup) { Write-Error '找不到安装包 dist-app/*-setup.exe'; exit 1 }
+          $dir = Join-Path $env:RUNNER_TEMP 'dsh-pet-installed'
+          Start-Process -Wait -FilePath $setup.FullName -ArgumentList '/S', '/currentuser', "/D=$dir"
+          $exe = Join-Path $dir 'dsh-pet.exe'
+          if (-not (Test-Path $exe)) { Write-Error "静默安装后找不到 $exe"; exit 1 }
+          $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'dsh-pet.lnk'
+          if (-not (Test-Path $lnk)) { Write-Error "没建桌面快捷方式：$lnk"; exit 1 }
+          node scripts/smoke-app.mjs --app $exe --out dist-app/smoke-installed.png
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Start-Process -Wait -FilePath (Join-Path $dir 'Uninstall dsh-pet.exe') -ArgumentList '/S', '/currentuser'
+          for ($i = 0; $i -lt 60 -and ((Test-Path $exe) -or (Test-Path $lnk)); $i++) { Start-Sleep -Seconds 1 }
+          if ((Test-Path $exe) -or (Test-Path $lnk)) { Write-Error "静默卸载后还有残留：$exe / $lnk"; exit 1 }
+          "安装 → 快捷方式 → 启动 → 卸载 都通过"
+
+      - name: 上传安装包（安装冒烟通过才传）
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-pet-win-x64-setup
+          path: dist-app/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
       - name: 上传冒烟截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-smoke-screenshot
-          path: dist-app/smoke.png
+          path: dist-app/smoke*.png
           if-no-files-found: warn
           retention-days: 7
 

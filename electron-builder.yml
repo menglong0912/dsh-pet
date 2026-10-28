@@ -48,13 +48,27 @@ electronLanguages:
   - zh_CN
   - zh-CN
 
-# 只出「解包目录」一种形态：分发时把 win-unpacked 整个压成 zip 即可（绿色版）。
-# 不做 portable（每次启动自解压，慢）也不做 nsis（安装包对自用场景没有增量价值）——
-# 真要回归安装包，把 target 改回 [nsis] 并补回 nsis 段（向导/快捷方式/卸载登记）即可。
+# 默认只出「解包目录」：分发时把 win-unpacked 整个压成 zip 即可（绿色版）。
+# 安装包（nsis）按需出：`node scripts/dist.mjs nsis`（只在 Windows 上，CI 的 windows-check 用它），
+# 解包目录照样出，安装包就是把它装进去。不做 portable（每次启动自解压，慢）。
 win:
   icon: assets/logo.png
   target:
     - dir
+
+# 安装包：向导式，可改安装目录；装到哪个用户由向导里选（默认当前用户，不弹管理员授权）。
+# 建桌面和开始菜单快捷方式，登记卸载；卸载时不删 %APPDATA% 里的宠物数据（存档、配置留着，重装接着用）。
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: dsh-pet
+  deleteAppDataOnUninstall: false
+  installerLanguages:
+    - zh_CN
+  language: '2052'
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
 
 # macOS：同样只出解包形态（dist-app/mac-arm64/dsh-pet.app），自用、不公证。
 #   identity "-"：ad-hoc 签名。Apple Silicon 要求可执行代码带有效签名，改名/改 Info.plist 后必须重签；
