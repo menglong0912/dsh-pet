@@ -22,6 +22,9 @@ import {
   type BattleEvent,
   type Action,
   startingHp,
+  statsBrief,
+  guideAction,
+  fighterSheet,
 } from './battle.ts';
 import { fighterAt, seededRng } from './battle-testkit.ts';
 
@@ -1159,4 +1162,47 @@ test('Y0 引擎：guard 替挡整下、按次数用完，事件带替挡的人',
   // 挡完以后照常掉血
   const after = events.slice(events.findIndex((e) => e.kind === 'guard' && e === blocks[1]) + 1);
   assert.ok(after.some((e) => (e.kind === 'hit' || e.kind === 'combo') && e.actor === 0 && e.damage > 0));
+});
+
+test('statsBrief / fighterSheet：切磋时把对方的属性、法宝、招式摊开', () => {
+  const f: Fighter = {
+    name: '张小宝',
+    hp: 342,
+    power: 50,
+    agility: 39,
+    speed: 38,
+    weapons: ['poker', 'firework'],
+    skills: ['bubble', 'dragon-palm'],
+  };
+  assert.equal(statsBrief(f), '血342 灵50 身39 速38');
+  assert.equal(
+    fighterSheet(f),
+    '气血 342 · 灵力 50 · 身法 39 · 遁速 38；法宝（2）：扑克牌、烟花；招式（2）：泡泡护体、降龙十八掌',
+  );
+  assert.match(
+    fighterSheet({ ...f, weapons: [], skills: [], guard: { by: '小黑', times: 2 } }),
+    /法宝（0）：无；招式（0）：无；替挡 小黑 ×2/,
+  );
+});
+
+test('guideAction：先放四门控场 / 爆发，放完丢烟花；残血生花、对方残血拳心剑', () => {
+  const view = (over: Partial<BattleView> = {}, used: SkillId[] = []): BattleView => ({
+    self: 0,
+    hp: [354, 354],
+    maxHp: [354, 354],
+    you: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], used },
+    foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS] },
+    ...over,
+  });
+  assert.deepEqual(guideAction(view()), { kind: 'skill', skill: 'dream-chant' });
+  assert.deepEqual(guideAction(view({}, ['dream-chant'])), { kind: 'skill', skill: 'farewell-wind' });
+  const opened: SkillId[] = ['dream-chant', 'farewell-wind', 'lion-roar', 'blue-whale'];
+  assert.deepEqual(guideAction(view({}, opened)), { kind: 'weapon', weapon: 'firework' });
+  assert.deepEqual(guideAction(view({ hp: [170, 354] }, opened)), { kind: 'skill', skill: 'bloom' });
+  assert.deepEqual(guideAction(view({ hp: [354, 100] }, opened)), { kind: 'skill', skill: 'finger-sword' });
+  // 自己是 1 号：血量按自己那一格看
+  assert.deepEqual(guideAction(view({ self: 1, hp: [354, 170] }, opened)), { kind: 'skill', skill: 'bloom' });
+  // 没有烟花也没剩招：退回自动挑法，挑出来的一定合法
+  const bare = view({ you: { weapons: ['poker'], skills: [], used: [] } });
+  assert.ok(legalActions(bare).some((a) => JSON.stringify(a) === JSON.stringify(guideAction(bare))));
 });

@@ -20,7 +20,7 @@ const workArea = { x: 0, y: 25, width: 1440, height: 1200 };
 const home = { left: 1000, top: 400, size: 500, bottomPad: 23 };
 const foeWindow = { x: 500, y: 420, width: 350, height: 220 };
 
-test('arenaBounds：居中在两只宠物中间，落在它们头顶，宽度夹在 200–520', () => {
+test('arenaBounds：居中在两只宠物中间，落在它们头顶，宽度夹在 320–520', () => {
   const bounds = arenaBounds(home, foeWindow, workArea);
   // 两只的外沿跨 488–1512（约 1024），夹到上限 520 并居中在中间
   assert.equal(bounds.width, 520);
@@ -33,9 +33,9 @@ test('arenaBounds：居中在两只宠物中间，落在它们头顶，宽度夹
   assert.ok(Math.abs(alone.x + alone.width / 2 - 750) <= 1, `居中在宠物上方：x=${alone.x}`);
   const atRight = arenaBounds({ ...home, left: 1200 }, null, workArea);
   assert.ok(atRight.x + atRight.width <= workArea.x + workArea.width, '放不下就夹回屏内');
-  // 挨得很近的两只：不小于 200
+  // 挨得很近的两只：不小于 320
   const near = arenaBounds({ ...home, left: 500 }, { x: 600, y: 0, width: 100, height: 100 }, workArea);
-  assert.ok(near.width >= 200, `至少 200 宽：${near.width}`);
+  assert.ok(near.width >= 320, `至少 320 宽：${near.width}`);
   // 宠物贴着屏幕左边、对手在屏外：夹回屏内
   const atEdge = arenaBounds({ ...home, left: 0 }, { x: -300, y: 0, width: 400, height: 200 }, workArea);
   assert.ok(atEdge.x >= workArea.x, `不越出屏幕左沿：x=${atEdge.x}`);

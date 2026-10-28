@@ -144,7 +144,8 @@ export function createTrial(ctx: FeatureContext): Trial {
       return;
     }
     let events: BattleEvent[];
-    if (mode === 'auto') {
+    if (mode === 'auto' || mode === 'guide') {
+      // 攻略只给切磋用（对自动挑法的打法）；心魔这里照自动
       // 全自动：和以前完全一样——整场算好、整场时间线
       panel.close();
       if (ctx.state.actionPanel === panel) ctx.state.actionPanel = null;

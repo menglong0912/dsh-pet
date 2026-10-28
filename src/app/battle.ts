@@ -1270,6 +1270,24 @@ export function shadowOf(f: Fighter): Fighter {
   };
 }
 
+/** 四项属性一行（擂台名牌上用）：「血342 灵50 身39 速38」 */
+export function statsBrief(f: Fighter): string {
+  return `血${f.hp} 灵${f.power} 身${f.agility} 速${f.speed}`;
+}
+
+/** 一位斗法者的全部家当（切磋开场记日志用）：属性、法宝、招式，加持 / 替挡有就带上 */
+export function fighterSheet(f: Fighter): string {
+  const parts = [
+    `气血 ${f.hp} · 灵力 ${f.power} · 身法 ${f.agility} · 遁速 ${f.speed}`,
+    `法宝（${f.weapons.length}）：${f.weapons.map((id) => WEAPONS[id]?.name ?? id).join('、') || '无'}`,
+    `招式（${f.skills.length}）：${f.skills.map((id) => SKILLS[id]?.name ?? id).join('、') || '无'}`,
+  ];
+  if (f.mods?.dodge) parts.push(`闪避加成 ${Math.round(f.mods.dodge * 100)}%`);
+  if (f.mods?.desperate) parts.push(`背水一战 ×${f.mods.desperate}`);
+  if (f.guard) parts.push(`替挡 ${f.guard.by} ×${f.guard.times}`);
+  return parts.join('；');
+}
+
 /**
  * 能力上限：X5 校验名帖用。按 X1 的成长规则推到头（初始各 2–5、小境界随机一项 +1～2 且气血 +6、
  * 大境界突破三项各 +1 且气血 +20），再留 10% 余量。
@@ -1285,4 +1303,22 @@ export function statCap(stage: number): { hp: number; power: number; agility: nu
     agility: margin(5 + small * 2 + big),
     speed: margin(5 + small * 2 + big),
   };
+}
+
+/**
+ * 攻略出招（满属性互打模拟出来的固定打法，对自动挑法约九成五胜率）：
+ * 自己气血过半前先生花、对方剩不到 35% 用五指拳心剑收尾；
+ * 否则魂牵梦绕 → 送友风 → 狮子吼 → 蓝鲸现世依次放，放完一直丢烟花。没有的招 / 法宝就跳过。
+ */
+export function guideAction(view: BattleView): Action {
+  const legal = legalActions(view);
+  const has = (skill: SkillId) => legal.some((a) => a.kind === 'skill' && a.skill === skill);
+  const self = view.self;
+  const foe = self === 0 ? 1 : 0;
+  if (has('bloom') && view.hp[self] * 2 < view.maxHp[self]) return { kind: 'skill', skill: 'bloom' };
+  if (has('finger-sword') && view.hp[foe] * 100 < view.maxHp[foe] * 35) return { kind: 'skill', skill: 'finger-sword' };
+  for (const skill of ['dream-chant', 'farewell-wind', 'lion-roar', 'blue-whale'] as const)
+    if (has(skill)) return { kind: 'skill', skill };
+  if (view.you.weapons.includes('firework')) return { kind: 'weapon', weapon: 'firework' };
+  return fallbackAction(view, 'guide', view.you.used.length);
 }

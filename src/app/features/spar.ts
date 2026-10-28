@@ -5,6 +5,7 @@ import { askAiTurn, legalChoices, startLiveClient, startLiveServer } from '../ba
 import { createDashRig, screenUnion } from '../battle-dash';
 import type { DashFoe } from '../battle-dash';
 import type { TurnDecision } from '../battle-live';
+import { fighterSheet, guideAction, statsBrief } from '../battle';
 import type { Action, BattleEvent, BattleView, Fighter } from '../battle';
 import { BattleShow, LINE_MS, SHOW_ANIMS, swapSides, timeline } from '../battle-show';
 import type { Shot } from '../battle-show';
@@ -251,9 +252,12 @@ export function createSpar(ctx: FeatureContext): Spar {
     const windows: SparWindows = { foe: ownFoe ? foe : null, arena, fx, panel: null };
     ctx.state.sparWindows.add(windows);
     const dash = dashRig(foe, arena, fx);
+    // 名帖里本来就带着对方的全部属性：擂台名牌上两边都亮四项，法宝招式整份记进日志
+    ctx.log(`切磋对手 ${foeFighter.name}（${foeStage}）：${fighterSheet(foeFighter)}`);
+    ctx.log(`自家 ${localFighter.name}（${localStage}）：${fighterSheet(localFighter)}`);
     const scoreboard = arenaScoreboard({
-      self: { label: `${localFighter.name} · ${localStage}`, maxHp: localFighter.hp },
-      foe: { label: `${foeFighter.name} · ${foeStage}`, maxHp: foeFighter.hp },
+      self: { label: `${localFighter.name} · ${localStage} · ${statsBrief(localFighter)}`, maxHp: localFighter.hp },
+      foe: { label: `${foeFighter.name} · ${foeStage} · ${statsBrief(foeFighter)}`, maxHp: foeFighter.hp },
     });
     const sides = {
       self: {
@@ -301,6 +305,7 @@ export function createSpar(ctx: FeatureContext): Spar {
     const decideLive = async (view: BattleView, _index: number, signal: AbortSignal): Promise<TurnDecision | null> => {
       const mode = show.live?.mode ?? 'auto';
       if (mode === 'auto') return null;
+      if (mode === 'guide') return { action: guideAction(view) };
       if (mode === 'ai') {
         const reply = await askAiTurn({
           ai: ctx.ai,

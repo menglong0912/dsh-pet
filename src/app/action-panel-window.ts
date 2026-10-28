@@ -14,8 +14,8 @@
  */
 import type { PetBox, Rect, WindowElectron, WindowLike } from './visit-windows';
 
-/** 出招方式（X17）：自动照旧整场算好；AI / 手动逐手出招 */
-export type TurnMode = 'auto' | 'ai' | 'manual';
+/** 出招方式（X17）：自动照旧整场算好；AI / 手动 / 攻略（固定打法，见 battle.ts guideAction）逐手出招 */
+export type TurnMode = 'auto' | 'ai' | 'manual' | 'guide';
 
 /** 一行按钮的高度与行距（对齐 panelPage 的 CSS：12px 字 + 上下 5px 内边距 + 边框，留一点余量） */
 const ROW_HEIGHT = 30;
@@ -296,10 +296,11 @@ export function openActionPanel(
           { pick: 1, label: '自动' },
           { pick: 2, label: 'AI 出招', ...(aiReady ? {} : { disabled: true, note: '模型没配好' }) },
           { pick: 3, label: '手动' },
+          { pick: 4, label: '攻略' },
         ],
       };
       return ask(view, timeoutMs, null, 1).then((pick) =>
-        pick === 1 ? 'auto' : pick === 2 ? 'ai' : pick === 3 ? 'manual' : null,
+        pick === 1 ? 'auto' : pick === 2 ? 'ai' : pick === 3 ? 'manual' : pick === 4 ? 'guide' : null,
       );
     },
     chooseAction(actions, timeoutMs) {
