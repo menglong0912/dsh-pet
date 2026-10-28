@@ -51,7 +51,6 @@ function fakeElectron() {
     isDestroyed: () => destroyed,
     getBounds: () => ({ x: 0, y: 0, width: 0, height: 0 }),
     setBounds: () => undefined,
-    setOpacity: () => undefined,
     setIgnoreMouseEvents: () => undefined,
     setAlwaysOnTop: () => undefined,
     setVisibleOnAllWorkspaces: () => undefined,

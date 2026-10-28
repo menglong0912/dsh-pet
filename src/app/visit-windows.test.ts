@@ -2,11 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import {
+  AWAY_OPACITY,
+  fadeHome,
   followGuest,
   guestBounds,
   guestPage,
   GUEST_BUBBLE_OVERLAP_RATIO,
   guestSide,
+  opacityScript,
   openGuestWindow,
   petBoxFrom,
   petHitRect,
@@ -260,6 +263,13 @@ test('guestPage：两种色都在页面里，arrive 的 tint 决定用哪一套�
   assert.equal(guestPage.includes('innerHTML'), false);
 });
 
+/** 在假页面里跑一遍设透明度的脚本，读回页面最终的 opacity */
+function pageOpacity(code: string): number {
+  const document = { documentElement: { style: { opacity: '' } } };
+  runInNewContext(code, { document });
+  return Number(document.documentElement.style.opacity);
+}
+
 /** 假客人窗口：记录构造参数与 executeJavaScript 的调用 */
 function fakeWindows() {
   const created: Record<string, unknown>[] = [];
@@ -267,13 +277,11 @@ function fakeWindows() {
   const ignore: boolean[] = [];
   const cursors: { x: number; y: number }[] = [];
   const boundsCalls: Array<{ x: number; y: number; width: number; height: number }> = [];
-  const opacities: number[] = [];
   let destroyed = false;
   const win: WindowLike = {
     isDestroyed: () => destroyed,
     getBounds: () => ({ x: 0, y: 0, width: 0, height: 0 }),
     setBounds: (rect) => void boundsCalls.push(rect),
-    setOpacity: (opacity) => void opacities.push(opacity),
     setIgnoreMouseEvents: (value) => void ignore.push(value),
     setAlwaysOnTop: () => undefined,
     setVisibleOnAllWorkspaces: () => undefined,
@@ -312,7 +320,10 @@ function fakeWindows() {
     ignore,
     cursors,
     boundsCalls,
-    opacities,
+    /** 送进页面的不透明度（按顺序） */
+    get opacities() {
+      return executed.filter((code) => code.startsWith('document.documentElement.style.opacity')).map(pageOpacity);
+    },
     get destroyed() {
       return destroyed;
     },
@@ -445,6 +456,38 @@ test('GuestWindow 冲刺 / 送走（X16）：pin 停住跟随、moveTo 直接挪
   guest.floatAway(40);
   await new Promise((done) => setTimeout(done, 100));
   assert.ok(guest.bounds().y < 260, `整扇窗往上飘：${guest.bounds().y}`);
-  assert.equal(fake.opacities[fake.opacities.length - 1], 0, '飘到顶时完全透明');
+  assert.equal(fake.opacities[fake.opacities.length - 1], 0, '飘到顶时完全透明（透明度写在页面里）');
   guest.close(0);
+});
+
+test('fadeHome：透明度写进自家宠物页面，不调 setOpacity（Win10 关硬件加速时会让透明窗口停止出画、卡死）', () => {
+  const opacityCalls: number[] = [];
+  const executed: Record<string, string[]> = { home: [], guest: [] };
+  const windowAt = (name: 'home' | 'guest', url: string) =>
+    ({
+      isDestroyed: () => false,
+      // 真 BrowserWindow 有 setOpacity：这里记下来，断言一次都不调
+      setOpacity: (opacity: number) => void opacityCalls.push(opacity),
+      webContents: {
+        getURL: () => url,
+        executeJavaScript: (code: string) => {
+          executed[name].push(code);
+          return Promise.resolve(undefined);
+        },
+      },
+    }) as unknown as WindowLike;
+  const electron = {
+    BrowserWindow: {
+      getAllWindows: () => [
+        windowAt('home', 'file:///app/runtime/electron-helper/index.html'),
+        windowAt('guest', 'http://127.0.0.1:1/app/guest'),
+      ],
+    },
+  } as unknown as WindowElectron;
+  fadeHome(electron, AWAY_OPACITY);
+  fadeHome(electron, 1);
+  assert.deepEqual(opacityCalls, [], '不碰窗口级透明度');
+  assert.deepEqual(executed.home, [opacityScript(AWAY_OPACITY), opacityScript(1)]);
+  assert.deepEqual(executed.home.map(pageOpacity), [AWAY_OPACITY, 1], '页面里的脚本真能把透明度设上');
+  assert.deepEqual(executed.guest, [], '只动自家宠物的窗口');
 });

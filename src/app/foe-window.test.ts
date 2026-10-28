@@ -61,7 +61,6 @@ function fakeWindows() {
     isDestroyed: () => destroyed,
     getBounds: () => ({ x: 0, y: 0, width: 0, height: 0 }),
     setBounds: (rect) => void boundsCalls.push(rect),
-    setOpacity: () => undefined,
     setIgnoreMouseEvents: (value) => void ignored.push(value),
     setAlwaysOnTop: () => undefined,
     setVisibleOnAllWorkspaces: () => undefined,

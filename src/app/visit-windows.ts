@@ -29,7 +29,6 @@ export interface WindowLike {
   isDestroyed(): boolean;
   getBounds(): Rect;
   setBounds(rect: Rect): void;
-  setOpacity(opacity: number): void;
   setIgnoreMouseEvents(ignore: boolean): void;
   setAlwaysOnTop(flag: boolean, level: 'floating'): void;
   setVisibleOnAllWorkspaces(visible: boolean, options: { visibleOnFullScreen: boolean }): void;
@@ -97,9 +96,22 @@ function homeWindows(electron: WindowElectron): WindowLike[] {
   );
 }
 
-/** 出门 / 转播 / 回家：自家宠物窗口的不透明度（AWAY_OPACITY / RELAY_OPACITY / 1） */
+/**
+ * 设页面整体不透明度的脚本。透明度一律写进页面，不用 BrowserWindow.setOpacity：Windows 上关了硬件加速，
+ * 透明窗口靠 UpdateLayeredWindow 逐帧出画，setOpacity 落到 SetLayeredWindowAttributes 之后
+ * UpdateLayeredWindow 就一直失败（微软文档写明），窗口画面定住、渲染进程却照跑——Win10 上出门做客后
+ * 自家宠物看着就卡死了。CI 上 Server 2022（build 20348，和 Win10 同一条出画路）实测定住；
+ * Win11 22H2 起 Chromium 换了出画方式，不受影响。
+ */
+export function opacityScript(opacity: number): string {
+  return `document.documentElement.style.opacity = ${JSON.stringify(String(opacity))}`;
+}
+
+/** 出门 / 转播 / 回家：自家宠物页面的不透明度（AWAY_OPACITY / RELAY_OPACITY / 1） */
 export function fadeHome(electron: WindowElectron, opacity: number): void {
-  for (const win of homeWindows(electron)) win.setOpacity(opacity);
+  for (const win of homeWindows(electron)) {
+    void win.webContents.executeJavaScript(opacityScript(opacity)).catch(() => undefined);
+  }
 }
 
 /** pet:set-bounds 的载荷 → 包围盒（窗口坐标 + 左 / 上余量 = 包围盒）；字段不全时 null */
@@ -477,7 +489,7 @@ export function openGuestWindow(
         const eased = 1 - (1 - p) * (1 - p);
         bounds = { ...bounds, y: Math.round(startY - lift * eased) };
         win.setBounds(bounds);
-        win.setOpacity(1 - eased);
+        run(opacityScript(1 - eased));
         if (p >= 1) {
           if (floatTimer !== null) clearInterval(floatTimer);
           floatTimer = null;

@@ -51,7 +51,6 @@ export interface FakeWin {
   isDestroyed(): boolean;
   getBounds(): { x: number; y: number; width: number; height: number };
   setBounds(rect: { x: number; y: number; width: number; height: number }): void;
-  setOpacity(opacity: number): void;
   setIgnoreMouseEvents(ignore: boolean): void;
   setAlwaysOnTop(flag: boolean, level: 'floating'): void;
   setVisibleOnAllWorkspaces(visible: boolean, options: { visibleOnFullScreen: boolean }): void;
@@ -84,7 +83,6 @@ export function fakeWindow(url: string): FakeWin {
     isDestroyed: () => win.destroyed,
     getBounds: () => ({ x: 0, y: 0, width: 200, height: 200 }),
     setBounds: () => undefined,
-    setOpacity: () => undefined,
     setIgnoreMouseEvents: () => undefined,
     setAlwaysOnTop: () => undefined,
     setVisibleOnAllWorkspaces: () => undefined,

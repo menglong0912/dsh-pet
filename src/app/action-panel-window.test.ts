@@ -16,7 +16,6 @@ function fakeWindow(): WindowLike & { calls: string[]; destroyed: boolean; hidde
     isDestroyed: () => win.destroyed,
     getBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     setBounds: () => undefined,
-    setOpacity: () => undefined,
     setIgnoreMouseEvents: () => undefined,
     setAlwaysOnTop: () => undefined,
     setVisibleOnAllWorkspaces: () => undefined,

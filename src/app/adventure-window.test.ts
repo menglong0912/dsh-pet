@@ -197,7 +197,6 @@ function fakeWindows() {
       // Electron 挪完窗口会发 moved：自己挪的也要走一遍，才能确认没被当成主人拖的
       onMoved?.();
     },
-    setOpacity: () => undefined,
     setIgnoreMouseEvents: () => undefined,
     setAlwaysOnTop: () => undefined,
     setVisibleOnAllWorkspaces: () => undefined,
