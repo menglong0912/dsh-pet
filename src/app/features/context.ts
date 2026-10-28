@@ -52,6 +52,8 @@ export interface FeatureElectron {
   screen: {
     getCursorScreenPoint(): { x: number; y: number };
     getDisplayNearestPoint(point: { x: number; y: number }): { id: number; workArea: Rect };
+    /** 全部显示器（X16 冲刺的归一化基准：工作区并集）；测试里的假 screen 可以不给 */
+    getAllDisplays?(): Array<{ id: number; workArea: Rect; bounds?: Rect }>;
   };
   systemPreferences: { getMediaAccessStatus(mediaType: 'screen'): string };
   shell: { openExternal(url: string): Promise<void>; openPath(path: string): Promise<string> };
@@ -157,6 +159,14 @@ export interface Trip {
   /** 下一句的定时器 */
   talkTimer: ReturnType<typeof setTimeout> | null;
   pingTimer: ReturnType<typeof setInterval>;
+  /** 主人家请回时自家还在演送走那一拍（X16）：先记下，演到了再回家 */
+  pendingHome?: 'sent-home' | null;
+  /** 这一场以送友风收场（X16）：等 sent-home 的时候按 `farewell` 记，不按普通请回 */
+  farewell?: boolean;
+  /** 送友风是自己放的（X16）：回家日记照实说「把对方送得飘起来」 */
+  farewellBySelf?: boolean;
+  /** 演完送友风以后等 sent-home 的兜底定时器（15 秒没等到就自己 /v1/leave） */
+  farewellTimer?: ReturnType<typeof setTimeout> | null;
 }
 
 /** 来自家做客的客人 */
@@ -180,8 +190,8 @@ export interface Hosting {
   openerTimer: ReturnType<typeof setTimeout> | null;
 }
 
-/** 回家的原因：到点 / 主人叫回（含家里有话要说、关了串门、退出）/ 被对方请回 / 失联 */
-export type HomeReason = 'time-up' | 'called' | 'sent-home' | 'lost';
+/** 回家的原因：到点 / 主人叫回（含家里有话要说、关了串门、退出）/ 被对方请回 / 失联 / 被送友风送走（X16） */
+export type HomeReason = 'time-up' | 'called' | 'sent-home' | 'lost' | 'farewell';
 
 /** 说一句话的选项：配图（表情包池里的名称，插件按池校验）；要不要联动播一段说话动画；气泡显示多久 */
 export interface SayOptions {
@@ -400,6 +410,20 @@ export interface FeatureState {
   duelAccepted: DuelAccepted | null;
 }
 
+/**
+ * 送客（X16 串门里送走也走这一条）：
+ *   - `farewell` 给告别的话（空串 = 不说）；
+ *   - `wave` 要不要挥手；
+ *   - `floatAway` 客人窗口整扇往上飘、淡出（被送友风送走）；
+ *   - `closeMs` 多久以后关窗（飘走的给 1.5 秒，普通送客 5 秒）。
+ */
+export interface GuestOffOptions {
+  farewell?: string;
+  wave?: boolean;
+  floatAway?: boolean;
+  closeMs?: number;
+}
+
 /** 各块之间经上下文调的这些函数：入口全部挂好以后才会被调用（挂之前只建对象、存回调） */
 export interface FeatureFunctions {
   petId(): string;
@@ -427,7 +451,7 @@ export interface FeatureFunctions {
   closeHost(): Promise<void>;
   visitActions(): Map<string, () => unknown>;
   letIn(accept: boolean): void;
-  sendGuestHome(): void;
+  sendGuestHome(options?: GuestOffOptions): void;
   goVisit(id: string): Promise<void>;
   visitLine(instruction: string, fallback: string): Promise<string>;
   notesOn(): boolean;

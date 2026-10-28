@@ -11,6 +11,8 @@ import { rngFrom } from './battle';
 import type { BattleEvent, SkillId } from './battle';
 import { startLiveBattle } from './battle-live';
 import type { LiveBattle } from './battle-live';
+import { createDashRig, screenUnion } from './battle-dash';
+import type { DashRig } from './battle-dash';
 import { BattleShow, quickTimeline, timeline } from './battle-show';
 import type { Shot, ShowSides, Step } from './battle-show';
 import { arenaScoreboard, openArenaWindow } from './arena-window';
@@ -49,6 +51,8 @@ export interface AdventureShowDeps {
   setLiveBattle: (live: LiveBattle | null) => void;
   refreshMenu: () => void;
   playExtra: (anim: string, options?: { facing?: 'left' | 'right'; rate?: number }) => void;
+  /** 自家宠物按 `POST /position` 的 `line` 挪（X16 冲刺用；带演出锁由 features 的 petRequest 负责） */
+  movePet: (x: number, y: number, durationMs: number) => void;
   say: (text: string, options: { anim: false; durationMs: number }) => void;
   /** 当前境界（擂台自家那条的标签） */
   stageLabel: () => string;
@@ -124,6 +128,7 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
   function showSides(
     scene: FightWindows & { prefix: string },
     scoreboard: (hp: [number, number]) => ArenaUpdate,
+    dash: DashRig,
   ): ShowSides {
     return {
       self: {
@@ -140,7 +145,23 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
         scene.fx.place();
       },
       shoot: (shot: Shot, who: 0 | 1) => scene.fx.fire(shot, who),
+      dash: (who, dir, ms) => dash.run(who, dir, ms),
+      dashEnd: (force) => dash.end(force),
     };
+  }
+
+  /** 一场的冲刺（X16）：秘境对手窗口钉住按帧挪，擂台和特效层按开场站位摆 */
+  function dashOf(scene: FightWindows): DashRig {
+    return createDashRig({
+      box: deps.home,
+      union: () => screenUnion(deps.electron.screen),
+      foe: scene.foe,
+      pinStage: (on) => {
+        scene.arena.pin(on);
+        scene.fx.pin(on);
+      },
+      moveSelf: (x, y, ms) => deps.movePet(x, y, ms),
+    });
   }
 
   async function fight(request: AdventureFightRequest): Promise<void> {
@@ -161,7 +182,7 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
       : quickTimeline(request.result.events, names, rng, skills, options);
     const show = new BattleShow(
       steps,
-      showSides(scene, (hp) => scoreboard(hp, scene.foe.side === 'left')),
+      showSides(scene, (hp) => scoreboard(hp, scene.foe.side === 'left'), dashOf(scene)),
     );
     deps.setBattle(show);
     deps.refreshMenu();
@@ -189,7 +210,7 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
       b: request.b,
       seed: request.seed,
       mode: request.mode,
-      show: showSides(scene, (hp) => scoreboard(hp, scene.foe.side === 'left')),
+      show: showSides(scene, (hp) => scoreboard(hp, scene.foe.side === 'left'), dashOf(scene)),
       lineRng: rngFrom(`${request.seed}:show`),
       timeline: { foe: { prefix: scene.prefix } },
       initialActions: request.initialActions,

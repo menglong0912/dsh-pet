@@ -74,6 +74,8 @@ const SLEEP_ANIM = '受击-犯困';
 const FREEZE_ANIM = '受击-冻僵';
 /** 魂牵梦绕把人牵进梦里：跳过那一拍再演一遍入梦（X9） */
 const DREAM_ANIM = '受击-入梦';
+/** 被送友风吹得飘起来（X16）：`skip.cause = 'float'` 那一拍重播这一段；串门里送走也用它 */
+const FLOAT_ANIM = '受击-飘起';
 /**
  * 魂牵梦绕的四句咒（原著里配着「幽魂魔尊」那一段的原文）：
  * 「魂牵梦绕风云荡，星圆土方三界坛。生死轮回一门开，再启杀劫洗铅华。」
@@ -100,6 +102,8 @@ const ANIM_MS: Record<string, number> = {
   // 渡劫失败那一下（X4）：动画池里的现有素材，4.9 秒（名字形态播，见 TRIBULATION_LOSS_ANIM）
   '工作状态-垂头叹气冒汗': 5_000,
   '招式-假死遁': 5_000,
+  // 送友风把人吹得飘起来的那一段是 5 秒
+  '受击-飘起': 5_000,
   // 白凝冰的绝招是 5 秒（YA 素材清单里唯一一段 5 秒的对手动作）
   '对手-白凝冰-绝招': 5_000,
 };
@@ -122,6 +126,8 @@ const REACTION_WINDUP_MS: Record<string, number> = {
   '受击-墨汁': 125,
   // 入梦：低下头、眨眼的那一刻（实测 292ms）
   '受击-入梦': 292,
+  // 飘起：第 1 帧就开始飘（实测 42ms）
+  '受击-飘起': 42,
   '受击-震耳': 250,
   '受击-绊脚': 292,
   '受击-砸头': 292,
@@ -143,7 +149,7 @@ const REACTION_WINDUP_MS: Record<string, number> = {
 const FOE_WINDUP_MS = 150;
 
 /** 飞行轨迹（§X7）：直飞 / 抛物线 / 贴地 / 慢飘 / 高抛砸落 / 天雷（乌云 + 闪电，渡劫用）/ 回旋（银托盘，X8） */
-export type FxTrack = 'line' | 'thrust' | 'arc' | 'ground' | 'float' | 'slam' | 'bolt' | 'boomerang';
+export type FxTrack = 'line' | 'thrust' | 'arc' | 'ground' | 'float' | 'slam' | 'bolt' | 'boomerang' | 'surge';
 
 /**
  * 特效贴图名（`assets/pic/fx/<名>.png`）：§X7 的素材清单。
@@ -166,6 +172,9 @@ export type FxAssetName =
   | '手刀'
   | '闪电'
   | '乌云'
+  // X16：降龙十八掌的金龙、送友风的清风
+  | '金龙'
+  | '清风'
   // X8
   | '雪球'
   | '羽毛'
@@ -200,7 +209,9 @@ export type FxAssetName =
   | '命中-墨汁'
   | '命中-魂碎'
   | '剑光'
-  | '命中-剑痕';
+  | '命中-剑痕'
+  // X16：降龙十八掌的命中（龙吟）
+  | '命中-龙吟';
 
 /** 各轨迹的飞行时间（`bolt` = 乌云淡入 + 闪电劈下） */
 const FLIGHT_MS: Record<FxTrack, number> = {
@@ -214,6 +225,8 @@ const FLIGHT_MS: Record<FxTrack, number> = {
   bolt: CLOUD_MS + BOLT_MS,
   // 回旋：擦过正面的那一刻；绕到背后再磕一下、飞回手里见 BOOMERANG_*_MS
   boomerang: 340,
+  // 降龙十八掌的金龙从掌心冲出去到扑在对方身上，约 200ms（X16）
+  surge: 200,
 };
 
 /** 银托盘：放出后多久绕到背后磕第二下（第二段的命中时刻） */
@@ -249,6 +262,12 @@ export interface AttackShow {
   action: string;
   /** 飞行物：不给 = 作用在自己身上的整段素材（回血那类），没有飞行物 */
   fly?: Fly;
+  /**
+   * 冲刺（X16）：出手方在 `outMs` 里冲到对手身前（停在离对方约半个身位处），
+   * 出完招再在 `backMs` 里退回开场的位置。位移靠挪窗口，不画在素材里。
+   * 这一批只给降龙十八掌用；鲸尾、直拳这些照旧原地出招。
+   */
+  dash?: { outMs: number; backMs: number };
 }
 
 /**
@@ -304,6 +323,17 @@ export const ATTACK_SHOW: Record<string, AttackShow> = {
   },
   // 五指拳心剑（X9）：右拳举过头顶，拳心射出一道剑光——原著「剑光之快，匪夷所思」，几乎是闪就到
   'finger-sword': { action: '出手-拳心剑', fly: { kind: '剑光', track: 'thrust', hitFx: '命中-剑痕' } },
+  // 降龙十八掌（X16）：冲过去推掌，金龙从掌心扑到对方身上（画在特效层，比宠物大）；不出飞行物道具
+  'dragon-palm': {
+    action: '出手-降龙',
+    dash: { outMs: 260, backMs: 320 },
+    fly: { kind: '金龙', track: 'surge', hitFx: '命中-龙吟' },
+  },
+  // 送友风（X16）：挥手道别，清风慢慢飘过去；被打中的人飘起来（skip.cause = 'float'）
+  'farewell-wind': {
+    action: '出手-送友风',
+    fly: { kind: '清风', track: 'float', hitFx: '命中-旋风', react: FLOAT_ANIM },
+  },
   // 回血：作用在自己身上，照旧播整段素材，没有飞行物
   bloom: { action: '招式-凭空生花' },
   // 三种追加出手
@@ -422,6 +452,10 @@ export const RELEASE: Record<string, { ms: number; hand: [number, number]; catch
   '出手-魂牵梦绕': { ms: 1_600, hand: [305, 200] },
   // 五指拳心剑：拳头举到头顶上方、停住的那一刻，剑光从拳心射出（实测 2.3 秒起拳心停在 272,92）（X9）
   '出手-拳心剑': { ms: 2_300, hand: [272, 92] },
+  // 降龙十八掌：推掌伸到最远那一帧（X16）
+  '出手-降龙': { ms: 2_250, hand: [190, 219] },
+  // 送友风：挥手后往外一送那一刻，清风从这里飘出去（X16）
+  '出手-送友风': { ms: 2_750, hand: [228, 222] },
   // 对手动作（Y2）：离手时刻与手的位置按 YA 素材「量出来的时刻」填；熔岩鳄、他派蛊师复用狮獒 / 韩不留，
   // 调用方把它们的动画前缀传成被复用的那只
   '对手-野狗-出手': { ms: 1_833, hand: [0, 250] },
@@ -522,6 +556,8 @@ export interface Shot {
   mirror?: boolean;
   /** 反向（鲸吞）：从对方身上飞回出手方嘴边 */
   reverse?: boolean;
+  /** 这一下带着降龙十八掌的后劲（X16）：命中处多打一发小一号的命中-龙吟 */
+  surge?: true;
   /** 银托盘的回旋（X8）：第二段绕到背后磕的时刻、飞回手里的时刻，以及第二段的结果 */
   boomerang?: { secondMs: number; totalMs: number; second: 'hit' | 'blocked' | 'decoy' | 'miss' | 'none' };
 }
@@ -543,6 +579,8 @@ export interface Step {
   line?: string;
   /** 这一步放出的飞行物（X7） */
   shot?: Shot;
+  /** 冲刺（X16）：这一步让 `who` 在 `ms` 里冲到对手身前（out）或退回原位（back） */
+  dash?: { dir: 'out' | 'back'; ms: number };
   /** 这一步之后的气血（擂台照它刷新） */
   hp: [number, number];
   closing?: boolean;
@@ -584,7 +622,7 @@ function showOf(action: Action, who: 0 | 1, prefix?: string): AttackShow {
     return ATTACK_SHOW.unarmed;
   }
   const key = action.kind === 'weapon' ? action.weapon : action.kind === 'skill' ? action.skill : 'unarmed';
-  // 新招式的演出表还没补（X16 的降龙十八掌 / 送友风）时先按空手演：保证这场演得完、不报错
+  // 演出表里没有的招式（以后新增、还没来得及配演出）先按空手演：保证这场演得完、不报错
   return ATTACK_SHOW[key] ?? ATTACK_SHOW.unarmed;
 }
 
@@ -701,6 +739,8 @@ interface Slot {
   beast: boolean;
   /** 银托盘：第一段放出的时刻（第二段的命中按它算） */
   boomerangLaunch?: number;
+  /** 冲刺（X16）：退回原位的那一步已经排过了（一格只退一次） */
+  dashBack?: boolean;
 }
 
 /**
@@ -829,6 +869,7 @@ export function timeline(
       wild?: boolean;
       decoy?: boolean;
       mirror?: boolean;
+      surge?: boolean;
       boomerang?: Shot['boomerang'];
     } = {},
   ): number => {
@@ -847,6 +888,7 @@ export function timeline(
       ...(extra.wild ? { wild: true } : {}),
       ...(extra.mirror ? { mirror: true } : {}),
       ...(extra.decoy ? { decoy: true } : {}),
+      ...(extra.surge ? { surge: true as const } : {}),
       ...(fly.reverse ? { reverse: true } : {}),
       ...(extra.boomerang ? { boomerang: extra.boomerang } : {}),
     };
@@ -863,7 +905,15 @@ export function timeline(
     current: Slot,
     index: number,
     hp: [number, number],
-    flags: { miss?: boolean; blocked?: boolean; wild?: boolean; decoy?: boolean; mirror?: boolean; twin?: boolean },
+    flags: {
+      miss?: boolean;
+      blocked?: boolean;
+      wild?: boolean;
+      decoy?: boolean;
+      mirror?: boolean;
+      twin?: boolean;
+      surge?: boolean;
+    },
   ): { launch: number; impact: number; reacts: boolean } => {
     const segment = takeSegment(current);
     const k = current.segments - 1;
@@ -925,7 +975,17 @@ export function timeline(
       overrideActor = override === undefined ? null : event.actor;
       const show = showOf(event.action, event.actor, foePrefix);
       const hits = hitsOf(event.action, events, i);
+      const release = cursor + releaseOffset(show.action);
       pushAnim({ at: cursor, who: event.actor, anim: show.action, rate: actionRate(show.action), hp: event.hp });
+      // 冲刺（X16）：出掌前 outMs 冲过去，正好在离手那一刻到对手身前（渡劫没有对手，不冲）
+      if (show.dash && !tribulation) {
+        steps.push({
+          at: Math.max(cursor, release - show.dash.outMs),
+          who: event.actor,
+          dash: { dir: 'out', ms: show.dash.outMs },
+          hp: event.hp,
+        });
+      }
       // 魂牵梦绕（X9）：原著那四句咒先念出来，命中那一刻再接结算台词（一句顶一句，正好铺满这一格）
       if (event.action.kind === 'skill' && event.action.skill === 'dream-chant' && override === undefined) {
         steps.push({ at: cursor, who: event.actor, line: DREAM_CHANT, hp: event.hp });
@@ -940,7 +1000,7 @@ export function timeline(
           show,
           fly: show.fly,
           hits,
-          release: cursor + releaseOffset(show.action),
+          release,
           segments: 0,
           primary: primaryOf(events, i, hits),
           gap: hits > 1 ? (show.fly.gapMs ?? 150) : 0,
@@ -968,6 +1028,19 @@ export function timeline(
           hp: event.hp,
           closing: true,
         });
+        continue;
+      }
+      if (event.reason === 'farewell') {
+        // 串门里被送友风送走（X16）：不演胜利 / 倒地，被送走的那位飘起来（命中时已经开始飘的接着播），
+        // 胜负那句台词照旧。主人家这一侧送客、客人家那一侧等 sent-home，都由调用方按这一条收场。
+        const winner = event.winner;
+        const loser = (winner ^ 1) as 0 | 1;
+        const from = steps.length;
+        pushReaction(cursor, loser, FLOAT_ANIM, event.hp);
+        for (const step of steps.slice(from)) step.closing = true;
+        overrideActor = null;
+        const line = sayOf(event);
+        if (line) steps.push({ at: cursor, who: winner, line, hp: event.hp, closing: true });
         continue;
       }
       const winner = event.winner;
@@ -1134,10 +1207,19 @@ export function timeline(
       continue;
     }
 
-    if (event.kind === 'skip' && (event.cause === 'sleep' || event.cause === 'freeze' || event.cause === 'dream')) {
-      // 睡着 / 冻住 / 入梦跳过的那一拍：再演一遍犯困 / 冻僵 / 入梦（一眼看得出它为什么不动）
+    if (
+      event.kind === 'skip' &&
+      (event.cause === 'sleep' || event.cause === 'freeze' || event.cause === 'dream' || event.cause === 'float')
+    ) {
+      // 睡着 / 冻住 / 入梦 / 飘起来跳过的那一拍：再演一遍犯困 / 冻僵 / 入梦 / 飘起（一眼看得出它为什么不动）
       const anim = foeSkinOf(
-        event.cause === 'sleep' ? SLEEP_ANIM : event.cause === 'freeze' ? FREEZE_ANIM : DREAM_ANIM,
+        event.cause === 'sleep'
+          ? SLEEP_ANIM
+          : event.cause === 'freeze'
+            ? FREEZE_ANIM
+            : event.cause === 'float'
+              ? FLOAT_ANIM
+              : DREAM_ANIM,
         event.actor,
         foePrefix,
       );
@@ -1177,6 +1259,8 @@ export function timeline(
       }
       /** 这一下：放出时刻、命中时刻、用的哪种飞行物、要不要让对方起反应 */
       let shot: { launch: number; impact: number; fly: Fly; reacts: boolean };
+      /** 冲刺（X16）：这一下打中以后多久退回原位（只给主攻那一下，一格退一次） */
+      let dashBackMs: number | null = null;
       /** 另起一段出手动作再放一发（灵兽、第六感、无影手）：排在出手方上一段播完之后 */
       const separate = (show: AttackShow & { fly: Fly }, earliest: number): typeof shot => {
         const moment = Math.max(earliest, busy[shooter]);
@@ -1197,8 +1281,14 @@ export function timeline(
       } else if (slot) {
         // 这一格的主攻（含没有无影手的追击：手还伸着，再放一发同一格攻击的飞行物）
         const twin = (event.kind === 'hit' || event.kind === 'combo') && event.twin === true;
-        const segment = launchSegment(slot, i, hpBefore, { ...(blocked ? { blocked: true } : {}), twin });
+        const surge = (event.kind === 'hit' || event.kind === 'combo') && event.surge === true;
+        const segment = launchSegment(slot, i, hpBefore, {
+          ...(blocked ? { blocked: true } : {}),
+          ...(twin ? { twin: true } : {}),
+          ...(surge ? { surge: true } : {}),
+        });
         shot = { launch: segment.launch, impact: segment.impact, fly: slot.fly, reacts: react && segment.reacts };
+        if (slot.show.dash && !slot.dashBack) dashBackMs = slot.show.dash.backMs;
       } else {
         // 手喂的事件序列里这一格没有出手：台词与受击照老口径排在 `at` 附近
         if (line !== undefined) steps.push({ at, who: shooter, line, hp: event.hp });
@@ -1206,6 +1296,16 @@ export function timeline(
         continue;
       }
       lastImpact = shot.impact;
+      // 冲刺（X16）：打中以后退回开场的位置（退回的位移也是挪窗口，不画在素材里）
+      if (dashBackMs !== null && slot) {
+        slot.dashBack = true;
+        steps.push({
+          at: shot.impact,
+          who: shooter,
+          dash: { dir: 'back', ms: dashBackMs },
+          hp: event.hp,
+        });
+      }
       // 挡下的那一下改播挨打方自己的泡泡护体；其余按这一招的受击方式（湿身、炸黑、砸头、冻僵……）。
       // 鲸吞是反向的：灵光从对方身上被吸走的那一刻（放出时）对方就起反应，飞回嘴边那一刻回血
       const reactAnim = blocked ? BUBBLE_ANIM : (shot.fly.react ?? HIT_ANIM);
@@ -1406,6 +1506,16 @@ export interface ShowSides {
   arena(hp: [number, number]): void;
   /** 特效窗口放一发（X7）：`who` 是出手方（天雷是渡劫者自己），坐标由特效窗口按两只的舞台矩形算 */
   shoot(shot: Shot, who: 0 | 1): void;
+  /**
+   * 冲刺（X16）：让 `who` 在 `ms` 里冲到对手身前（out）或退回原位（back）。
+   * 自家宠物走 `/position` 的 `line`，对手窗口由主进程按帧 `setBounds`；没有对手窗口时不接这只手。
+   */
+  dash?(who: 0 | 1, dir: 'out' | 'back', ms: number): void;
+  /**
+   * 演出收尾 / 快进：把冲刺的窗口挪回开场位置、恢复跟随。
+   * `force` = 快进 / 收摊（立刻复位）；不给 = 自然演完（已经在退回的路上就让它退完）。
+   */
+  dashEnd?(force?: boolean): void;
 }
 
 /** 可注入的定时器（测试里用 mock.timers 拨时间，不真等） */
@@ -1435,6 +1545,8 @@ export class BattleShow {
   private pending: unknown[] = [];
   private done: (() => void) | null = null;
   private ended = false;
+  /** 冲刺已经收过尾（快进 / 收摊先复位过一次）：finish 不再重复喊 */
+  private dashClosed = false;
 
   constructor(steps: Step[], sides: ShowSides, timers: ShowTimers = realTimers, animLeadMs: [number, number] = [0, 0]) {
     this.steps = steps;
@@ -1468,6 +1580,9 @@ export class BattleShow {
   skip(): void {
     if (this.ended) return;
     this.clearPending();
+    // 冲刺还没退回来：先复位（回到开场站位、恢复对手窗口的跟随），别把宠物留在对手身前
+    this.sides.dashEnd?.(true);
+    this.dashClosed = true;
     const closing = this.steps.filter((step) => step.closing);
     for (const step of closing) {
       this.playAnim(step);
@@ -1481,6 +1596,8 @@ export class BattleShow {
   /** 收摊（退出、被别的事打断）：不再播任何步骤，run() 立即结束 */
   dispose(): void {
     this.clearPending();
+    this.sides.dashEnd?.(true);
+    this.dashClosed = true;
     this.finish();
   }
 
@@ -1499,6 +1616,7 @@ export class BattleShow {
     this.sides.arena(step.hp);
     // 飞行物：谁放的那一步就交给特效窗口（窗口没开成时那边自己什么都不做）
     if (step.shot) this.sides.shoot(step.shot, step.who);
+    if (step.dash) this.sides.dash?.(step.who, step.dash.dir, step.dash.ms);
     if (step.line) this.sideOf(step)?.say(step.line, LINE_MS);
   }
 
@@ -1508,6 +1626,8 @@ export class BattleShow {
 
   private finish(): void {
     if (this.ended) return;
+    // 自然演完时兜一下：冲刺的窗口跟随要恢复（已经在退回的路上就让它退完，见 dashEnd）
+    if (!this.dashClosed) this.sides.dashEnd?.(false);
     this.ended = true;
     const resolve = this.done;
     this.done = null;

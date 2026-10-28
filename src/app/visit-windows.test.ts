@@ -266,12 +266,14 @@ function fakeWindows() {
   const executed: string[] = [];
   const ignore: boolean[] = [];
   const cursors: { x: number; y: number }[] = [];
+  const boundsCalls: Array<{ x: number; y: number; width: number; height: number }> = [];
+  const opacities: number[] = [];
   let destroyed = false;
   const win: WindowLike = {
     isDestroyed: () => destroyed,
     getBounds: () => ({ x: 0, y: 0, width: 0, height: 0 }),
-    setBounds: () => undefined,
-    setOpacity: () => undefined,
+    setBounds: (rect) => void boundsCalls.push(rect),
+    setOpacity: (opacity) => void opacities.push(opacity),
     setIgnoreMouseEvents: (value) => void ignore.push(value),
     setAlwaysOnTop: () => undefined,
     setVisibleOnAllWorkspaces: () => undefined,
@@ -309,6 +311,8 @@ function fakeWindows() {
     executed,
     ignore,
     cursors,
+    boundsCalls,
+    opacities,
     get destroyed() {
       return destroyed;
     },
@@ -415,5 +419,32 @@ test('GuestWindow.preload（X7）：对战开演前把要播的动画取到页�
   assert.ok(guestPage.includes("fetch(ANIM + encodeURIComponent(name) + '.webm')"));
   assert.ok(guestPage.includes('cached[name] = URL.createObjectURL(blob);'));
   assert.ok(guestPage.includes('.catch(() => undefined);'), '取不到只是没有副本，不抛到页面外');
+  guest.close(0);
+});
+
+test('GuestWindow 冲刺 / 送走（X16）：pin 停住跟随、moveTo 直接挪、floatAway 往上飘淡出', async () => {
+  const fake = fakeWindows();
+  let box = { ...home };
+  const guest = openGuestWindow(
+    fake.electron,
+    'http://127.0.0.1:1/app/guest',
+    '小鱼',
+    () => box,
+    () => undefined,
+  );
+  await new Promise((done) => setImmediate(done));
+  const before = fake.boundsCalls.length;
+  guest.pin(true);
+  box = { ...box, left: box.left + 300 };
+  await new Promise((done) => setTimeout(done, 140));
+  assert.equal(fake.boundsCalls.length, before, '钉住时跟随不动窗口');
+  const size = guest.bounds();
+  guest.moveTo({ x: 120, y: 260, width: size.width, height: size.height });
+  assert.equal(guest.bounds().x, 120, 'moveTo 立刻改窗口位置');
+  assert.equal(fake.boundsCalls[fake.boundsCalls.length - 1]?.x, 120);
+  guest.floatAway(40);
+  await new Promise((done) => setTimeout(done, 100));
+  assert.ok(guest.bounds().y < 260, `整扇窗往上飘：${guest.bounds().y}`);
+  assert.equal(fake.opacities[fake.opacities.length - 1], 0, '飘到顶时完全透明');
   guest.close(0);
 });

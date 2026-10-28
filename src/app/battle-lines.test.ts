@@ -209,7 +209,8 @@ test('X16：降龙十八掌 / 送友风、后劲、飘起来、送走都有台�
     [{ actor: 1, kind: 'skip', cause: 'float', hp: [10, 10] }, (l) => l.includes(names[1]) && /飘/.test(l)],
     [
       { actor: 0, kind: 'end', winner: 0, reason: 'farewell', hp: [10, 4] },
-      (l) => l.includes(names[0]) && /送回家|送走/.test(l),
+      // 被送走的是输家（{b}）：每一句都得点它的名，不能写成赢家「被送回家了」
+      (l) => l.includes(names[1]) && /送回家|送走/.test(l) && !l.startsWith(`${names[0]}被`),
     ],
   ];
   for (const [event, check] of cases) {

@@ -1,4 +1,11 @@
 import { timeline, swapSides } from './battle-show.ts';
+import {
+  FAREWELL_WAIT_MS,
+  guestFarewellDiary,
+  hostFarewellDiary,
+  hostFarewellPrompt,
+  hostFarewellSend,
+} from './features/spar.ts';
 import type { Fighter } from './battle.ts';
 import { diaryDate } from './diary.ts';
 import type { DiaryDay } from './diary.ts';
@@ -1009,4 +1016,18 @@ test('隔空切磋（挑战方）：对方不应战就说一句，不记账、�
     beacon.close();
     await fake.host.close();
   }
+});
+
+test('X16 串门里送走：主人家送客的演法与日记、客人家回家的日记，都按任务书的口径', () => {
+  // 自己把客人送走：客人飘走（整扇窗往上飘、淡出），不挥手也不说告别的话；1.5 秒后关
+  assert.deepEqual(hostFarewellSend(true), { farewell: '', wave: false, floatAway: true, closeMs: 1_500 });
+  assert.equal(hostFarewellDiary('小李', '阿花', true), '用送友风把 阿花 送回家了');
+  // 被客人送走：客人说「告辞～」再走
+  assert.deepEqual(hostFarewellSend(false), { farewell: '告辞～', wave: true });
+  assert.match(hostFarewellDiary('小李', '阿花', false), /被它的送友风送得飘起来/);
+  assert.match(hostFarewellPrompt('小李', '阿花', true), /用送友风把来串门的阿花/);
+  // 客人这一侧：被送回家的用任务书那句；自己放的说清是「把它送得飘起来」
+  assert.equal(guestFarewellDiary('小李', '阿花', false), '和 小李 家的 阿花 切磋，被它的送友风送回家了');
+  assert.match(guestFarewellDiary('小李', '阿花', true), /用送友风把它送得飘起来/);
+  assert.equal(FAREWELL_WAIT_MS, 15_000, '演完等 sent-home 的兜底是 15 秒');
 });

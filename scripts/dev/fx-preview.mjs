@@ -20,6 +20,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { extname, join, resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { dashShift } from '../../src/app/battle-dash.ts';
 import { timeline } from '../../src/app/battle-show.ts';
 import { fxPage, fxSpec } from '../../src/app/fx-window.ts';
 
@@ -127,6 +128,32 @@ const SCENES = {
       { actor: 0, kind: 'skill', skill: 'finger-sword', damage: 30, pierce: true, hp },
     ],
   },
+  // X16：降龙十八掌冲过去打、再退回来；送友风把人吹得飘起来；串门里送走（客人整扇窗飘走）
+  降龙十八掌: {
+    events: [
+      start,
+      decide(0, skill('dragon-palm')),
+      { actor: 0, kind: 'skill', skill: 'dragon-palm', damage: 30, hp: [100, 70] },
+      { actor: 0, kind: 'end', winner: 0, reason: 'ko', hp: [100, 70] },
+    ],
+  },
+  送友风飘起: {
+    events: [
+      start,
+      decide(0, skill('farewell-wind')),
+      { actor: 0, kind: 'skill', skill: 'farewell-wind', damage: 18, hp: [100, 82] },
+      { actor: 1, kind: 'skip', cause: 'float', hp: [100, 82] },
+    ],
+  },
+  串门里送走: {
+    events: [
+      start,
+      decide(0, skill('farewell-wind')),
+      { actor: 0, kind: 'skill', skill: 'farewell-wind', damage: 18, hp: [100, 82] },
+      { actor: 0, kind: 'end', winner: 0, reason: 'farewell', hp: [100, 82] },
+    ],
+    farewell: true,
+  },
   三球: { events: [start, decide(0, weapon('juggle')), whit(0, 'juggle'), whit(0, 'juggle'), whit(0, 'juggle')] },
   陀螺: { events: [start, decide(0, weapon('top')), whit(0, 'top')] },
   鲸尾: { events: [start, decide(0, weapon('whale-tail')), whit(0, 'whale-tail')] },
@@ -199,12 +226,28 @@ function planOf(scene) {
   const steps = timeline(scene.events, ['自家', '对手'], () => 0, scene.skillSets ?? none, {
     ...(solo ? { tribulation: scene.tribulation } : {}),
   });
-  const view = solo ? [stages[0], null] : stages;
-  return {
-    solo,
-    stages: view,
-    end: Math.max(...steps.map((step) => step.at)) + 2_600,
-    steps: steps.map((step) => ({
+  // 预览里的舞台是摆好的：冲刺按 battle-dash 的同一个几何挪这只宠物的舞台，飞行物按挪过以后的掌心算。
+  const view = (solo ? [stages[0], null] : stages).map((stage) => (stage ? { ...stage } : null));
+  const openingX = view.map((stage) => stage?.x ?? 0);
+  const out = [];
+  for (const step of steps) {
+    if (step.dash) {
+      const stage = view[step.who];
+      const other = view[step.who ^ 1];
+      if (stage && other) {
+        const x =
+          step.dash.dir === 'back'
+            ? openingX[step.who]
+            : stage.x + dashShift(stage.x + stage.width / 2, stage.width, other.x + other.width / 2, other.width);
+        stage.x = x;
+        out.push({
+          at: step.at,
+          who: step.who,
+          dash: { who: step.who, x: Math.round(x), ms: step.dash.ms, dir: step.dash.dir },
+        });
+      }
+    }
+    out.push({
       at: step.at,
       who: step.who,
       ...(step.anim ? { anim: step.anim, rate: step.rate ?? 1 } : {}),
@@ -213,7 +256,18 @@ function planOf(scene) {
       ...(step.shot
         ? { spec: fxSpec(step.shot, step.who, view, bounds, layoutName === 'trial' && step.who === 1) }
         : {}),
-    })),
+    });
+  }
+  const last = Math.max(...out.map((step) => step.at));
+  if (scene.farewell) {
+    // 主人家送客：自家宠物是 0 号，被送走的客人是 1 号；演出收场（最后一句台词显示完）以后再整扇窗飘走
+    out.push({ at: last + 2_400, floatAway: { who: 1, ms: 1_500 } });
+  }
+  return {
+    solo,
+    stages: (solo ? [stages[0], null] : stages).map((stage) => (stage ? { ...stage } : null)),
+    end: Math.max(...out.map((step) => step.at)) + 2_600,
+    steps: out,
   };
 }
 
@@ -247,6 +301,22 @@ function play(who, name, rate) {
   video.playbackRate = rate;
   video.play().catch(() => undefined);
 }
+// 冲刺：和 app 一样按直线挪过去 / 退回来（预览里挪的是视频的 left，app 里挪的是宠物窗口）
+function dash(who, x, ms) {
+  const video = pets[who];
+  if (!video) return;
+  video.style.transition = 'left ' + ms + 'ms linear';
+  video.style.left = x + 'px';
+}
+// 串门里送走：整扇窗往上飘、淡出（预览里挪的是视频，app 里挪的是客人窗口）
+function floatAway(who, ms) {
+  const stage = PLAN.stages[who];
+  const video = pets[who];
+  if (!stage || !video) return;
+  video.style.transition = 'top ' + ms + 'ms ease-in, opacity ' + ms + 'ms ease-in';
+  video.style.top = stage.y - stage.height * 0.5 + 'px';
+  video.style.opacity = '0';
+}
 for (const video of pets) {
   if (!video) continue;
   // 开场先待机（app 里宠物本来就在待机；渡劫不吃丹时第一段动画要等到第一道雷）
@@ -269,7 +339,9 @@ window.go = () => new Promise((resolve) => {
   for (const step of PLAN.steps) {
     setTimeout(() => {
       if (step.anim) play(step.who, step.anim, step.rate);
+      if (step.dash) dash(step.dash.who, step.dash.x, step.dash.ms);
       if (step.spec) fx.fire(step.spec);
+      if (step.floatAway) floatAway(step.floatAway.who, step.floatAway.ms);
       if (step.line) document.getElementById('line' + step.who).textContent = step.line;
     }, step.at);
   }
@@ -289,6 +361,7 @@ if (args.includes('--plan')) {
     for (const step of planOf(SCENES[name]).steps) {
       const what = [
         step.anim ? `${step.anim} ×${step.rate}` : '',
+        step.dash ? `冲 ${step.dash.dir} → x=${step.dash.x}` : '',
         step.spec
           ? `飞 ${step.spec.kind} ${step.spec.track} ${step.spec.flightMs}ms → 命中 ${step.at + step.spec.flightMs}`
           : '',

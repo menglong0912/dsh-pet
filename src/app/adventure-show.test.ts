@@ -84,6 +84,7 @@ test('Y5 客串：只开对手窗口、冒三句、淡出关掉，不开擂台�
     },
     refreshMenu: () => undefined,
     playExtra: () => undefined,
+    movePet: () => undefined,
     say: () => undefined,
     stageLabel: () => '',
     disposed: () => false,

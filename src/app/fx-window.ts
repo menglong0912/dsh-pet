@@ -111,6 +111,10 @@ export interface FxSpec {
   cloud?: number;
   /** 用心魔的配色画（飞行物和命中特效都是）：心魔放出来的那几发 */
   shadow?: boolean;
+  /** 带着降龙十八掌的后劲（X16）：命中处多打一发小一号的命中-龙吟 */
+  surge?: boolean;
+  /** 后劲那一发小龙吟的边长（后劲固定用 `命中-龙吟`，不管这一手本来是什么贴图） */
+  surgeSize?: number;
   /** 水母分身（X8）：挨打方原地留一只水母替身（这个边长），飞行物打在它身上、它碎成泡泡 */
   decoy?: number;
   /**
@@ -172,6 +176,11 @@ const FX_SIZE: Record<FxAssetName, { size: number; spin?: number; grow?: number 
   // 剑光是细长的一条：长边 0.36 个舞台高，飞起来才看得清是一道光（165ms 就到对面）
   剑光: { size: 0.36 },
   '命中-剑痕': { size: 0.58 },
+  // X16 降龙十八掌：金龙比宠物大（长边约 0.9 个舞台高，从掌心冲出来时还小、扑到身上时涨到满），
+  // 送友风的清风慢慢飘；命中-龙吟是龙吟的冲击波
+  金龙: { size: 0.9, grow: 0.55 },
+  清风: { size: 0.5 },
+  '命中-龙吟': { size: 0.56 },
   // 历练（Y2）：一转蛊和对手招式的飞行物
   犬影: { size: 0.28 },
   纸鹤: { size: 0.18 },
@@ -324,7 +333,9 @@ export function fxSpec(
     pieces.push({ delay: i * Math.max(0, shot.gapMs), hue: shot.hue ?? 0 });
   }
   const art = FX_SIZE[shot.kind];
-  const px = (ratio: number): number => Math.max(8, Math.round(ratio * target.height));
+  // 金龙比宠物大：按两只里大一点的那只算（切磋时客人小一号，不能把龙画得比出手方还小）
+  const basis = shot.track === 'surge' ? Math.max(target.height, stages[who]?.height ?? 0) : target.height;
+  const px = (ratio: number): number => Math.max(8, Math.round(ratio * basis));
   const size = px(art.size);
   // 分身 / 魂影挨的那一下：水母碎成泡泡、魂影碎成魂屑（不画法宝自己的命中特效）
   const hitFx: FxAssetName = shot.decoy ? '命中-泡泡' : shot.mirror ? '命中-魂碎' : shot.hitFx;
@@ -360,6 +371,7 @@ export function fxSpec(
     pieces,
     ...(shot.track === 'bolt' ? { cloud: px(FX_SIZE.乌云.size) } : {}),
     ...(shadow ? { shadow: true } : {}),
+    ...(shot.surge ? { surge: true as const, surgeSize: px(FX_SIZE['命中-龙吟'].size * 0.6) } : {}),
     ...(shot.decoy ? { decoy: px(FX_SIZE.水母.size) } : {}),
     ...(behind && shot.boomerang
       ? {
@@ -398,6 +410,8 @@ export interface FxWindow {
   place(): void;
   /** 过一会儿关掉（先让最后那一下的命中特效放完） */
   close(afterMs: number): void;
+  /** 钉住 / 放开（X16 冲刺）：钉住时窗口不跟着两只的实时位置重摆，飞行物照样按实时舞台算 */
+  pin(on: boolean): void;
 }
 
 /**
@@ -423,7 +437,7 @@ export function openFxWindow(
   if (!first) {
     // 连窗口都摆不了（还没收到自家宠物的位置）：这一场没有特效层，其余照常
     warn('特效：还不知道宠物在哪，这一场不放特效');
-    return { fire: () => undefined, place: () => undefined, close: () => undefined };
+    return { fire: () => undefined, place: () => undefined, close: () => undefined, pin: () => undefined };
   }
   let bounds = first;
   const win = new electron.BrowserWindow({
@@ -453,6 +467,7 @@ export function openFxWindow(
   win.setIgnoreMouseEvents(true);
   let ready = false;
   let warned = false;
+  let pinned = false;
   let closing: ReturnType<typeof setTimeout> | null = null;
   const queued: string[] = [];
   const warnOnce = (message: string): void => {
@@ -495,15 +510,21 @@ export function openFxWindow(
     });
   return {
     fire(shot, who) {
-      const next = fxBounds(stages()[0], stages()[1], workArea());
-      if (next) move(next);
+      if (!pinned) {
+        const next = fxBounds(stages()[0], stages()[1], workArea());
+        if (next) move(next);
+      }
       const spec = fxSpec(shot, who, stages(), bounds, options.foeShadow === true && who === 1);
       if (!spec) return;
       run(`fx.fire(${JSON.stringify(spec)})`);
     },
     place() {
+      if (pinned) return;
       const next = fxBounds(stages()[0], stages()[1], workArea());
       if (next) move(next);
+    },
+    pin(on) {
+      pinned = on;
     },
     close(afterMs) {
       if (closing) clearTimeout(closing);
@@ -718,6 +739,8 @@ function loop(now) {
       if (item.jelly) item.jelly.remove();
       FX.items.splice(i, 1);
       burst(s.hitFx, s.hitAt[0], s.hitAt[1], s.hitSize, s.shadow);
+      // 降龙十八掌的后劲（X16）：命中处再打一发小一号的龙吟（固定用龙吟，不跟着这一手的命中贴图）
+      if (s.surge) setTimeout(function () { burst('命中-龙吟', s.hitAt[0], s.hitAt[1], s.surgeSize || s.hitSize * 0.6, s.shadow); }, 90);
       continue;
     }
     var t = used / s.flightMs;
@@ -765,6 +788,8 @@ window.fx = {
         grow: Number(spec.grow) || 1,
         cloud: Number(spec.cloud) || 0,
         shadow: !!spec.shadow,
+        surge: !!spec.surge,
+        surgeSize: Number(spec.surgeSize) || 0,
         decoy: Number(spec.decoy) || 0,
         boomerang: spec.boomerang
           ? {

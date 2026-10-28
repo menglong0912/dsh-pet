@@ -21,7 +21,7 @@ import { AWAY_OPACITY, RELAY_OPACITY, fadeHome } from '../visit-windows';
 import { cleanText, LINE_MAX, tripRequest } from '../visit';
 import type { HostEvent, TripReply } from '../visit';
 import { lazyFns } from './context';
-import type { FeatureContext, Hosting, Trip } from './context';
+import type { FeatureContext, HomeReason, Hosting, Trip } from './context';
 import { errorText } from './util';
 
 /** 做客时转播回自家的气泡显示多久（窗口同时调亮这么久） */
@@ -137,6 +137,22 @@ export function createVisitingChat(ctx: FeatureContext): VisitingChat {
     }
   }
 
+  /**
+   * 该回家了：正在演（切磋 / 逐手局）就先记下，等演到送走那一拍再回家（X16 的时差兜底：
+   * 主人家可能先送了 sent-home，自家这边还在演）。演出结束后 startGuestSpar 会接着处理。
+   */
+  async function requestHome(current: Trip, reason: HomeReason): Promise<void> {
+    if (
+      (reason === 'sent-home' || reason === 'farewell') &&
+      (ctx.state.battle !== null || ctx.state.liveBattle !== null || ctx.state.spar?.stage === 'showing')
+    ) {
+      // 先记成 sent-home：演完以后按 current.farewell 决定是普通请回还是送友风
+      current.pendingHome = 'sent-home';
+      return;
+    }
+    await comeHome(reason);
+  }
+
   /** 做客时说一句（按趟串行）：生成、转播回自家、说给对方听，记下对方的回话 */
   function chatTrip(current: Trip, ask: string, fallback: string): Promise<void> {
     const next = current.queue.then(async () => {
@@ -158,7 +174,8 @@ export function createVisitingChat(ctx: FeatureContext): VisitingChat {
       }
       if (ctx.state.trip !== current || !result) return;
       if (!result.ok) {
-        await comeHome(result.reason === 'sent-home' ? 'sent-home' : 'lost');
+        const reason = result.reason === 'sent-home' ? (current.farewell ? 'farewell' : 'sent-home') : 'lost';
+        await requestHome(current, reason);
         return;
       }
       current.lines.push(`你：${text}`, `${pet}：${result.reply || '……'}`);
@@ -260,7 +277,9 @@ export function createVisitingChat(ctx: FeatureContext): VisitingChat {
       const result = await tripRequest(current.host, '/v1/ping', { token: current.token });
       if (ctx.state.trip !== current) return;
       if (!result.ok) {
-        await comeHome(result.reason === 'sent-home' ? 'sent-home' : 'lost');
+        // 送友风收场的那一场按 farewell 记（X16）：不是「刚进门就被请回去」那种普通送客
+        const reason = result.reason === 'sent-home' ? (current.farewell ? 'farewell' : 'sent-home') : 'lost';
+        await requestHome(current, reason);
         return;
       }
       current.failures = 0;

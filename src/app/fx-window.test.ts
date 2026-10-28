@@ -299,10 +299,11 @@ function fakeElectron(load: () => Promise<void> = () => Promise.resolve()) {
   const created: Record<string, unknown>[] = [];
   const executed: string[] = [];
   const levels: string[] = [];
+  const bounds: Array<{ x: number; y: number; width: number; height: number }> = [];
   const state = { destroyed: false, ignore: false };
   const win: FxWindowLike = {
     isDestroyed: () => state.destroyed,
-    setBounds: () => undefined,
+    setBounds: (rect) => void bounds.push(rect),
     setIgnoreMouseEvents: (ignore) => void (state.ignore = ignore),
     setAlwaysOnTop: (_flag, level) => void levels.push(level),
     setVisibleOnAllWorkspaces: () => undefined,
@@ -322,7 +323,7 @@ function fakeElectron(load: () => Promise<void> = () => Promise.resolve()) {
       return win;
     },
   } as unknown as FxElectron;
-  return { electron, created, executed, levels, state };
+  return { electron, created, executed, levels, bounds, state };
 }
 
 const assets = { base: '/dsh-pet-7340/pic/fx/', names: ['拳风' as const, '命中-星' as const] };
@@ -425,4 +426,45 @@ test('close(afterMs)：先让最后那一下的命中特效放完，到点才销
   assert.equal(fake.state.destroyed, false, '还没到点');
   t.mock.timers.tick(1);
   assert.equal(fake.state.destroyed, true);
+});
+
+test('X16 冲刺：pin 钉住特效层的位置（飞行物照实时舞台算）；surge 带进 FxSpec', () => {
+  const fake = fakeElectron();
+  let current: [Stage, Stage] = [self, foe];
+  const fx = openFxWindow(
+    fake.electron,
+    'http://127.0.0.1:1/app/fx',
+    assets,
+    () => current,
+    () => everywhere,
+    () => undefined,
+  );
+  fx.pin(true);
+  current = [{ ...self, x: self.x + 600 }, foe];
+  fx.place();
+  assert.equal(fake.bounds.length, 0, '钉住时窗口不跟着挪');
+  fx.pin(false);
+  fx.place();
+  assert.equal(fake.bounds.length, 1, '放开后恢复跟随');
+  const surge = fxSpec(
+    shot({ kind: '金龙', track: 'surge', hitFx: '命中-龙吟', flightMs: 200, surge: true }),
+    0,
+    [self, foe],
+    everywhere,
+  );
+  assert.equal(surge?.surge, true);
+  assert.equal(surge?.surgeSize, Math.round(0.56 * 360 * 0.6), '后劲那一发是小一号的命中-龙吟');
+  assert.equal(surge?.track, 'surge');
+  assert.equal(surge?.hitFx, '命中-龙吟');
+  // 切磋里客人小一号：金龙按两只里大的那只算，不能比出手方还小
+  const smallFoe = foeStage({ x: 800, y: 300, width: 320, height: 300 }, 'left');
+  const small = fxSpec(
+    shot({ kind: '金龙', track: 'surge', hitFx: '命中-龙吟', flightMs: 200 }),
+    0,
+    [self, smallFoe],
+    everywhere,
+  );
+  assert.equal(small?.size, Math.round(0.9 * 360), '按自家舞台高算龙的大小');
+  // 页面收到 surge：命中时多打一发小一号的龙吟（固定贴图，不跟这一手的命中贴图）
+  assert.ok(fxPage.includes("burst('命中-龙吟'"), '后劲那一发用龙吟');
 });

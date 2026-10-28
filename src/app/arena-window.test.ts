@@ -210,3 +210,21 @@ test('close(afterMs)：先让结果那几步放完，到点才销毁窗口', asy
   t.mock.timers.tick(1);
   assert.equal(fake.destroyed, true);
 });
+
+test('pin（X16 冲刺）：钉住时按开场站位摆，不跟着两只的实时位置走；放开后照旧', () => {
+  const fake = fakeElectron();
+  const arena = openArenaWindow(
+    fake.electron,
+    'http://127.0.0.1:1/app/arena',
+    () => home,
+    () => foeWindow,
+  );
+  const opening = arena.bounds();
+  arena.pin(true);
+  arena.place({ ...home, left: 200 }, { ...foeWindow, x: 100 });
+  assert.deepEqual(arena.bounds(), opening, '钉住时一步都不挪');
+  assert.equal(fake.bounds.length, 0);
+  arena.pin(false);
+  arena.place({ ...home, left: 200 }, { ...foeWindow, x: 100 });
+  assert.equal(fake.bounds.length, 1, '放开后恢复跟随');
+});

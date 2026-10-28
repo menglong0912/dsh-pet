@@ -1,6 +1,7 @@
 import { openActionPanel } from '../action-panel-window';
 import { arenaScoreboard, openArenaWindow } from '../arena-window';
 import { askAiTurn, legalChoices, startLiveBattle } from '../battle-live';
+import { createDashRig, screenUnion } from '../battle-dash';
 import { BattleShow, SHOW_ANIMS, timeline } from '../battle-show';
 import type { Shot } from '../battle-show';
 import { fight, shadowOf, tribulate } from '../battle';
@@ -29,6 +30,7 @@ export function createTrial(ctx: FeatureContext): Trial {
     onCultivation,
     openShowFx,
     petName,
+    petRequest,
     playExtra,
     playPooled,
     refreshMenu,
@@ -92,6 +94,19 @@ export function createTrial(ctx: FeatureContext): Trial {
     );
     windows = { guest, arena, fx, panel };
     ctx.state.trialWindowGroups.add(windows);
+    // 冲刺（X16）：降龙十八掌冲过去推掌，心魔窗口钉住按帧挪
+    const dash = createDashRig({
+      box: homePet.box,
+      union: () => screenUnion(electron.screen),
+      foe: guest,
+      pinStage: (on) => {
+        arena.pin(on);
+        fx.pin(on);
+      },
+      moveSelf: (x, y, durationMs) => {
+        void petRequest('POST', '/position', { x, y, mode: 'line', duration: durationMs });
+      },
+    });
     ctx.state.actionPanel = panel;
     panel.place(arena.bounds());
     const scoreboard = arenaScoreboard({
@@ -119,6 +134,8 @@ export function createTrial(ctx: FeatureContext): Trial {
         panel.place(arena.bounds());
       },
       shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
+      dash: (who: 0 | 1, dir: 'out' | 'back', ms: number) => dash.run(who, dir, ms),
+      dashEnd: (force?: boolean) => dash.end(force),
     };
     const mode = await panel.chooseMode(ctx.ai.isReady(), deps.modeTimeoutMs ?? 10_000);
     if (!mode) {

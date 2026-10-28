@@ -55,11 +55,12 @@ function fakeWindows() {
   const created: Record<string, unknown>[] = [];
   const executed: string[] = [];
   const ignored: boolean[] = [];
+  const boundsCalls: Array<{ x: number; y: number; width: number; height: number }> = [];
   let destroyed = false;
   const win: WindowLike = {
     isDestroyed: () => destroyed,
     getBounds: () => ({ x: 0, y: 0, width: 0, height: 0 }),
-    setBounds: () => undefined,
+    setBounds: (rect) => void boundsCalls.push(rect),
     setOpacity: () => undefined,
     setIgnoreMouseEvents: (value) => void ignored.push(value),
     setAlwaysOnTop: () => undefined,
@@ -94,6 +95,7 @@ function fakeWindows() {
     created,
     executed,
     ignored,
+    boundsCalls,
     get destroyed() {
       return destroyed;
     },
@@ -141,4 +143,26 @@ test('openFoeWindow：等大贴身（可放大）、鼠标穿透、不抢焦点�
   foe.close(0);
   await new Promise((done) => setTimeout(done, 10));
   assert.equal(fake.destroyed, true);
+});
+
+test('openFoeWindow 冲刺（X16）：pin 停住跟随、moveTo 按帧挪窗口', async () => {
+  const fake = fakeWindows();
+  let box = { ...home };
+  const foe = openFoeWindow(
+    fake.electron,
+    'http://127.0.0.1:1/app/foe',
+    { name: '白凝冰', portrait: '/x.png', prefix: '对手-白凝冰' },
+    () => box,
+  );
+  await new Promise((done) => setImmediate(done));
+  const before = fake.boundsCalls.length;
+  foe.pin(true);
+  box = { ...box, left: box.left + 200 };
+  await new Promise((done) => setTimeout(done, 140));
+  assert.equal(fake.boundsCalls.length, before, '钉住时跟随不动窗口');
+  const now = foe.bounds();
+  foe.moveTo({ ...now, x: now.x - 123 });
+  assert.equal(foe.bounds().x, now.x - 123, 'moveTo 立刻改窗口位置');
+  assert.equal(fake.boundsCalls[fake.boundsCalls.length - 1]?.x, now.x - 123);
+  foe.close(0);
 });

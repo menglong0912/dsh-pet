@@ -106,6 +106,8 @@ export interface ArenaWindow {
   bounds(): Rect;
   /** 过一会儿关掉（先让结果那几步放完） */
   close(afterMs: number): void;
+  /** 钉住 / 放开（X16 冲刺）：钉住时按开场站位摆，不跟着两只的实时位置走 */
+  pin(on: boolean): void;
 }
 
 /**
@@ -153,6 +155,7 @@ export function openArenaWindow(
   // 纯显示：整窗鼠标穿透，点它跟点桌面一样（不抢主人干活）
   win.setIgnoreMouseEvents(true);
   let ready = false;
+  let pinned = false;
   const queued: string[] = [];
   const run = (code: string): void => {
     if (win.isDestroyed()) return;
@@ -171,6 +174,7 @@ export function openArenaWindow(
     .catch(() => win.destroy());
   return {
     place(nextHome, nextFoe) {
+      if (pinned) return;
       const next = arenaBounds(nextHome, nextFoe ?? null, workAreaOf(nextHome));
       if (next.x === bounds.x && next.y === bounds.y && next.width === bounds.width && next.height === bounds.height)
         return;
@@ -179,6 +183,9 @@ export function openArenaWindow(
     },
     update: (update) => run(arenaUpdateCode(update)),
     bounds: () => bounds,
+    pin(on) {
+      pinned = on;
+    },
     close(afterMs) {
       setTimeout(() => {
         if (!win.isDestroyed()) win.destroy();

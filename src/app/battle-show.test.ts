@@ -1120,6 +1120,14 @@ test('素材都在包里：出手 / 受击素材、特效贴图、客人窗口�
     assert.ok(existsSync(join(packageRoot, 'assets', 'pic', 'fx', `${name}.png`)), `特效贴图不存在：${name}`);
   }
   assert.ok(FX_ASSETS.includes('乌云'), '天雷顺带画的乌云也要预加载');
+  // X16 的三段动作和三张新贴图：表里加上了就一定要真在包里、也在预取清单里
+  for (const anim of ['出手-降龙', '出手-送友风', '受击-飘起']) {
+    assert.ok(webm.has(anim), `X16 素材不存在：${anim}`);
+    assert.ok(SHOW_ANIMS.includes(anim), `X16 素材要在预取清单里：${anim}`);
+  }
+  for (const name of ['金龙', '命中-龙吟', '清风']) {
+    assert.ok(FX_ASSETS.includes(name as (typeof FX_ASSETS)[number]), `X16 贴图要在预取清单里：${name}`);
+  }
 });
 
 test('真引擎的若干场：素材名都对得上包内素材、倍速都在 /anim 允许区间、整场不拖沓', () => {
@@ -1344,4 +1352,154 @@ test('X17 逐手演出：AI 给的台词替掉这一手模板解说里自家宠�
     steps.filter((step) => step.who === 0 && step.line && step.line !== line).length <= template,
     '这一手自家宠物的模板解说被替掉了一句',
   );
+});
+
+test('X16 降龙十八掌：冲过去推掌（正好在离手那一刻到），金龙约 200ms 扑到身上，打中后退回原位', () => {
+  const action: Action = { kind: 'skill', skill: 'dragon-palm' };
+  const landed: BattleEvent = { actor: 0, kind: 'skill', skill: 'dragon-palm', damage: 28, hp: [100, 62] };
+  const steps = timeline([start(0), decide(0, action), landed], NAMES, seq());
+  const show = ATTACK_SHOW['dragon-palm'];
+  assert.deepEqual(show.dash, { outMs: 260, backMs: 320 });
+  const [actionStep] = animsOf(steps, '出手-降龙');
+  assert.ok(actionStep, '播出手-降龙');
+  const release = actionStep.at + releaseOffset('出手-降龙');
+  const [shot] = shotsOf(steps);
+  assert.deepEqual(
+    [shot.shot.kind, shot.shot.track, shot.shot.hitFx, shot.shot.flightMs],
+    ['金龙', 'surge', '命中-龙吟', 200],
+  );
+  assert.equal(shot.at, release, '金龙在推掌伸到最远那一刻从掌心出去');
+  const dashes = steps.filter((step) => step.dash);
+  assert.deepEqual(
+    dashes.map((step) => [step.at, step.who, step.dash]),
+    [
+      [Math.max(OPEN_MS, release - 260), 0, { dir: 'out', ms: 260 }],
+      [impactOf(shot), 0, { dir: 'back', ms: 320 }],
+    ],
+    '出掌前 260ms 冲过去，命中那一刻往回退 320ms',
+  );
+  // 冲上去那一步没有动画和台词：只有位移
+  assert.equal(dashes[0].anim, undefined);
+  assert.equal(dashes[0].line, undefined);
+});
+
+test('X16 冲刺只给降龙十八掌：空手、鲸尾这些照旧原地出招，没有 dash 步', () => {
+  for (const action of [
+    { kind: 'unarmed' } as Action,
+    { kind: 'weapon', weapon: 'whale-tail' } as Action,
+    { kind: 'skill', skill: 'farewell-wind' } as Action,
+  ]) {
+    const landed: BattleEvent =
+      action.kind === 'skill'
+        ? { actor: 0, kind: 'skill', skill: 'farewell-wind', damage: 12, hp: [100, 78] }
+        : { actor: 0, kind: 'hit', damage: 8, crit: false, blocked: false, hp: [100, 82] };
+    const steps = timeline([start(0), decide(0, action), landed], NAMES, seq());
+    assert.equal(steps.filter((step) => step.dash).length, 0, `${JSON.stringify(action)} 不该冲`);
+  }
+});
+
+test('X16 后劲：带 surge 的那一下命中处多打一发（Shot.surge），没带就没有', () => {
+  const normal = timeline([start(0), decide(0, UNARMED), hit(0, 20, [100, 70])], NAMES, seq());
+  assert.equal(shotsOf(normal)[0].shot.surge, undefined);
+  const surged: BattleEvent = {
+    actor: 0,
+    kind: 'hit',
+    damage: 26,
+    crit: false,
+    blocked: false,
+    surge: true,
+    hp: [100, 64],
+  };
+  const steps = timeline([start(0), decide(0, UNARMED), surged], NAMES, seq());
+  assert.equal(shotsOf(steps)[0].shot.surge, true);
+  // 追击（combo）也认
+  const comboEvent: BattleEvent = {
+    actor: 0,
+    kind: 'combo',
+    damage: 9,
+    crit: false,
+    blocked: false,
+    surge: true,
+    hp: [100, 55],
+  };
+  const comboSteps = timeline([start(0), decide(0, UNARMED), hit(0), comboEvent], NAMES, seq());
+  assert.equal(shotsOf(comboSteps)[1].shot.surge, true);
+});
+
+test('X16 送友风：清风慢飘过去，命中-旋风；飘起来那一拍挨打方重播受击-飘起', () => {
+  const action: Action = { kind: 'skill', skill: 'farewell-wind' };
+  const events: BattleEvent[] = [
+    start(0),
+    decide(0, action),
+    { actor: 0, kind: 'skill', skill: 'farewell-wind', damage: 16, hp: [100, 74] },
+    { actor: 1, kind: 'skip', cause: 'float', hp: [100, 74] },
+  ];
+  const steps = timeline(events, NAMES, seq());
+  const [shot] = shotsOf(steps);
+  assert.deepEqual(
+    [shot.shot.kind, shot.shot.track, shot.shot.hitFx, shot.shot.flightMs],
+    ['清风', 'float', '命中-旋风', 900],
+  );
+  assert.equal(shot.at, animsOf(steps, '出手-送友风')[0].at + releaseOffset('出手-送友风'));
+  const floats = animsOf(steps, '受击-飘起');
+  assert.ok(floats.length >= 2, `命中一次、跳过那一拍再演一次：${floats.length}`);
+  assert.deepEqual(
+    floats.map((step) => step.who),
+    [1, 1],
+  );
+  assert.equal(floats[0].at, impactOf(shot) - windupOf('受击-飘起'), '命中那一刻开始飘（前摇 42ms）');
+});
+
+test('X16 串门里送走（end.reason = farewell）：不演胜利 / 倒地，被送走的飘起来，收场几步能快进', () => {
+  const action: Action = { kind: 'skill', skill: 'farewell-wind' };
+  const events: BattleEvent[] = [
+    start(0),
+    decide(0, action),
+    { actor: 0, kind: 'skill', skill: 'farewell-wind', damage: 16, hp: [100, 74] },
+    { actor: 0, kind: 'end', winner: 0, reason: 'farewell', hp: [100, 74] },
+  ];
+  const steps = timeline(events, NAMES, seq());
+  assert.equal(animsOf(steps, '战斗-胜利').length, 0, '送走不是打赢，不播胜利');
+  assert.equal(animsOf(steps, '战斗-倒地').length, 0, '被送走不是倒地');
+  const floats = animsOf(steps, '受击-飘起');
+  assert.ok(floats.length >= 1 && floats.every((step) => step.who === 1), '客人飘起来');
+  const closing = steps.filter((step) => step.closing);
+  assert.ok(
+    closing.some((step) => step.anim === '受击-飘起'),
+    '飘起属于收场：快进也要演',
+  );
+  assert.ok(
+    closing.some((step) => step.line),
+    '送走的台词也在收场',
+  );
+});
+
+test('执行器 X16：dash 步到点交给冲刺的手；自然演完 / 快进都收一下冲刺（快进立刻复位）', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  const calls: Array<[0 | 1, string, number]> = [];
+  const ends: boolean[] = [];
+  const sides: ShowSides = {
+    self: fakeSide(),
+    foe: fakeSide(),
+    arena: () => undefined,
+    shoot: () => undefined,
+    dash: (who, dir, ms) => void calls.push([who, dir, ms]),
+    dashEnd: (force) => void ends.push(force ?? false),
+  };
+  const dashStep: Step = { at: 300, who: 0, hp: [10, 10], dash: { dir: 'out', ms: 260 } };
+  const show = new BattleShow([dashStep], sides, timers);
+  const done = show.run();
+  t.mock.timers.tick(299);
+  assert.deepEqual(calls, [], '还没到点');
+  t.mock.timers.tick(1);
+  assert.deepEqual(calls, [[0, 'out', 260]]);
+  t.mock.timers.tick(LINE_MS);
+  await done;
+  assert.deepEqual(ends, [false], '自然演完：让还在退的那一步退完，不硬拽');
+
+  const skipped = new BattleShow([dashStep], sides, timers);
+  const pending = skipped.run();
+  skipped.skip();
+  await pending;
+  assert.deepEqual(ends, [false, true], '快进：立刻复位');
 });

@@ -63,6 +63,10 @@ export interface FoeWindow {
   preload(anims: string[]): void;
   /** 淡出（客串说完台词用；Y5） */
   fade(): void;
+  /** 钉住 / 放开跟随（X16 冲刺）：钉住时窗口停在原地，由演出自己按帧挪 */
+  pin(on: boolean): void;
+  /** 直接挪到某个位置（X16 对手冲刺：主进程按帧算好，只改左上角与大小） */
+  moveTo(rect: Rect): void;
   /** 过一会儿关掉（先让倒地淡出） */
   close(afterMs: number): void;
 }
@@ -113,6 +117,7 @@ export function openFoeWindow(
   // 对手只是个演员：整窗鼠标穿透，点它跟点桌面一样
   win.setIgnoreMouseEvents(true);
   let ready = false;
+  let pinned = false;
   const queued: string[] = [];
   const run = (code: string): void => {
     if (win.isDestroyed()) return;
@@ -135,6 +140,8 @@ export function openFoeWindow(
       clearInterval(follow);
       return;
     }
+    // 冲刺期间钉住：对手自己冲过来时由演出按帧挪，别让跟随把它拖回去
+    if (pinned) return;
     const box = home();
     if (!box) return;
     const workArea = electron.screen.getDisplayNearestPoint({
@@ -169,6 +176,14 @@ export function openFoeWindow(
     play: (anim, rate) => run(`foe.play(${JSON.stringify(anim)}, ${Number.isFinite(Number(rate)) ? Number(rate) : 1})`),
     preload: (anims) => run(`foe.preload(${JSON.stringify(anims)})`),
     fade: () => run('foe.fade()'),
+    pin(on) {
+      pinned = on;
+    },
+    moveTo(rect) {
+      if (win.isDestroyed()) return;
+      bounds = { ...rect };
+      win.setBounds(bounds);
+    },
     close(afterMs) {
       setTimeout(() => {
         clearInterval(follow);

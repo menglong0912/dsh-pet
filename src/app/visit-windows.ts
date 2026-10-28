@@ -298,6 +298,12 @@ export interface GuestWindow {
    * 换源要等加载的话，出手动作会比特效窗口里的飞行物晚上屏，手还没伸出去东西先飞了。取不到的照旧现取。
    */
   preload(anims: string[]): void;
+  /** 钉住 / 放开跟随（X16 冲刺）：钉住时窗口停在原地，由演出自己按帧挪 */
+  pin(on: boolean): void;
+  /** 直接挪到某个位置（X16 对手冲刺：主进程按帧算好，只改左上角与大小） */
+  moveTo(rect: Rect): void;
+  /** 整扇窗往上飘、淡出（X16 送走客人）：约 `ms` 毫秒里上移半个窗高、透明度到 0 */
+  floatAway(ms: number): void;
   /** 过一会儿关掉（先让告别的话和挥手放完） */
   close(afterMs: number): void;
 }
@@ -379,6 +385,9 @@ export function openGuestWindow(
   // 心魔（shadow）不响应戳一下：整窗一直穿透，也不去取点击次数——打的时候点它没有意义。
   let hit = petHitRect(bounds);
   let clickable = false;
+  let pinned = false;
+  let floating = false;
+  let floatTimer: ReturnType<typeof setInterval> | null = null;
   const hover = setInterval(() => {
     if (win.isDestroyed()) {
       clearInterval(hover);
@@ -408,6 +417,8 @@ export function openGuestWindow(
       clearInterval(follow);
       return;
     }
+    // 冲刺期间钉住（别把对手跟着拖走）；正在飘走的那扇窗也不再跟
+    if (pinned || floating) return;
     const box = home();
     if (!box) return;
     const workArea = electron.screen.getDisplayNearestPoint({
@@ -437,10 +448,48 @@ export function openGuestWindow(
     play: (anim, rate) =>
       run(`guest.play(${JSON.stringify(anim)}, ${Number.isFinite(Number(rate)) ? Number(rate) : 1})`),
     preload: (anims) => run(`guest.preload(${JSON.stringify(anims)})`),
+    pin(on) {
+      pinned = on;
+    },
+    moveTo(rect) {
+      if (win.isDestroyed()) return;
+      bounds = { ...rect };
+      hit = petHitRect(bounds);
+      win.setBounds(bounds);
+    },
+    floatAway(ms) {
+      if (floating || win.isDestroyed()) return;
+      floating = true;
+      // 飘走的那扇窗不再接点击（命中区还留在开场位置，别让光标在半空里点到它）
+      win.setIgnoreMouseEvents(true);
+      const startY = bounds.y;
+      const lift = Math.max(1, Math.round(bounds.height * 0.5));
+      const t0 = Date.now();
+      const span = Math.max(1, ms);
+      if (floatTimer !== null) clearInterval(floatTimer);
+      floatTimer = setInterval(() => {
+        if (win.isDestroyed()) {
+          if (floatTimer !== null) clearInterval(floatTimer);
+          floatTimer = null;
+          return;
+        }
+        const p = Math.min(1, (Date.now() - t0) / span);
+        const eased = 1 - (1 - p) * (1 - p);
+        bounds = { ...bounds, y: Math.round(startY - lift * eased) };
+        win.setBounds(bounds);
+        win.setOpacity(1 - eased);
+        if (p >= 1) {
+          if (floatTimer !== null) clearInterval(floatTimer);
+          floatTimer = null;
+        }
+      }, 16);
+    },
     close(afterMs) {
       setTimeout(() => {
         clearInterval(hover);
         clearInterval(follow);
+        if (floatTimer !== null) clearInterval(floatTimer);
+        floatTimer = null;
         if (!win.isDestroyed()) win.destroy();
       }, afterMs);
     },

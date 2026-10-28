@@ -2,6 +2,8 @@ import { openActionPanel } from '../action-panel-window';
 import type { ActionPanelWindow, TurnMode } from '../action-panel-window';
 import { arenaScoreboard, openArenaWindow } from '../arena-window';
 import { askAiTurn, legalChoices, startLiveClient, startLiveServer } from '../battle-live';
+import { createDashRig, screenUnion } from '../battle-dash';
+import type { DashFoe } from '../battle-dash';
 import type { TurnDecision } from '../battle-live';
 import type { Action, BattleEvent, BattleView, Fighter } from '../battle';
 import { BattleShow, LINE_MS, SHOW_ANIMS, swapSides, timeline } from '../battle-show';
@@ -24,17 +26,44 @@ import {
   sparLineRng,
   SPAR_LIVE_MODE,
   SPAR_MODE,
+  tripRequest,
   TURN_WAIT_MS,
 } from '../visit';
 import type { SparCard, SparFailure, SparReply, SparRevealReply, SparTurnReply, Visitor } from '../visit';
 import { CLOSE_HOLD_MS, lazyFns } from './context';
-import type { FeatureContext, Hosting, SparShow, SparState, SparWindows, Trip } from './context';
+import type { FeatureContext, GuestOffOptions, Hosting, SparShow, SparState, SparWindows, Trip } from './context';
 import { errorText } from './util';
 
 /** 切磋等客人应战 / 亮随机数的时限（§X5：对不上或 30 秒没来，按客人认输记） */
 export const SPAR_WAIT_MS = 30_000;
 /** 客人的赛后感言最多编这么久（跟着 reveal 带过去；模型磨蹭就退回模板，别把 reveal 拖过时限） */
 export const SPAR_REMARK_CAP_MS = 10_000;
+/** 送友风收场（X16）：演完等主人家送客这么久（PING_MS 的 3 倍）；没等到就自己 /v1/leave */
+export const FAREWELL_WAIT_MS = 15_000;
+
+/** 主人家送客时怎么演（X16）：自己把客人送走 = 整扇窗往上飘、淡出、不挥手；被客人送走 = 客人说「告辞～」再走 */
+export function hostFarewellSend(won: boolean): GuestOffOptions {
+  return won ? { farewell: '', wave: false, floatAway: true, closeMs: 1_500 } : { farewell: '告辞～', wave: true };
+}
+
+/** 主人家这一侧的切磋日记（X16 送友风收场换掉「赢了 / 输了」） */
+export function hostFarewellDiary(owner: string, pet: string, won: boolean): string {
+  return won ? `用送友风把 ${pet} 送回家了` : `和 ${owner} 家的 ${pet} 切磋，被它的送友风送得飘起来，它告辞回家了`;
+}
+
+/** 客人这一侧的切磋日记（X16）：自己放的说「把对方送得飘起来」，被送的说「被它的送友风送回家」 */
+export function guestFarewellDiary(owner: string, pet: string, won: boolean): string {
+  return won
+    ? `和 ${owner} 家的 ${pet} 切磋，用送友风把它送得飘起来，告辞回家了`
+    : `和 ${owner} 家的 ${pet} 切磋，被它的送友风送回家了`;
+}
+
+/** 赛后感言的指令（X16 送友风收场不用「你赢了 / 你输了」那套） */
+export function hostFarewellPrompt(owner: string, pet: string, won: boolean): string {
+  return won
+    ? `你刚用送友风把来串门的${pet}（${owner} 家的）送回家了，跟主人说一句。`
+    : `你刚和来串门的${pet}（${owner} 家的）切磋，被它的送友风送得飘起来，它告辞回家了。跟主人说一句。`;
+}
 
 /**
  * 开打前选出招方式（X19，照 X17 的出招面板）：自动 / AI 出招 / 手动，10 秒不点按自动。
@@ -80,17 +109,20 @@ export interface Spar {
 export function createSpar(ctx: FeatureContext): Spar {
   const {
     cancelDuels,
+    comeHome,
     compose,
     cultivationOn,
     holdPet,
     onCultivation,
     openShowFx,
     petName,
+    petRequest,
     playExtra,
     refreshMenu,
     relay,
     releasePet,
     say,
+    sendGuestHome,
     showRelay,
   } = lazyFns(ctx);
   const { deps, log, electron, diary, neighbors, homePet, sparWaitMs } = ctx;
@@ -136,6 +168,51 @@ export function createSpar(ctx: FeatureContext): Spar {
   }
 
   /**
+   * 冲刺（X16）：降龙十八掌带 `dash`。对手窗口在冲刺期间钉住、按帧挪；擂台和特效层按开场站位摆。
+   * 自家宠物走 `/position` 的 `line`（演出锁由 petRequest 带上）。
+   */
+  function dashRig(foe: DashFoe, arena: { pin(on: boolean): void }, fx: { pin(on: boolean): void }) {
+    return createDashRig({
+      box: homePet.box,
+      union: () => screenUnion(electron.screen),
+      foe,
+      pinStage: (on) => {
+        arena.pin(on);
+        fx.pin(on);
+      },
+      moveSelf: (x, y, durationMs) => {
+        void petRequest('POST', '/position', { x, y, mode: 'line', duration: durationMs });
+      },
+    });
+  }
+
+  /**
+   * 客人这一侧演完送友风那一拍以后（X16）：主人家送了 sent-home 就回家；还没送到就等 `FAREWELL_WAIT_MS`，
+   * 等不到自己走 `/v1/leave`。别的收场只处理「演到一半就被请回」的那份待办。
+   */
+  async function finishGuestShow(current: Trip): Promise<void> {
+    if (ctx.state.trip !== current || ctx.state.disposed) return;
+    if (!current.farewell) {
+      if (current.pendingHome === 'sent-home') await comeHome('sent-home');
+      return;
+    }
+    if (current.pendingHome === 'sent-home') {
+      await comeHome('farewell');
+      return;
+    }
+    if (current.farewellTimer) clearTimeout(current.farewellTimer);
+    current.farewellTimer = setTimeout(() => {
+      current.farewellTimer = null;
+      if (ctx.state.trip !== current) return;
+      // 主人家一直没送客（时差 / 报文丢了）：自己走，理由照旧是送友风
+      void tripRequest(current.host, '/v1/leave', { token: current.token, text: '' }).catch((error: unknown) =>
+        log(`串门：送走以后没等到主人家，自己走也没说成：${errorText(error)}`),
+      );
+      void comeHome('farewell');
+    }, FAREWELL_WAIT_MS);
+  }
+
+  /**
    * 一场对战的演出（X12 客人这一侧、X15 隔空切磋两边共用）：开对手窗口 → 擂台 → 特效层 →
    * BattleShow → 收摊，窗口记进 sparWindows，cancelSpar 能立刻全关。
    * 差别用参数传：本地是引擎 0 号还是 1 号（1 号要 swapSides）、自家宠物的台词走哪条、
@@ -173,6 +250,7 @@ export function createSpar(ctx: FeatureContext): Spar {
     );
     const windows: SparWindows = { foe: ownFoe ? foe : null, arena, fx, panel: null };
     ctx.state.sparWindows.add(windows);
+    const dash = dashRig(foe, arena, fx);
     const scoreboard = arenaScoreboard({
       self: { label: `${localFighter.name} · ${localStage}`, maxHp: localFighter.hp },
       foe: { label: `${foeFighter.name} · ${foeStage}`, maxHp: foeFighter.hp },
@@ -196,6 +274,8 @@ export function createSpar(ctx: FeatureContext): Spar {
         if (windows.panel) windows.panel.place(arena.bounds());
       },
       shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
+      dash: (who: 0 | 1, dir: 'out' | 'back', ms: number) => dash.run(who, dir, ms),
+      dashEnd: (force?: boolean) => dash.end(force),
     };
     /**
      * 逐手局手动出招的面板：到自家第一手才开（开早了会先亮一块空面板），
@@ -532,14 +612,26 @@ export function createSpar(ctx: FeatureContext): Spar {
     // 打完才记账：修为、战绩、邻居簿、日记
     const end = events[events.length - 1];
     const won = end.kind === 'end' && end.winner === 0;
+    const farewell = end.kind === 'end' && end.reason === 'farewell';
     onCultivation(Date.now(), practice.sparDone(Date.now(), visitorId, won), { anim: false });
     neighbors.recordSpar(visitorId, won);
-    diary.note(Date.now(), 'cultivate', `和 ${visitor.owner} 家的 ${visitor.pet} 切磋，${won ? '赢了' : '输了'}`);
+    diary.note(
+      Date.now(),
+      'cultivate',
+      farewell
+        ? hostFarewellDiary(visitor.owner, visitor.pet, won)
+        : `和 ${visitor.owner} 家的 ${visitor.pet} 切磋，${won ? '赢了' : '输了'}`,
+    );
+    // 送友风收场（X16）：送客由主人家拍板（逐手局这一拍来自 battle-live 的事件流）
+    if (farewell) {
+      sendGuestHome(hostFarewellSend(won));
+    }
     void refreshMenu();
-    const instruction =
-      `你刚和来串门的${visitor.pet}（${visitor.owner} 家的）切磋了一场，${won ? '你赢了' : '你输了'}。` +
-      '跟主人说一句赛后感言。' +
-      (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人，下次再战。');
+    const instruction = farewell
+      ? hostFarewellPrompt(visitor.owner, visitor.pet, won)
+      : `你刚和来串门的${visitor.pet}（${visitor.owner} 家的）切磋了一场，${won ? '你赢了' : '你输了'}。` +
+        '跟主人说一句赛后感言。' +
+        (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人，下次再战。');
     const text = cleanText(await compose(instruction, won ? '切磋赢啦，承让承让～' : '切磋输了，下次再战！'), LINE_MAX);
     if (ctx.state.battle === null && ctx.state.liveBattle === null) void say(text, { anim: false });
   }
@@ -568,10 +660,17 @@ export function createSpar(ctx: FeatureContext): Spar {
     const events = sparFight(you, foe, guestNonce, state.hostNonce, { farewell: true });
     const end = events[events.length - 1];
     const won = end.kind === 'end' && end.winner === 0;
+    const farewell = end.kind === 'end' && end.reason === 'farewell';
     // 记账：修为进账、战绩、邻居簿、日记（冒泡的 anim 一律 false，演出马上开场）
     onCultivation(Date.now(), practice.sparDone(Date.now(), visitor.id, won), { anim: false });
     neighbors.recordSpar(visitor.id, won);
-    diary.note(Date.now(), 'cultivate', `和 ${visitor.owner} 家的 ${visitor.pet} 切磋，${won ? '赢了' : '输了'}`);
+    diary.note(
+      Date.now(),
+      'cultivate',
+      farewell
+        ? hostFarewellDiary(visitor.owner, visitor.pet, won)
+        : `和 ${visitor.owner} 家的 ${visitor.pet} 切磋，${won ? '赢了' : '输了'}`,
+    );
     // 台词也用这一对随机数挑（X12）：客人那边按同一颗种子排，两块屏幕上的解说逐句相同
     const steps = timeline(events, [you.name, foe.name], sparLineRng(guestNonce, state.hostNonce), [
       you.skills,
@@ -589,6 +688,7 @@ export function createSpar(ctx: FeatureContext): Spar {
     );
     const windows: SparWindows = { foe: null, arena, fx };
     ctx.state.sparWindows.add(windows);
+    const dash = dashRig(current.window, arena, fx);
     const scoreboard = arenaScoreboard({
       self: { label: `${you.name} · ${practice.view().label}`, maxHp: you.hp },
       foe: { label: `${foe.name} · ${stageLabel(guestCard.stage)}`, maxHp: foe.hp },
@@ -610,6 +710,8 @@ export function createSpar(ctx: FeatureContext): Spar {
         fx.place();
       },
       shoot: (shot: Shot, who: 0 | 1) => fx.fire(shot, who),
+      dash: (who: 0 | 1, dir: 'out' | 'back', ms: number) => dash.run(who, dir, ms),
+      dashEnd: (force?: boolean) => dash.end(force),
     });
     void refreshMenu();
     const show = ctx.state.battle;
@@ -620,15 +722,21 @@ export function createSpar(ctx: FeatureContext): Spar {
     const cancelled = ctx.state.spar !== state || ctx.state.disposed;
     if (ctx.state.spar === state) ctx.state.spar = null;
     if (cancelled) return;
-    // 客人跟着 reveal 捎回来的赛后感言先上客人窗口的气泡；自家的走 compose（只带人设，每场 +1 次调用）。
-    // 演完马上收摊（§X14）：菜单换回来、这一场的窗口按 CLOSE_HOLD_MS 收，都不等自家的赛后感言
-    if (guestLine) current.window.say(guestLine, LINE_MS);
+    if (farewell) {
+      // 送友风收场（X16）：送客由主人家拍板。客人被送走：飘起来的那段已经播完，整扇窗往上飘、淡出后关掉，
+      // 不挥手也不说告别的话；自家挨了送友风：客人说一句「告辞～」再走。
+      sendGuestHome(hostFarewellSend(won));
+    } else if (guestLine) {
+      // 客人跟着 reveal 捎回来的赛后感言先上客人窗口的气泡
+      current.window.say(guestLine, LINE_MS);
+    }
     void refreshMenu();
     closeSparWindows(windows, CLOSE_HOLD_MS);
-    const instruction =
-      `你刚和来串门的${visitor.pet}（${visitor.owner} 家的）切磋了一场，${won ? '你赢了' : '你输了'}。` +
-      '跟主人说一句赛后感言。' +
-      (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人，下次再战。');
+    const instruction = farewell
+      ? hostFarewellPrompt(visitor.owner, visitor.pet, won)
+      : `你刚和来串门的${visitor.pet}（${visitor.owner} 家的）切磋了一场，${won ? '你赢了' : '你输了'}。` +
+        '跟主人说一句赛后感言。' +
+        (won ? '别提修为和法宝的数字。' : '切磋点到为止，输了不丢人，下次再战。');
     const text = cleanText(await compose(instruction, won ? '切磋赢啦，承让承让～' : '切磋输了，下次再战！'), LINE_MAX);
     // 回来时已经开了下一场（battle 不是 null）就不说了，免得插进下一场的台词里
     if (ctx.state.battle === null && ctx.state.liveBattle === null) void say(text, { anim: false });
@@ -733,8 +841,14 @@ export function createSpar(ctx: FeatureContext): Spar {
       const events = sparFight(hostFighter, you, ownNonce, reply.nonce, { farewell: true });
       const end = events[events.length - 1];
       const won = end.kind === 'end' && end.winner === 1;
-      // 感言先编好（跟着 reveal 带过去，在主人家的客人窗口里说）；编太久退回模板，别拖过主人家的时限
-      const remark = await sparRemark(current, won);
+      const farewell = end.kind === 'end' && end.reason === 'farewell';
+      if (farewell) {
+        current.farewell = true;
+        current.farewellBySelf = won;
+      }
+      // 感言先编好（跟着 reveal 带过去，在主人家的客人窗口里说）；编太久退回模板，别拖过主人家的时限。
+      // 送友风收场不用感言：客人都被送回家了，省一次模型调用（X16）
+      const remark = farewell ? '' : await sparRemark(current, won);
       if (ctx.state.trip !== current || ctx.state.spar !== state) return;
       let revealed: SparRevealReply;
       try {
@@ -755,7 +869,9 @@ export function createSpar(ctx: FeatureContext): Spar {
       diary.note(
         Date.now(),
         'cultivate',
-        `和 ${current.host.owner} 家的 ${current.host.pet} 切磋，${won ? '赢了' : '输了'}`,
+        farewell
+          ? guestFarewellDiary(current.host.owner, current.host.pet, won)
+          : `和 ${current.host.owner} 家的 ${current.host.pet} 切磋，${won ? '赢了' : '输了'}`,
       );
       // 演出：跟主人家同一张时间线（同一对随机数、同一个 timeline、同一颗台词种子）。引擎里主人家是 0 号，
       // 这里用共用的演出函数换边成本地视角（自家宠物 0 号、对手 1 号）
@@ -763,10 +879,18 @@ export function createSpar(ctx: FeatureContext): Spar {
       await runSparShow({ ...baseShow, events });
       if (ctx.state.trip !== current || ctx.state.spar !== state || ctx.state.disposed) return;
       if (ctx.state.spar === state) ctx.state.spar = null;
+      if (farewell) {
+        // 送友风收场（X16）：主人家会送客；先转播一句，再等 sent-home（等不到 15 秒自己走）
+        relay(won ? '（切磋）用送友风把它送走啦～' : '（切磋）被一阵风送回家啦～');
+        void refreshMenu();
+        await finishGuestShow(current);
+        return;
+      }
       // 结果与感言照旧转播（演完了，按平时的转播调亮、到点退回半透明）
       relay(won ? '（切磋）这场我赢啦！' : '（切磋）这场输了，下次再战～');
       relay(remark);
       void refreshMenu();
+      await finishGuestShow(current);
       return;
     }
     // 逐手局（X19）：先亮随机数（赛后感言打完再编），再一手一手对传；打完才记账
@@ -810,16 +934,30 @@ export function createSpar(ctx: FeatureContext): Spar {
     // 打完才记账：修为进账、战绩、日记（对面同时也在它打完时记）
     const end = events[events.length - 1];
     const won = end.kind === 'end' && end.winner === 1;
+    const farewell = end.kind === 'end' && end.reason === 'farewell';
+    if (farewell) {
+      current.farewell = true;
+      current.farewellBySelf = won;
+    }
     onCultivationRelayed(Date.now(), practice.sparDone(Date.now(), current.host.id, won));
     if (current.verified) neighbors.recordSpar(current.host.id, won);
     diary.note(
       Date.now(),
       'cultivate',
-      `和 ${current.host.owner} 家的 ${current.host.pet} 切磋，${won ? '赢了' : '输了'}`,
+      farewell
+        ? guestFarewellDiary(current.host.owner, current.host.pet, won)
+        : `和 ${current.host.owner} 家的 ${current.host.pet} 切磋，${won ? '赢了' : '输了'}`,
     );
+    if (farewell) {
+      relay(won ? '（切磋）用送友风把它送走啦～' : '（切磋）被一阵风送回家啦～');
+      void refreshMenu();
+      await finishGuestShow(current);
+      return;
+    }
     relay(won ? '（切磋）这场我赢啦！' : '（切磋）这场输了，下次再战～');
     relay(await sparRemark(current, won));
     void refreshMenu();
+    await finishGuestShow(current);
   }
 
   // ---------- 隔空切磋（X15） ----------
