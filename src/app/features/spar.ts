@@ -407,7 +407,7 @@ export function createSpar(ctx: FeatureContext): Spar {
     return events;
   }
 
-  /** 主人家发起切磋（菜单「串门/和客人切磋」）：先选出招方式（X19），再把 spar-invite 捎给客人 */
+  /** 主人家发起切磋（菜单「串门/和客人切磋」）：先选自家的出招方式（X19），再把逐手局的 spar-invite 捎给客人 */
   function inviteSpar(): void {
     const current = ctx.state.hosting;
     if (
@@ -429,13 +429,9 @@ export function createSpar(ctx: FeatureContext): Spar {
       );
       if (ctx.state.hosting !== current || ctx.state.disposed) return;
       if (!mode) return;
-      const live = mode !== 'auto';
-      if (!ctx.state.visitHost?.tell(live ? { type: 'spar-invite', mode: 'live' } : { type: 'spar-invite' })) return;
-      const state: SparState = { role: 'host', stage: 'invited', since: Date.now(), timer: null };
-      if (live) {
-        state.live = true;
-        state.mode = mode;
-      }
+      // 一律邀逐手局：客人也在它自己的面板里选方式
+      if (!ctx.state.visitHost?.tell({ type: 'spar-invite', mode: 'live' })) return;
+      const state: SparState = { role: 'host', stage: 'invited', since: Date.now(), timer: null, live: true, mode };
       state.timer = setTimeout(() => {
         if (ctx.state.spar !== state || state.stage !== 'invited') return;
         ctx.state.spar = null;
@@ -746,7 +742,7 @@ export function createSpar(ctx: FeatureContext): Spar {
    * 客人这一侧的切磋（菜单「串门/找主人家的宠物切磋」；收到 spar-invite 也走这里，§X5 的自动应战）：
    * 发名帖与承诺 → 拿到主人家的随机数后这一场就定了 → 编好自己的赛后感言跟着 reveal 带过去 →
    * 记账、在自家屏幕上把这一场演全套（对手是主人家的宠物窗口；`say` 会先把宠物叫回家，台词全走转播）。
-   * X19 逐手局：发起时先选出招方式（自动 / AI / 手动），逐手局在打完时才记账，掉线不记。
+   * X19 逐手局：发起时先选出招方式（自动 / AI / 手动），一律走逐手局；逐手局在打完时才记账，掉线不记。
    */
   async function startGuestSpar(invite?: { live: boolean }): Promise<void> {
     const current = ctx.state.trip;
@@ -763,7 +759,8 @@ export function createSpar(ctx: FeatureContext): Spar {
       ctx.state.duelAccepted
     )
       return;
-    // 发起方（菜单点的）先选方式；主人家邀的逐手局由客人选自家方式（自动也是逐手对传的一种）
+    // 发起方（菜单点的）先选方式；主人家邀的逐手局由客人选自家方式（自动也是逐手对传的一种）。
+    // 自己发起的一律走逐手局，主人家也能选它的；只有旧主人家邀的全自动局才整场算好
     let mode: TurnMode = 'auto';
     if (!invite || invite.live) {
       const picked = await pickTurnMode(ctx);
@@ -771,7 +768,7 @@ export function createSpar(ctx: FeatureContext): Spar {
       if (ctx.state.trip !== current || ctx.state.disposed) return;
       mode = picked;
     }
-    const live = invite ? invite.live : mode !== 'auto';
+    const live = invite ? invite.live : true;
     const state: SparState = { role: 'guest', stage: 'asking', since: Date.now(), timer: null };
     if (live) {
       state.live = true;

@@ -221,8 +221,8 @@ export function createVisitingChat(ctx: FeatureContext): VisitingChat {
       ask = GUEST_ASK.treat(snack.label);
     } else if (event.type === 'spar-invite') {
       // 主人家邀战（X5）：开着修炼就自动应战（§X5 的口径——客人那边关了切磋就忽略，不回话）；
-      // 逐手局（X19）带 mode: 'live'，客人应战后在自己的出招面板里选自家方式
-      void startGuestSpar(event.mode === 'live' ? { live: true } : undefined);
+      // 逐手局（X19）带 mode: 'live'，客人应战后在自己的出招面板里选自家方式；旧主人家邀的全自动局不弹面板
+      void startGuestSpar({ live: event.mode === 'live' });
       return;
     } else {
       ask = GUEST_ASK.poke;
