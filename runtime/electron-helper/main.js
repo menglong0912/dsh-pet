@@ -540,11 +540,14 @@ async function startTray() {
     tray.setToolTip('dsh-pet 桌面宠物');
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        // 开机自启 = 系统登录项；勾选状态每次建菜单时从系统读，用户在系统设置里删掉也能如实反映
+        // 开机自启 = 系统登录项；勾选状态每次建菜单时从系统读，用户在系统设置里删掉也能如实反映。
+        // 开发期（start 用裸 Electron 跑 lib/app.js）不让勾：登记的会是不带参数的 electron(.exe)，
+        // 开机只弹 Electron 默认窗口；Windows 上还和打包版共用同一个 Run 值名，会把它覆盖掉
         {
-          label: '开机自启',
+          label: app.isPackaged ? '开机自启' : '开机自启（仅打包版）',
           type: 'checkbox',
-          checked: app.getLoginItemSettings().openAtLogin,
+          enabled: app.isPackaged,
+          checked: app.isPackaged && app.getLoginItemSettings().openAtLogin,
           click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
         },
         { label: '退出', click: () => app.quit() },

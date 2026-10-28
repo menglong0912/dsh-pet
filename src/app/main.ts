@@ -119,7 +119,8 @@ if (process.env.DSH_PET_DPI_PROBE === '1') {
  * 之前被 require（内部有 `app.commandLine.appendSwitch`，ready 后再加不生效）。
  */
 async function boot(): Promise<void> {
-  // 双击 / 开机自启没有终端：日志另存一份到 ~/Library/Logs/dsh-pet/app.log
+  // 双击 / 开机自启没有终端：日志另存一份到系统日志目录下的 app.log
+  // （macOS ~/Library/Logs/dsh-pet，Windows %APPDATA%\dsh-pet\logs）
   if (!process.stdout.isTTY) teeOutputToFile(join(app.getPath('logs'), 'app.log'));
   // 独立应用用自己的数据目录（与 helper 的 userData 同一处），不和 DSH 的 ~/.dsh 共用配置、记忆与 AI 设置；
   // 显式设了 DSH_HOME 时尊重它。必须赶在下面任何 dshHomeDir() 之前。
