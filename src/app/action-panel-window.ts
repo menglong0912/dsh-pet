@@ -10,7 +10,7 @@
  * 页面里的点击 POST 本机接口 `/app/battle/choose` —— 同一个接口也能用 curl 驱动（真机核验用），
  * 所以这里不开 preload、不开 IPC。
  *
- * 可点但不抢焦点：`focusable: false` + `showInactive()`；鼠标点按钮不会把主人正在打字的输入框顶掉。
+ * 可点但不抢焦点：`focusable: false` + `acceptFirstMouse: true` + `showInactive()`；鼠标点按钮不会把主人正在打字的输入框顶掉。
  */
 import type { PetBox, Rect, WindowElectron, WindowLike } from './visit-windows';
 
@@ -182,6 +182,8 @@ export function openActionPanel(
     hasShadow: false,
     // 可点，但不拿焦点：主人正在打字时弹出来也不抢输入框
     focusable: false,
+    // 窗口拿不到焦点，macOS 上点下去只当「激活窗口」、不传给页面：没有这项按钮永远点不上（选方式超时落回自动）
+    acceptFirstMouse: true,
     enableLargerThanScreen: true,
     webPreferences: {
       contextIsolation: true,

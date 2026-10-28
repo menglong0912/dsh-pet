@@ -43,10 +43,11 @@ function fakeWindow(): WindowLike & { calls: string[]; destroyed: boolean; hidde
   return win;
 }
 
-function fakeElectron(win: WindowLike): WindowElectron {
+function fakeElectron(win: WindowLike, created: Record<string, unknown>[] = []): WindowElectron {
   return {
     BrowserWindow: Object.assign(
-      function () {
+      function (options: Record<string, unknown>) {
+        created.push(options);
         return win;
       },
       { getAllWindows: () => [] },
@@ -162,6 +163,20 @@ test('X17 出招面板：亮出来以后按页面量到的实际高度校正窗�
   assert.equal(sizes[sizes.length - 1]?.height, 152, '按量到的高度（向上取整）校正');
   assert.equal(panel.choose(1), true);
   assert.equal(await picking, 0);
+  panel.close();
+});
+
+test('X17 出招面板：不拿焦点但点第一下就算数（macOS 上没有 acceptFirstMouse 按钮点不上）', () => {
+  const win = fakeWindow();
+  const created: Record<string, unknown>[] = [];
+  const panel = openActionPanel(
+    fakeElectron(win, created),
+    'http://127.0.0.1:1/app/panel',
+    () => arena,
+    () => ({ left: 100, top: 300, size: 200, bottomPad: 20 }),
+  );
+  assert.equal(created[0].focusable, false);
+  assert.equal(created[0].acceptFirstMouse, true);
   panel.close();
 });
 
