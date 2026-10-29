@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { startLiveClient, startLiveServer } from './battle-live.ts';
 import type { LiveVersus } from './battle-live.ts';
 import type { BattleEvent, Fighter } from './battle.ts';
-import { rngFrom } from './battle.ts';
+import { fairSparPair, rngFrom } from './battle.ts';
 import type { ShowSides } from './battle-show.ts';
 import { diaryDate } from './diary.ts';
 import type { DiaryDay } from './diary.ts';
@@ -95,9 +95,11 @@ async function fakeLiveSparHost(): Promise<{
         return { ok: true, card: fakeCard, nonce: HOST_NONCE };
       },
       reveal: async (_visitor, nonce) => {
+        // 和真主人家一样先拉平修为（X20）：两边算出来的这一对必须一致，出手才过得了 legalActions
+        const [a, b] = fairSparPair(fakeFighter, { ...hostFighter, name: '客人的宠物' });
         server = startLiveServer({
-          a: fakeFighter,
-          b: { ...hostFighter, name: '客人的宠物' },
+          a,
+          b,
           seed: `${nonce}:${HOST_NONCE}`,
           local: 0,
           show: silent,
@@ -154,9 +156,10 @@ async function fakeLiveDuelHost(): Promise<{
         return { ok: true, card: fakeCard, nonce: HOST_NONCE };
       },
       duelReveal: (_visitor, nonce) => {
+        const [a, b] = fairSparPair(fakeFighter, { ...hostFighter, name: '客人的宠物' });
         server = startLiveServer({
-          a: fakeFighter,
-          b: { ...hostFighter, name: '客人的宠物' },
+          a,
+          b,
           seed: `${nonce}:${HOST_NONCE}`,
           local: 0,
           show: silent,
@@ -392,9 +395,19 @@ test('X19 隔空切磋逐手局（应战方）：自动应战打完才记账，�
       if (!reply.ok) return;
       assert.deepEqual(await sendDuelReveal(target, { token: reply.token, nonce: ownNonce, line: '' }), { ok: true });
       // 挑战方这一侧按后备挑法把逐手局打完；应战方（app）在自己的屏幕上演
+      // 应战方（app）开打前会 fairSparPair 拉平修为（X20），挑战方这一侧也要算出同一对
+      const [hostSide, guestSide] = fairSparPair(cardFighterFor('桌宠', reply.card), {
+        name: '阿花',
+        hp: 56,
+        power: 5,
+        agility: 5,
+        speed: 5,
+        weapons: ['poker'],
+        skills: ['dove'],
+      });
       const client = startLiveClient({
-        a: cardFighterFor('桌宠', reply.card),
-        b: { name: '阿花', hp: 56, power: 5, agility: 5, speed: 5, weapons: ['poker'], skills: ['dove'] },
+        a: hostSide,
+        b: guestSide,
         seed: `${ownNonce}:${reply.nonce}`,
         local: 1,
         show: silent,
@@ -476,9 +489,19 @@ test('X19 隔空切磋逐手局（应战方）：熟人自动应战不挂菜单�
         '自动应战不挂「应战」菜单',
       );
       assert.deepEqual(await sendDuelReveal(target, { token: reply.token, nonce: ownNonce, line: '' }), { ok: true });
+      // 应战方（app）开打前会 fairSparPair 拉平修为（X20），挑战方这一侧也要算出同一对
+      const [hostSide, guestSide] = fairSparPair(cardFighterFor('桌宠', reply.card), {
+        name: '阿花',
+        hp: 56,
+        power: 5,
+        agility: 5,
+        speed: 5,
+        weapons: ['poker'],
+        skills: ['dove'],
+      });
       const client = startLiveClient({
-        a: cardFighterFor('桌宠', reply.card),
-        b: { name: '阿花', hp: 56, power: 5, agility: 5, speed: 5, weapons: ['poker'], skills: ['dove'] },
+        a: hostSide,
+        b: guestSide,
         seed: `${ownNonce}:${reply.nonce}`,
         local: 1,
         show: silent,

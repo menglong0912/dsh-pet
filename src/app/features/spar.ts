@@ -6,6 +6,7 @@ import { createDashRig, screenUnion } from '../battle-dash';
 import type { DashFoe } from '../battle-dash';
 import type { TurnDecision } from '../battle-live';
 import type { Action, BattleEvent, BattleView, Fighter } from '../battle';
+import { fairSparPair } from '../battle';
 import { BattleShow, LINE_MS, SHOW_ANIMS, swapSides, timeline } from '../battle-show';
 import type { Shot } from '../battle-show';
 import { stageLabel } from '../cultivation';
@@ -663,8 +664,8 @@ export function createSpar(ctx: FeatureContext): Spar {
     const current = ctx.state.hosting;
     if (!practice || !current || !visitor.id || !state.guestCard || !state.hostNonce) return;
     const guestCard = state.guestCard;
-    const you = practice.fighter(petName());
-    const foe = cardFighter(visitor.pet, guestCard);
+    // 切磋不比修为（X20）：名帖照旧收真实属性，开打和演出都用拉平后的这一对
+    const [you, foe] = fairSparPair(practice.fighter(petName()), cardFighter(visitor.pet, guestCard));
     if (state.live) {
       await runHostLiveSparShow(visitor, state, current, you, foe, guestCard, guestNonce, guestLine);
       return;
@@ -827,8 +828,8 @@ export function createSpar(ctx: FeatureContext): Spar {
       guestSparFailed(state, reply.reason, live);
       return;
     }
-    const you = practice.fighter(petName());
-    const hostFighter = cardFighter(current.host.pet, reply.card);
+    // 切磋不比修为（X20）：名帖照旧收真实属性，开打和演出都用拉平后的这一对
+    const [hostFighter, you] = fairSparPair(cardFighter(current.host.pet, reply.card), practice.fighter(petName()));
     // 名帖里的境界没法验证真伪（§设计 4.7）：奖励小、还封顶，照它报的打就是了
     const beforeShow = (): void => {
       // 做客时自家宠物是半透明的（AWAY_OPACITY）：开演亮回原色；演出期间转播不改亮度，

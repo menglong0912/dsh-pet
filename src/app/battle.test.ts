@@ -6,6 +6,7 @@ import {
   fightUntilDecision,
   fallbackAction,
   legalActions,
+  fairSparPair,
   rngFrom,
   tribulate,
   shadowOf,
@@ -416,16 +417,55 @@ test('平衡：同境界随机配招，先手方胜率 40%–60%', () => {
   }
 });
 
-test('平衡：高一个小境界约 60%，高一个大境界约 85%（各 ±10%）', () => {
-  // 小境界：筑基中期对筑基初期（同大境界内 +1）
-  const small = balanceRate((i) => [fighterAt(10, seededRng(i)), fighterAt(9, seededRng(i + 500))]);
-  assert.ok(small >= 0.5 && small <= 0.7, `小境界实际 ${small}`);
-  // 大境界：金丹中期对筑基中期（同小境界位置跨一个大境界）
-  const big = balanceRate((i) => [fighterAt(13, seededRng(i)), fighterAt(10, seededRng(i + 500))]);
-  assert.ok(big >= 0.75 && big <= 0.95, `大境界实际 ${big}`);
+test('平衡：切磋拉平修为后，高低境界的胜率都在 45%–55%（X20）', () => {
+  // 高一个小境界、一个大境界、五个大境界，以及炼气 4 对 1：拉平属性、法宝和招式件数后都不该有修为优势
+  for (const [hi, lo] of [
+    [10, 9],
+    [13, 10],
+    [16, 13],
+    [25, 10],
+    [4, 1],
+  ] as const) {
+    const rate = balanceRate((i) => fairSparPair(fighterAt(hi, seededRng(i)), fighterAt(lo, seededRng(i + 500))));
+    assert.ok(rate >= 0.45 && rate <= 0.55, `${hi} 对 ${lo} 实际 ${rate}`);
+  }
 });
 
-test('平衡：任一法宝或招式，持有方胜率在 40%–65% 之间', () => {
+test('X20 切磋拉平：属性取中点，法宝和招式按少的一方取齐（两边算出来一致、再拉一次不变）', () => {
+  const a: Fighter = {
+    name: '甲',
+    hp: 100,
+    power: 20,
+    agility: 8,
+    speed: 4,
+    weapons: ['water-gun', 'poker', 'top'],
+    skills: ['dove', 'bubble', 'myriad-self'],
+  };
+  const b: Fighter = {
+    name: '乙',
+    hp: 60,
+    power: 6,
+    agility: 16,
+    speed: 12,
+    weapons: ['slingshot'],
+    skills: ['dragon-palm'],
+  };
+  const [x, y] = fairSparPair(a, b);
+  for (const key of ['hp', 'power', 'agility', 'speed'] as const) {
+    assert.equal(x[key], Math.round((a[key] + b[key]) / 2), `${key} 取中点`);
+    assert.equal(y[key], x[key], `${key} 两边一样`);
+  }
+  assert.deepEqual(x.weapons, ['water-gun']);
+  assert.deepEqual(y.weapons, ['slingshot']);
+  assert.deepEqual(x.skills, ['dove']);
+  assert.deepEqual(y.skills, ['dragon-palm']);
+  // 同一对无论谁先谁后，拉出来的两只都一样；再拉一次不再变
+  const [y2, x2] = fairSparPair(b, a);
+  assert.deepEqual([x2, y2], [x, y]);
+  assert.deepEqual(fairSparPair(x, y), [x, y]);
+});
+
+test('平衡：任一法宝或招式，持有方胜率在 44%–61% 之间（X20 收紧）', () => {
   // 持有方把一个随机招 / 一件法宝换成待测项（而不是白多一份），量出来的才是它本身的分量
   for (const id of WEAPON_IDS) {
     const rate = balanceRate((i) => {
@@ -435,7 +475,7 @@ test('平衡：任一法宝或招式，持有方胜率在 40%–65% 之间', () 
       b.weapons = b.weapons.filter((w) => w !== id);
       return [a, b];
     }, ITEM_BALANCE_N);
-    assert.ok(rate >= 0.4 && rate <= 0.65, `法宝 ${id} 实际 ${rate}`);
+    assert.ok(rate >= 0.44 && rate <= 0.61, `法宝 ${id} 实际 ${rate}`);
   }
   for (const id of SKILL_IDS) {
     const rate = balanceRate((i) => {
@@ -445,7 +485,7 @@ test('平衡：任一法宝或招式，持有方胜率在 40%–65% 之间', () 
       else a.skills = [id];
       return [a, fighterAt(10, seededRng(i + 500))];
     }, ITEM_BALANCE_N);
-    assert.ok(rate >= 0.4 && rate <= 0.65, `招式 ${id} 实际 ${rate}`);
+    assert.ok(rate >= 0.44 && rate <= 0.61, `招式 ${id} 实际 ${rate}`);
   }
 });
 
@@ -492,7 +532,8 @@ test('平衡：渡劫不吃丹约 65%、吃丹约 80%——七个渡劫分界全
 
 // ---------------------------------------------------------------------------
 // Y0 兼容快照：改引擎（hpNow / moves / mods / guard）之前先录下来的 200 场事件序列。
-// 不带新字段的 Fighter 必须逐条打出同一串事件；X16 只扩图鉴（BATTLE_VERSION 3 → 4），旧角色的结算不变。
+// 不带新字段的 Fighter 必须逐条打出同一串事件；X20 改了结算规则（控制判定、假死遁躺一拍、
+// 图鉴数值重标）并升 BATTLE_VERSION 4 → 5，快照按新规则重录。
 // ---------------------------------------------------------------------------
 
 /**
@@ -502,7 +543,7 @@ test('平衡：渡劫不吃丹约 65%、吃丹约 80%——七个渡劫分界全
  * **法宝和招式另行随机配招**（每个图鉴项独立 50% 入选，法宝最多 4 件、招式最多 6 门，随机数 `seededRng(i * 977 + 13)`），
  * 全默认 `autoController`。200 场合计 4620 个事件。
  */
-const COMPAT_SNAPSHOT = 'c3288ca172dc78df12cda4c13f63d74cf4e8a5524678052221be39fd434d2224';
+const COMPAT_SNAPSHOT = '4133d29645c86e32b0bd3faddf275fdea16069a704385a3bfb6250c034beaa7a';
 
 /**
  * 快照里配招用的旧图鉴（X16 之前的 17 门招式）：X16 把 `SKILL_IDS` 扩到 19，
@@ -561,7 +602,7 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-test('Y0 兼容快照：不带新字段的 Fighter 逐条打出同一串事件（X16 只加图鉴条目，旧角色结算不变）', () => {
+test('Y0 兼容快照：不带新字段的 Fighter 逐条打出同一串事件（X20 重录）', () => {
   const digest = createHash('sha256')
     .update(
       compatEvents()
@@ -673,10 +714,11 @@ test('X8 弹弓：远程（不被反击），15% 一发两颗（twin）', () => 
   assert.ok(twins / hits > 0.08 && twins / hits < 0.23, `两颗的比例 ${twins}/${hits}`);
 });
 
-test('X8 鲸歌：对方下一次出手跳过（sleep），睡着期间挨的攻击不判闪避', () => {
+test('X8 鲸歌：控住就跳过下一拍（sleep），睡着期间挨的攻击不判闪避；控不住只迟缓', () => {
   let seen = 0;
+  let resisted = 0;
   for (let i = 0; i < 100; i++) {
-    const a = { ...fighterAt(8, seededRng(i)), skills: ['whale-song' as const], weapons: [] };
+    const a = { ...fighterAt(8, seededRng(i)), skills: ['whale-song' as const], weapons: [], power: 60 };
     const b = { ...fighterAt(8, seededRng(i + 3)), agility: 30, skills: ['dove' as const] };
     const events = fight(named(a, '甲'), named(b, '乙'), `song-${i}`, [
       always({ kind: 'skill', skill: 'whale-song' }),
@@ -685,6 +727,12 @@ test('X8 鲸歌：对方下一次出手跳过（sleep），睡着期间挨的攻
     const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'whale-song');
     if (k < 0) continue;
     seen++;
+    const cast = events[k];
+    if (cast.kind === 'skill' && cast.resisted) {
+      resisted++;
+      assert.notEqual(nextTurn(events, k, 1)?.kind, 'skip', '没哄睡就不该跳过出手');
+      continue;
+    }
     const turn = nextTurn(events, k, 1);
     if (turn) assert.deepEqual([turn.kind, turn.kind === 'skip' && turn.cause], ['skip', 'sleep']);
     const wake = events.findIndex((e, j) => j > k && e.kind === 'skip' && e.actor === 1);
@@ -692,9 +740,10 @@ test('X8 鲸歌：对方下一次出手跳过（sleep），睡着期间挨的攻
     assert.equal(between.filter((e) => e.kind === 'dodge' && e.actor === 1).length, 0, '睡着时躲不开');
   }
   assert.ok(seen > 50);
+  assert.ok(resisted > 0, '该有控不住的场次（X20）');
 });
 
-test('X8 墨汁：对方接下来两次出手里会打空（miss），之后不再打空', () => {
+test('X8 墨汁：对方接下来三次出手里会打空（miss），之后不再打空', () => {
   let misses = 0;
   for (let i = 0; i < 100; i++) {
     const a = { ...fighterAt(8, seededRng(i)), skills: ['ink' as const], hp: 9_999 };
@@ -711,13 +760,73 @@ test('X8 墨汁：对方接下来两次出手里会打空（miss），之后不�
       if ((e.kind === 'decide' || e.kind === 'skip') && e.actor === 1) turns++;
       if (e.kind === 'miss') {
         assert.equal(e.actor, 1, '打空的是被糊眼的那一方');
-        assert.ok(turns >= 1 && turns <= 2, `只在糊眼后的两次出手里：第 ${turns} 次`);
+        assert.ok(turns >= 1 && turns <= 3, `只在糊眼后的三次出手里：第 ${turns} 次`);
         misses++;
       }
     }
     assert.equal(events.slice(0, k).filter((e) => e.kind === 'miss').length, 0, '糊眼之前不会打空');
   }
-  assert.ok(misses > 30, `三球三下、两次出手，该打空不少：${misses}`);
+  assert.ok(misses > 30, `三球三下、三次出手，该打空不少：${misses}`);
+});
+
+test('X20 控制：控住一拍以后，对方还没出手前压不上第二下（连不成锁）', () => {
+  const chain: Controller = {
+    decide: (view) => {
+      const next = (['whale-song', 'lion-roar', 'dream-chant'] as SkillId[]).find(
+        (skill) => view.you.skills.includes(skill) && !view.you.used.includes(skill),
+      );
+      return next ? { kind: 'skill', skill: next } : { kind: 'unarmed' };
+    },
+  };
+  let casts = 0;
+  for (let i = 0; i < 40; i++) {
+    const a = {
+      ...fighterAt(10, seededRng(i)),
+      weapons: [],
+      skills: ['whale-song', 'lion-roar', 'dream-chant'] as SkillId[],
+      power: 80,
+      hp: 9_999,
+    };
+    const b = { ...fighterAt(10, seededRng(i + 300)), weapons: [], skills: [], agility: 0, hp: 9_999 };
+    const events = fight(named(a, '甲'), named(b, '乙'), `chain-${i}`, [chain, unarmedOnly()]);
+    casts += events.filter((e) => e.kind === 'skill' && e.actor === 0).length;
+    events.forEach((e, k) => {
+      if (e.kind !== 'skip' || e.actor !== 1) return;
+      const next = events.slice(k + 1).find((x) => x.actor === 1 && (x.kind === 'decide' || x.kind === 'skip'));
+      assert.equal(next?.kind, 'decide', `第 ${i} 场：连着被控两拍（${events[k + 1]?.kind}）`);
+    });
+  }
+  assert.ok(casts > 60, `该放出去不少控制招：${casts}`);
+});
+
+test('X20 控制：身法越高越难被控住（灵力压身法）', () => {
+  const rate = (agility: number): number => {
+    let casts = 0;
+    let resisted = 0;
+    for (let i = 0; i < 120; i++) {
+      const a = {
+        ...fighterAt(8, seededRng(i)),
+        weapons: [],
+        skills: ['whale-song' as const],
+        power: 10,
+        hp: 9_999,
+      };
+      const b = { ...fighterAt(8, seededRng(i + 300)), weapons: [], skills: [], agility, hp: 9_999 };
+      const events = fight(named(a, '甲'), named(b, '乙'), `resist-${agility}-${i}`, [
+        castOnce('whale-song'),
+        unarmedOnly(),
+      ]);
+      const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'whale-song');
+      if (k < 0) continue;
+      casts++;
+      const cast = events[k];
+      if (cast.kind === 'skill' && cast.resisted) resisted++;
+    }
+    return resisted / casts;
+  };
+  const nimble = rate(30);
+  const slow = rate(0);
+  assert.ok(nimble > slow + 0.15, `身法 30 被扛住 ${nimble}，身法 0 被扛住 ${slow}`);
 });
 
 test('X8 鲸吞：一场一次，回复实际伤害的一半（向下取整，不超上限）', () => {
@@ -830,10 +939,17 @@ test('X9 万我：必中的（烟花）照样打本体，魂影不顶', () => {
   assert.ok(seen > 20, `该有几十场：${seen}`);
 });
 
-test('X9 魂牵梦绕：把对方牵进梦里（skip dream），入梦这一拍挨打不判闪避', () => {
+test('X9 魂牵梦绕：控住就把对方牵进梦里（skip dream），入梦这一拍挨打不判闪避', () => {
   let seen = 0;
+  let resisted = 0;
   for (let i = 0; i < 60; i++) {
-    const a = { ...fighterAt(8, seededRng(i)), skills: ['dream-chant' as const], weapons: [], hp: 9_999 };
+    const a = {
+      ...fighterAt(8, seededRng(i)),
+      skills: ['dream-chant' as const],
+      weapons: [],
+      hp: 9_999,
+      power: 60,
+    };
     const b = {
       ...fighterAt(8, seededRng(i + 3)),
       agility: 30,
@@ -845,6 +961,12 @@ test('X9 魂牵梦绕：把对方牵进梦里（skip dream），入梦这一拍�
     const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'dream-chant');
     if (k < 0) continue;
     seen++;
+    const cast = events[k];
+    if (cast.kind === 'skill' && cast.resisted) {
+      resisted++;
+      assert.notEqual(nextTurn(events, k, 1)?.kind, 'skip', '没入梦就不该跳过出手');
+      continue;
+    }
     const turn = nextTurn(events, k, 1);
     assert.deepEqual([turn?.kind, turn?.kind === 'skip' && turn.cause], ['skip', 'dream']);
     const wake = events.findIndex((e, j) => j > k && e.kind === 'skip' && e.actor === 1);
@@ -852,11 +974,12 @@ test('X9 魂牵梦绕：把对方牵进梦里（skip dream），入梦这一拍�
     assert.equal(between.filter((e) => e.kind === 'dodge' && e.actor === 1).length, 0, '入梦时躲不开');
   }
   assert.ok(seen > 30, `该有几十场：${seen}`);
+  assert.ok(resisted > 0, '该有控不住的场次（X20）');
 });
 
 test('X9 五指拳心剑：必中、穿护体（不减伤也不消耗泡泡），没护体时不带 pierce', () => {
   const expected = (a: Fighter, foeMaxHp: number): number =>
-    16 + Math.floor(a.power * 0.75) + Math.floor(foeMaxHp * 0.25 * 0.8);
+    22 + Math.floor(a.power * 0.75) + Math.floor(foeMaxHp * 0.25 * 0.8);
   let seen = 0;
   for (let i = 0; i < 40; i++) {
     const a = {
@@ -909,7 +1032,7 @@ test('X16 降龙十八掌：必中，后劲只跟下一次法宝 / 空手的第�
     agility: 0,
     hp: 9_999,
   };
-  // 必中：身法拉满、带化鸽遁也躲不开；伤害按 15 + 灵力×0.75 + 破势×0.6
+  // 必中：身法拉满、带化鸽遁也躲不开；伤害按 28 + 灵力×0.75 + 破势×0.6
   const dodgy = {
     ...fighterAt(8, seededRng(62)),
     weapons: [],
@@ -924,7 +1047,7 @@ test('X16 降龙十八掌：必中，后劲只跟下一次法宝 / 空手的第�
   assert.equal(events[k - 1]?.kind, 'decide', '降龙十八掌不判闪避，decide 之后直接结算');
   assert.equal(
     skill.kind === 'skill' && skill.damage,
-    15 + Math.floor(a.power * 0.75) + Math.floor(dodgy.hp * 0.25 * 0.6),
+    28 + Math.floor(a.power * 0.75) + Math.floor(dodgy.hp * 0.25 * 0.6),
     '必中且按公式结算',
   );
 
@@ -972,12 +1095,13 @@ test('X16 降龙十八掌：必中，后劲只跟下一次法宝 / 空手的第�
   assert.ok(expired, '该有一个种子让后劲那一下被闪避');
 });
 
-test('X16 送友风：必中，打中后飘起来跳过一拍，飘着挨打不判闪避', () => {
+test('X16 送友风：必中，控住就飘起来跳过一拍，飘着挨打不判闪避', () => {
   const a = {
     ...fighterAt(8, seededRng(65)),
     weapons: [],
     skills: ['farewell-wind' as const],
     agility: 0,
+    power: 60,
     speed: 20,
     hp: 9_999,
   };
@@ -989,20 +1113,32 @@ test('X16 送友风：必中，打中后飘起来跳过一拍，飘着挨打不�
     speed: 1,
     hp: 9_999,
   };
-  const events = fight(named(a, '甲'), named(b, '乙'), 'farewell-base', [castOnce('farewell-wind'), unarmedOnly()]);
-  const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'farewell-wind');
-  assert.ok(k > 0, '这一招该用出来');
-  const skill = events[k];
-  assert.equal(
-    skill.kind === 'skill' && skill.damage,
-    12 + Math.floor(a.power * 0.75) + Math.floor(b.hp * 0.25 * 0.4),
-    '必中且按公式结算',
-  );
-  const turn = nextTurn(events, k, 1);
-  assert.deepEqual([turn?.kind, turn?.kind === 'skip' && turn.cause], ['skip', 'float'], '下一拍飘着');
-  const wake = events.findIndex((e, j) => j > k && e.kind === 'skip' && e.actor === 1);
-  const between = events.slice(k + 1, wake < 0 ? undefined : wake);
-  assert.equal(between.filter((e) => e.kind === 'dodge' && e.actor === 1).length, 0, '飘着时躲不开');
+  let resisted = 0;
+  for (let i = 0; i < 40; i++) {
+    const events = fight(named(a, '甲'), named(b, '乙'), `farewell-base-${i}`, [
+      castOnce('farewell-wind'),
+      unarmedOnly(),
+    ]);
+    const k = events.findIndex((e) => e.kind === 'skill' && e.skill === 'farewell-wind');
+    if (k <= 0) continue;
+    const skill = events[k];
+    assert.equal(
+      skill.kind === 'skill' && skill.damage,
+      18 + Math.floor(a.power * 0.75) + Math.floor(b.hp * 0.25 * 0.4),
+      '必中且按公式结算',
+    );
+    const turn = nextTurn(events, k, 1);
+    if (skill.kind === 'skill' && skill.resisted) {
+      resisted++;
+      assert.notEqual(turn?.kind, 'skip', '没吹起来就不该跳过出手');
+      continue;
+    }
+    assert.deepEqual([turn?.kind, turn?.kind === 'skip' && turn.cause], ['skip', 'float'], '下一拍飘着');
+    const wake = events.findIndex((e, j) => j > k && e.kind === 'skip' && e.actor === 1);
+    const between = events.slice(k + 1, wake < 0 ? undefined : wake);
+    assert.equal(between.filter((e) => e.kind === 'dodge' && e.actor === 1).length, 0, '飘着时躲不开');
+  }
+  assert.ok(resisted > 0, '该有控不住的场次（X20）');
 });
 
 test('X16 送友风：不传 farewell 绝不出现 farewell 收场', () => {

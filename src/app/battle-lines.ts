@@ -33,6 +33,7 @@ const KIND_LINES: Record<string, string[]> = {
   skipSleep: ['{a}站着睡着了，错过了出手', '{a}还在打呼，没想起来出手'],
   skipDream: ['{a}神魂被牵进梦里，这一拍醒不过来', '{a}眼神一散，陷在梦里没出手'],
   skipFloat: ['{a}被风托着飘在半空，手脚乱划', '{a}飘了起来，够不着地'],
+  skipSham: ['{a}还躺在地上装死，没爬起来', '{a}装死装得正香，缓了一拍才起身'],
   miss: ['{a}眼前一团黑，打歪了', '{a}抹着脸上的墨乱挥，落了空'],
   decoy: ['{a}的水母分身替它挨了这下', '打中的是{a}的水母分身，本体没事'],
   mirror: ['{a}身前一重魂影被斩碎，本体没事', '斩中的只是魂影，{a}本体还在'],
@@ -52,6 +53,14 @@ const SKILL_LINES: Record<string, string[]> = {
   'finger-sword': ['{a}五指收拢成拳、高举过顶，拳心射出一道剑光，-{d}', '{a}拳心一亮，剑光已到{b}身上，-{d}'],
   'dragon-palm': ['{a}一掌推出，亢龙有悔！-{d}', '{a}掌风化作龙影，直取{b}，-{d}'],
   'farewell-wind': ['{a}袖口一卷，一阵清风送向{b}，-{d}', '{a}挥手道别：一路顺风～-{d}'],
+};
+
+/** 控制被扛住（X20）：狮子吼 / 鲸歌 / 魂牵梦绕 / 送友风没压住，只说伤害与对方的反应 */
+const RESIST_LINES: Record<string, string[]> = {
+  'lion-roar': ['{a}一声狮子吼，-{d}，{b}晃了晃，没被震住', '{a}吼得地动山摇，-{d}，{b}稳住心神没愣神'],
+  'whale-song': ['{a}唱起鲸歌，{b}甩甩头，没被哄睡', '{a}哼了段摇篮曲，{b}打了个哈欠，还挺精神'],
+  'dream-chant': ['{a}低声念咒，-{d}，{b}神魂一紧，没入梦', '{a}念完一句，-{d}，{b}眼神一晃又醒了'],
+  'farewell-wind': ['{a}袖口一卷，-{d}，{b}脚下生根，没被吹起来', '{a}挥手道别，-{d}，{b}站稳了没飘走'],
 };
 
 /**
@@ -158,7 +167,9 @@ export function lineOf(
                 ? KIND_LINES.skipDream
                 : event.cause === 'float'
                   ? KIND_LINES.skipFloat
-                  : KIND_LINES.skip,
+                  : event.cause === 'sham'
+                    ? KIND_LINES.skipSham
+                    : KIND_LINES.skip,
         ),
         a,
       );
@@ -175,6 +186,10 @@ export function lineOf(
       return fill(pick(KIND_LINES['play-dead']), a);
     case 'skill':
       if (event.pierce) return decorate(fill(pick(FLAG_LINES.pierce), a, b, event.damage ?? 0));
+      if (event.resisted)
+        return decorate(
+          fill(pick(RESIST_LINES[event.skill] ?? SKILL_LINES[event.skill]), a, b, event.damage ?? 0, event.heal ?? 0),
+        );
       return decorate(fill(pick(SKILL_LINES[event.skill]), a, b, event.damage ?? 0, event.heal ?? 0));
     case 'strike':
       return decorate(fill(pick(KIND_LINES.strike), a, b, event.damage));

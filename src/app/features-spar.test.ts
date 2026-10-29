@@ -1,4 +1,5 @@
 import { timeline, swapSides } from './battle-show.ts';
+import { fairSparPair } from './battle.ts';
 import {
   FAREWELL_WAIT_MS,
   guestFarewellDiary,
@@ -96,13 +97,14 @@ test('切磋（主人家）：旧客人开口的全自动局 → 应战 → 亮�
           await sendReveal({ address: '127.0.0.1', port }, { token, nonce: ownNonce, line: '承让承让～' }),
           { ok: true },
         );
-        const fightEvents = sparFight(hostFighter, cardFighter('阿花', guestCard()), ownNonce, hostNonce);
+        const [zero, one] = fairSparPair(hostFighter, cardFighter('阿花', guestCard()));
+        const fightEvents = sparFight(zero, one, ownNonce, hostNonce);
         const fightEnd = fightEvents[fightEvents.length - 1]!;
         const won = fightEnd.kind === 'end' && fightEnd.winner === 0;
         // 主人家这边的解说也用 sparLineRng（X12）：复算一遍时间线，自己那一方的第一句要在 /broadcast 里出现
         const expectedSteps = timeline(fightEvents, [petNameIn(home), '阿花'], sparLineRng(ownNonce, hostNonce), [
-          hostFighter.skills,
-          guestCard().skills,
+          zero.skills,
+          one.skills,
         ]);
         const ownLine = expectedSteps.find((step) => step.line && step.who === 0)?.line;
         const firstLine = ownLine ?? expectedSteps.find((step) => step.line)?.line;
@@ -363,15 +365,13 @@ test('切磋（客人）：旧主人家邀的全自动局 → 应战、亮随机
         await until(() => saw.nonce !== null, '亮了随机数');
         assert.equal(saw.line, env.memeAnswer, '感言走 compose（假模型的回答，不是兜底模板）');
         // 账：测试拿同一对随机数复核这场谁赢，客人的记录必须一致
-        const expected = sparFight(cardFighter('大个', fakeCard), hostFighter, saw.nonce!, HOST_NONCE);
+        const [away, own] = fairSparPair(cardFighter('大个', fakeCard), hostFighter);
+        const expected = sparFight(away, own, saw.nonce!, HOST_NONCE);
         const expectedEnd = expected[expected.length - 1]!;
         const won = expectedEnd.kind === 'end' && expectedEnd.winner === 1;
         // 两边台词用同一颗种子（X12）：客人这边换边后的时间线里，第一句要在自己的 /broadcast 里出现
         const guestSteps = swapSides(
-          timeline(expected, ['大个', petNameIn(home)], sparLineRng(saw.nonce!, HOST_NONCE), [
-            fakeCard.skills,
-            hostFighter.skills,
-          ]),
+          timeline(expected, ['大个', petNameIn(home)], sparLineRng(saw.nonce!, HOST_NONCE), [away.skills, own.skills]),
         );
         const ownGuestLine = guestSteps.find((step) => step.line && step.who === 0)?.line;
         const firstGuestLine = ownGuestLine ?? guestSteps.find((step) => step.line)?.line;
@@ -509,7 +509,8 @@ test('隔空切磋（应战方）：冒话、两个菜单项 → 点应战 → �
           ),
           { ok: true },
         );
-        const expected = sparFight(hostFighter, cardFighter('阿花', card), ownNonce, hostNonce);
+        const [zero, one] = fairSparPair(hostFighter, cardFighter('阿花', card));
+        const expected = sparFight(zero, one, ownNonce, hostNonce);
         const end = expected[expected.length - 1]!;
         const won = end.kind === 'end' && end.winner === 0;
         // 这边的账：修为进账、战绩、邻居簿、日记（都是开打那一步记的）

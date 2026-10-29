@@ -1,5 +1,6 @@
 import { openActionPanel } from '../action-panel-window';
 import type { Action, BattleEvent } from '../battle';
+import { fairSparPair } from '../battle';
 import type { TurnMode } from '../action-panel-window';
 import { stageLabel } from '../cultivation';
 import { orderNeighbors, shouldAutoAdmit } from '../neighbors';
@@ -274,8 +275,8 @@ export function createDuel(ctx: FeatureContext): Duel {
       if (state.live) ctx.state.visitHost?.finishDuel();
       return;
     }
-    const you = practice.fighter(petName());
-    const foe = cardFighter(state.visitor.pet, state.card);
+    // 切磋不比修为（X20）：名帖照旧收真实属性，开打和演出都用拉平后的这一对
+    const [you, foe] = fairSparPair(practice.fighter(petName()), cardFighter(state.visitor.pet, state.card));
     const baseShow = {
       zero: you,
       one: foe,
@@ -407,8 +408,8 @@ export function createDuel(ctx: FeatureContext): Duel {
       void refreshMenu();
       return;
     }
-    const you = practice.fighter(petName());
-    const foe = cardFighter(neighbor.pet, reply.card);
+    // 切磋不比修为（X20）：名帖照旧收真实属性，开打和演出都用拉平后的这一对
+    const [foe, you] = fairSparPair(cardFighter(neighbor.pet, reply.card), practice.fighter(petName()));
     // 引擎里应战方是 0 号、挑战方是 1 号：两边各自算同一场
     const baseShow = {
       zero: foe,

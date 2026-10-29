@@ -9,7 +9,7 @@
  * 境界映射：炼气 0–8；筑基 9–11、金丹 12–14、元婴 15–17、化神 18–20、炼虚 21–23、合体 24–26、大乘 27–29。
  * 渡劫雷数（§X4）：进筑基、金丹 3 道，进元婴、化神 6 道，之后 9 道。
  */
-import { fight, shadowOf, tribulate, WEAPONS, SKILLS } from '../../src/app/battle.ts';
+import { fairSparPair, fight, shadowOf, tribulate, WEAPONS, SKILLS } from '../../src/app/battle.ts';
 import { fighterAt } from '../../src/app/battle-testkit.ts';
 
 const pairs = Number(process.argv.includes('--pairs') ? process.argv[process.argv.indexOf('--pairs') + 1] : 2000);
@@ -133,14 +133,18 @@ for (const [hi, lo, label] of [
   [4, 1, '炼气 3 层（4 对 1）'],
 ]) {
   let wins = 0;
+  let fairWins = 0;
   for (let i = 0; i < pairs; i++) {
     const hi0 = fighterAt(hi, rng);
     const lo0 = fighterAt(lo, rng);
     hi0.name = '甲';
     lo0.name = '乙';
     if (fight(hi0, lo0, seedOf(i)).at(-1).winner === 0) wins++;
+    // 切磋拉平修为（X20）：属性取中点、法宝招式按少的一方取齐
+    const [fairHi, fairLo] = fairSparPair(hi0, lo0);
+    if (fight(fairHi, fairLo, seedOf(i)).at(-1).winner === 0) fairWins++;
   }
-  console.log(`高 ${label}：高的胜率 ${(wins / pairs).toFixed(3)}`);
+  console.log(`高 ${label}：高的胜率 ${(wins / pairs).toFixed(3)}；切磋拉平后 ${(fairWins / pairs).toFixed(3)}`);
 }
 console.log('');
 

@@ -87,24 +87,24 @@ function moveEffect(id: MoveId): string {
 
 /** 主动招式的一句效果（AI 提示词用；图鉴里没有伤害数字） */
 const SKILL_EFFECT: Record<SkillId, string> = {
-  'play-dead': '致命一击时保命一次',
+  'play-dead': '致命一击时保命一次，但要躺一拍',
   dove: '提高闪避',
   bubble: '挨打时挡下两次并减伤',
   'sixth-sense': '挨打后可能反劈一刀',
   'shadow-fists': '连击时追打一串拳影',
   critical: '提高会心',
   'spirit-beast': '前几次出手后追加一击',
-  bloom: '回 25% 气血并马上再出一手',
-  'lion-roar': '伤害并震晕对方一次',
+  bloom: '回 18% 气血并马上再出一手',
+  'lion-roar': '伤害并可能震晕对方一拍',
   'blue-whale': '大伤害',
-  'whale-song': '让对方睡过下一拍',
-  ink: '让对方接下来两次出手可能打空',
+  'whale-song': '伤害并可能让对方睡过下一拍',
+  ink: '让对方接下来三次出手可能打空',
   'whale-gulp': '伤害并回复一半',
   'myriad-self': '召出三重魂影替自己挨打',
-  'dream-chant': '必中伤害并把对方牵进梦里一拍',
+  'dream-chant': '必中伤害并可能把对方牵进梦里一拍',
   'finger-sword': '必中且穿护体',
   'dragon-palm': '必中伤害，下一手法宝或空手带后劲',
-  'farewell-wind': '必中伤害并让对方飘过下一拍',
+  'farewell-wind': '必中伤害并可能让对方飘过下一拍',
   'jelly-clone': '挨打时可能用水母替身挡下',
 };
 

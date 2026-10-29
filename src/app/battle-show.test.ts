@@ -248,7 +248,11 @@ test('每一招都有自己的出手、飞行物、命中特效和受击（§X7 
   }
   // 回血：作用在自己身上，照旧整段素材，没有飞行物也没有挨打
   const bloom = timeline(
-    [start(0), decide(0, { kind: 'skill', skill: 'bloom' }), { actor: 0, kind: 'skill', skill: 'bloom', heal: 20, hp }],
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'bloom' }, [60, 90]),
+      { actor: 0, kind: 'skill', skill: 'bloom', heal: 20, hp: [80, 90] },
+    ],
     NAMES,
     seq(),
   );
@@ -257,6 +261,15 @@ test('每一招都有自己的出手、飞行物、命中特效和受击（§X7 
     [[0, '招式-凭空生花']],
   );
   assert.equal(shotsOf(bloom).length, 0);
+  // 血条和「气血 +N」等花绽开那一刻再刷：动作起播时还是回血前的血，回血那步排在后面
+  const bloomAnim = bloom.find((step) => step.anim && step.at >= OPEN_MS);
+  assert.deepEqual(bloomAnim?.hp, [60, 90], '起播时还是回血前的气血');
+  const healed = bloom.filter((step) => step.at > (bloomAnim?.at ?? 0) && step.hp[0] === 80);
+  assert.ok(healed.length > 0, '回血的气血条晚于动作起播');
+  assert.ok(
+    healed.some((step) => step.line !== undefined),
+    '回血的台词也在花绽开那一刻',
+  );
 });
 
 test('招式表（Y0 的 MOVES）都有自己的演出：一转蛊用现有宠物素材，对手招式用它的皮', () => {
