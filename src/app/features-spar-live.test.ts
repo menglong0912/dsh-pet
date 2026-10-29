@@ -374,13 +374,19 @@ test('X19 隔空切磋逐手局（应战方）：自动应战打完才记账，�
         card: guestCard(),
         commit: sparCommit(ownNonce),
       });
+      // 挑战一到就直接弹出应战面板，不用先右键找「应战」
+      await until(() => features.battle.state() !== null, '应战面板');
+      const prompt = features.battle.state()!;
+      assert.match(prompt.title, /小李 家的 阿花 想跟你切磋/);
+      assert.deepEqual(
+        prompt.options.map((option) => option.label),
+        ['自动', 'AI 出招', '手动', '不应战'],
+      );
+      assert.equal(features.battle.choose(1), true, '面板上直接选自动应战');
       await until(() => {
         const latest = extras.menus[extras.menus.length - 1] ?? [];
         return latest.includes('修炼/应战：小李 家的 阿花');
-      }, '应战菜单');
-      clicks.push('修炼/应战：小李 家的 阿花');
-      // 应战方在自己的出招面板里选方式（这里选自动）
-      await pickPanel(features, 1, '应战方式');
+      }, '应战菜单仍保留作兜底');
       const reply = await asking;
       assert.ok(reply.ok, `应战没成：${JSON.stringify(reply)}`);
       if (!reply.ok) return;
@@ -516,12 +522,9 @@ test('X19 隔空切磋逐手局（应战方）：对面一直不传下一手，�
           card: guestCard(),
           commit: sparCommit(ownNonce),
         });
-        await until(() => {
-          const latest = extras.menus[extras.menus.length - 1] ?? [];
-          return latest.includes('修炼/应战：小李 家的 阿花');
-        }, '应战菜单');
-        clicks.push('修炼/应战：小李 家的 阿花');
-        await pickPanel(features, 1, '应战方式');
+        // 挑战一到就弹应战面板；直接在面板上选自动
+        await until(() => features.battle.state() !== null, '应战面板');
+        assert.equal(features.battle.choose(1), true, '面板上直接选自动应战');
         const reply = await asking;
         assert.ok(reply.ok);
         if (!reply.ok) return;

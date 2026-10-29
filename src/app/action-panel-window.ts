@@ -35,7 +35,14 @@ const TONE_ORDER: readonly ActionTone[] = ['damage', 'control', 'sustain'];
 
 /** 按分组标题和卡片行数估高；每组单独起行，实际高度仍由页面测量校正 */
 export function panelHeight(view: PanelView | null, width: number): number {
-  if (!view || view.options.length === 0 || view.kind === 'mode') return PANEL_HEIGHT;
+  if (!view || view.options.length === 0) return PANEL_HEIGHT;
+  // 选方式 / 应战确认也走同一套网格：4 个选项（自动 / AI / 手动 / 不应战）要排两行
+  if (view.kind === 'mode') {
+    const columns = Math.max(1, Math.floor((Math.max(1, width - 18) + GRID_GAP) / (90 + GRID_GAP)));
+    const rows = Math.ceil(view.options.length / columns);
+    const height = CHROME_HEIGHT + rows * CARD_HEIGHT + Math.max(0, rows - 1) * GRID_GAP;
+    return Math.min(Math.max(height, PANEL_HEIGHT), PANEL_MAX_HEIGHT);
+  }
   const usable = Math.max(1, width - 18);
   const columns = Math.max(1, Math.floor((usable + GRID_GAP) / (CARD_MIN_WIDTH + GRID_GAP)));
   const sections = [
@@ -85,6 +92,14 @@ export interface PanelAction {
   tone?: ActionTone;
 }
 
+/** 选方式面板的文案 / 超时：应战类还要一个「不应战」，超时也按不应战算 */
+export interface TurnModePrompt {
+  title?: string;
+  declineLabel?: string;
+  /** 超时按第几项算；缺省「不应战」= 4，否则自动 = 1；null = 不选 */
+  timeoutPick?: number | null;
+}
+
 interface Question {
   kind: 'mode' | 'action';
   view: PanelView;
@@ -97,8 +112,11 @@ interface Question {
 export interface ActionPanelWindow {
   /** 重摆位置（擂台跟着宠物挪了）：算出来没变就什么都不发 */
   place(arena: Rect): void;
-  /** 开打前选方式；10 秒（`timeoutMs`）不点回 `'auto'`，面板被关掉回 `null` */
-  chooseMode(aiReady: boolean, timeoutMs: number): Promise<TurnMode | null>;
+  /** 开打前选方式；10 秒（`timeoutMs`）不点回 `'auto'`，面板被关掉回 `null`。
+   *  应战确认传 `declineLabel`：多一个「不应战」，超时也按不应战。 */
+  chooseMode(aiReady: boolean, timeoutMs: number, prompt?: TurnModePrompt): Promise<TurnMode | null>;
+  /** 两三项的纯确认（如「应战 / 不应战」）：回 pick（从 1 数），超时 / 关窗回 null */
+  choosePrompt(title: string, labels: string[], timeoutMs: number): Promise<number | null>;
   /** 手动出招：等到点了回 `pick - 1`（0 起的下标），超时（`timeoutMs`）/ 关窗回 `null` */
   chooseAction(actions: PanelAction[], timeoutMs: number): Promise<number | null>;
   /** 模拟一次点击（curl 与本机接口用）：`pick` 从 1 数；现在没有等待的选择回 false */
@@ -284,20 +302,32 @@ export function openActionPanel(
       // 擂台变宽 / 变窄了：按钮会重新换行，再量一次
       if (widened) measure();
     },
-    chooseMode(aiReady, timeoutMs) {
+    chooseMode(aiReady, timeoutMs, prompt = {}) {
+      const options: PanelOption[] = [
+        { pick: 1, label: '自动' },
+        { pick: 2, label: 'AI 出招', ...(aiReady ? {} : { disabled: true, note: '模型没配好' }) },
+        { pick: 3, label: '手动' },
+      ];
+      if (prompt.declineLabel) options.push({ pick: 4, label: prompt.declineLabel });
       const view: PanelView = {
         kind: 'mode',
-        title: aiReady ? '这一场怎么出招？' : '这一场怎么出招？（模型没配好）',
+        title: prompt.title ?? (aiReady ? '这一场怎么出招？' : '这一场怎么出招？（模型没配好）'),
         seconds: Math.max(1, Math.ceil(timeoutMs / 1_000)),
-        options: [
-          { pick: 1, label: '自动' },
-          { pick: 2, label: 'AI 出招', ...(aiReady ? {} : { disabled: true, note: '模型没配好' }) },
-          { pick: 3, label: '手动' },
-        ],
+        options,
       };
-      return ask(view, timeoutMs, null, 1).then((pick) =>
+      const timeoutPick = prompt.timeoutPick !== undefined ? prompt.timeoutPick : prompt.declineLabel ? 4 : 1;
+      return ask(view, timeoutMs, null, timeoutPick).then((pick) =>
         pick === 1 ? 'auto' : pick === 2 ? 'ai' : pick === 3 ? 'manual' : null,
       );
+    },
+    choosePrompt(title, labels, timeoutMs) {
+      const view: PanelView = {
+        kind: 'mode',
+        title,
+        seconds: Math.max(1, Math.ceil(timeoutMs / 1_000)),
+        options: labels.map((label, index) => ({ pick: index + 1, label })),
+      };
+      return ask(view, timeoutMs, null, null);
     },
     chooseAction(actions, timeoutMs) {
       const rank = (tone: ActionTone | undefined): number => (tone === undefined ? -1 : TONE_ORDER.indexOf(tone));
@@ -347,7 +377,7 @@ body{padding:7px 9px;border-radius:12px;background:#f7f2e7;box-shadow:0 3px 10px
 #progress{height:3px;border-radius:2px;background:#e3d8c4;overflow:hidden;flex:none}
 #progressFill{width:100%;height:100%;background:#3f7d5a;transform-origin:left}
 #buttons{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;overflow-y:auto;overflow-x:hidden;min-height:0}
-#buttons.mode{grid-template-columns:repeat(3,minmax(0,1fr))}
+#buttons.mode{grid-template-columns:repeat(auto-fit,minmax(90px,1fr))}
 .group{grid-column:1 / -1;display:flex;align-items:center;gap:5px;height:12px;min-width:0;font-size:11px;line-height:12px;color:#6b6254;white-space:nowrap}
 .group::before{content:"";width:6px;height:6px;border-radius:50%;flex:none}
 .group.damage::before{background:#b23b32}

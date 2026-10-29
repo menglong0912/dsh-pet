@@ -1,5 +1,5 @@
 import { openActionPanel } from '../action-panel-window';
-import type { ActionPanelWindow, TurnMode } from '../action-panel-window';
+import type { ActionPanelWindow, TurnMode, TurnModePrompt } from '../action-panel-window';
 import { arenaScoreboard, openArenaWindow } from '../arena-window';
 import { askAiTurn, legalChoices, startLiveClient, startLiveServer } from '../battle-live';
 import { createDashRig, screenUnion } from '../battle-dash';
@@ -74,6 +74,7 @@ export async function pickTurnMode(
   ctx: FeatureContext,
   arena: () => Rect | null = () => null,
   foe: () => Rect | null = () => null,
+  prompt: TurnModePrompt = {},
 ): Promise<TurnMode | null> {
   if (ctx.state.actionPanel) return null;
   const panel = openActionPanel(
@@ -87,7 +88,7 @@ export async function pickTurnMode(
   const initial = arena();
   if (initial) panel.place(initial);
   try {
-    return await panel.chooseMode(ctx.ai.isReady(), ctx.deps.modeTimeoutMs ?? 10_000);
+    return await panel.chooseMode(ctx.ai.isReady(), ctx.deps.modeTimeoutMs ?? 10_000, prompt);
   } finally {
     panel.close();
     if (ctx.state.actionPanel === panel) ctx.state.actionPanel = null;
@@ -486,12 +487,17 @@ export function createSpar(ctx: FeatureContext): Spar {
       // 自己发起时在邀约前就选好了；客人发起时这会儿在自己的出招面板里选（10 秒不点按自动）
       if (invited?.live && invited.mode) mode = invited.mode;
       else {
+        // 客人来切磋：直接弹「自动 / AI / 手动 / 不应战」，主人不用先右键再找应战项
         const picked = await pickTurnMode(
           ctx,
           () => null,
           () => null,
+          {
+            title: `${visitor.owner} 家的 ${visitor.pet} 想跟你切磋：怎么出招？`,
+            declineLabel: '不应战',
+          },
         );
-        if (!picked) return { ok: false, reason: 'busy' };
+        if (!picked) return { ok: false, reason: 'declined' };
         // 选方式的 10 秒里客人可能已经走了：别再挂一场没人亮的切磋
         if (!ctx.state.hosting || ctx.state.hosting.visitor !== visitor) return { ok: false, reason: 'not-visiting' };
         mode = picked;
@@ -773,8 +779,22 @@ export function createSpar(ctx: FeatureContext): Spar {
     // 自己发起的一律走逐手局，主人家也能选它的；只有旧主人家邀的全自动局才整场算好
     let mode: TurnMode = 'auto';
     if (!invite || invite.live) {
-      const picked = await pickTurnMode(ctx);
-      if (!picked) return;
+      // 主人家邀战也直接弹确认：多一个「不应战」，超时按不应战收
+      const picked = await pickTurnMode(
+        ctx,
+        () => null,
+        () => null,
+        invite
+          ? {
+              title: `${current.host.owner} 家的 ${current.host.pet} 邀你切磋：怎么出招？`,
+              declineLabel: '不应战',
+            }
+          : {},
+      );
+      if (!picked) {
+        if (invite) relay('（切磋）这次不打了');
+        return;
+      }
       if (ctx.state.trip !== current || ctx.state.disposed) return;
       mode = picked;
     }
@@ -1012,6 +1032,8 @@ export function createSpar(ctx: FeatureContext): Spar {
         return '对方没开修炼，切不了';
       case 'busy':
         return '对方正在切磋，等会儿吧';
+      case 'declined':
+        return '对方这次不应战';
       case 'version':
         return '两边版本不一样，切磋不了';
       case 'unsupported-mode':

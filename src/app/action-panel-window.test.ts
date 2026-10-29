@@ -231,6 +231,49 @@ test('X17 出招面板：三选一送成 JSON 字面量，模型没配好时 AI 
   assert.ok(win.destroyed);
 });
 
+test('X17 出招面板：应战确认多一个「不应战」，选它回 null；4 项排两行', async () => {
+  const win = fakeWindow();
+  const panel = openActionPanel(
+    fakeElectron(win),
+    'http://127.0.0.1:1/app/panel',
+    () => arena,
+    () => ({ left: 100, top: 300, size: 200, bottomPad: 20 }),
+  );
+  const deciding = panel.chooseMode(true, 1_000, {
+    title: '阿花 想跟你切磋：怎么出招？',
+    declineLabel: '不应战',
+  });
+  await new Promise((done) => setTimeout(done, 0));
+  assert.equal(panel.state()?.title, '阿花 想跟你切磋：怎么出招？');
+  assert.deepEqual(
+    panel.state()?.options.map((option) => option.label),
+    ['自动', 'AI 出招', '手动', '不应战'],
+  );
+  assert.ok(panelHeight(panel.state(), 324) > PANEL_HEIGHT, '4 项要两行');
+  assert.equal(panel.choose(4), true);
+  assert.equal(await deciding, null, '点了不应战，按没应战收');
+  panel.close();
+});
+
+test('X17 出招面板：两项纯确认回 pick（从 1 数），超时回 null', async () => {
+  const win = fakeWindow();
+  const panel = openActionPanel(
+    fakeElectron(win),
+    'http://127.0.0.1:1/app/panel',
+    () => arena,
+    () => ({ left: 100, top: 300, size: 200, bottomPad: 20 }),
+  );
+  const deciding = panel.choosePrompt('阿花 想跟你切磋，要应战吗？', ['应战', '不应战'], 1_000);
+  await new Promise((done) => setTimeout(done, 0));
+  assert.deepEqual(
+    panel.state()?.options.map((option) => option.label),
+    ['应战', '不应战'],
+  );
+  assert.equal(panel.choose(2), true);
+  assert.equal(await deciding, 2);
+  panel.close();
+});
+
 test('X17 出招面板：手动出招的按钮带剩余次数，点了回 0 起的下标；超时回 null', async () => {
   const win = fakeWindow();
   const panel = openActionPanel(

@@ -390,6 +390,8 @@ export interface FeatureState {
   liveBattle: LiveBattle | null;
   /** 出招面板（X17）：开打前选方式 / 手动出招时等一手；收摊、退出一起关 */
   actionPanel: ActionPanelWindow | null;
+  /** 隔空切磋的应战面板（X15）：和出招面板同一套窗口，但不占 `actionPanel`（右键应战仍可兜底） */
+  duelPrompt: ActionPanelWindow | null;
   /** 历练里的选方式 / 手动出招（X18）：按钮在历练小窗里，本机接口和出招面板同一口径 */
   adventureTurn: AdventureTurnQuestion | null;
   /**
