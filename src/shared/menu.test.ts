@@ -5,6 +5,7 @@ import {
   buildMenuPanel,
   buildMenuTree,
   buildMoreBranch,
+  flattenMenuTree,
   placeMenuPanel,
   type MenuNode,
 } from './menu.ts';
@@ -147,4 +148,27 @@ test('placeMenuPanel puts the panel below the pet first, above when there is no 
     top: 300,
     maxHeight: 692,
   });
+});
+
+test('flattenMenuTree drops every cascade flag so the detached panel has no side submenus', () => {
+  const tree: MenuNode[] = [
+    { label: '动作', cascade: true, children: [{ label: '待机', children: [{ label: '呼吸', anim: '呼吸' }] }] },
+    { label: '更多', cascade: true, children: [{ label: '弹弓', action: 'third-party', owner: '插件' }] },
+    { label: '设置', action: 'open-site' },
+  ];
+  const flat = flattenMenuTree(tree);
+  assert.deepEqual(flat, [
+    {
+      label: '动作',
+      cascade: false,
+      children: [{ label: '待机', cascade: false, children: [{ label: '呼吸', anim: '呼吸' }] }],
+    },
+    { label: '更多', cascade: false, children: [{ label: '弹弓', action: 'third-party', owner: '插件' }] },
+    { label: '设置', action: 'open-site' },
+  ]);
+  assert.deepEqual(
+    buildMenuPanel(flat).cascades,
+    [],
+    'flattened tree must not keep anything for the side-column renderer',
+  );
 });

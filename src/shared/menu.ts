@@ -236,6 +236,16 @@ export function buildMenuPanel(tree: MenuNode[]): MenuPanelLayout {
 }
 
 /**
+ * 把整棵树的 cascade 标记全部清掉：脱离宠物窗口的窄面板没有横向空间放子菜单，
+ * 动作 / 更多都摊成面板里的 section + chips，超高时面板内滚动。
+ */
+export function flattenMenuTree(nodes: MenuNode[]): MenuNode[] {
+  return nodes.map((node) =>
+    isBranchNode(node) ? { ...node, cascade: false, children: flattenMenuTree(node.children) } : node,
+  );
+}
+
+/**
  * 面板的首选落点：**先躲开宠物**——优先放在宠物正下方，放不下再放正上方（高度按剩余空间收紧，
  * 内容多了在面板里滚）。上下都不够时退回原来「从光标处展开、夹进可视矩形」。
  * 宠物矩形与 clamp 都用视口局部坐标；width/height 是面板的估算尺寸。
@@ -309,12 +319,20 @@ export const MENU_CSS = [
   '.dsh-pet-menu-quick:hover{background:#356b4c}',
   '.dsh-pet-menu-section{padding:7px 0 2px;border-top:1px solid rgba(205,191,166,.7)}',
   '.dsh-pet-menu-section-title{padding:2px 6px 5px;color:#8a7a5c;font-size:12px;font-weight:600}',
+  '.dsh-pet-menu-section>summary,.dsh-pet-menu-subsection>summary{display:flex;align-items:center;gap:6px;',
+  'padding:3px 6px;border-radius:6px;list-style:none;cursor:pointer}',
+  '.dsh-pet-menu-section>summary::-webkit-details-marker,.dsh-pet-menu-subsection>summary::-webkit-details-marker{display:none}',
+  '.dsh-pet-menu-section>summary:hover,.dsh-pet-menu-subsection>summary:hover{background:rgba(63,125,90,.10)}',
+  '.dsh-pet-menu-section>summary::after,.dsh-pet-menu-subsection>summary::after{content:"▸";color:#8a7a5c;',
+  'font-size:11px;line-height:1;transition:transform .12s}',
+  '.dsh-pet-menu-section[open]>summary::after,.dsh-pet-menu-subsection[open]>summary::after{transform:rotate(90deg)}',
+  '.dsh-pet-menu-count{margin-left:auto;color:#b0a188;font-size:11px;font-weight:400}',
   '.dsh-pet-menu-subsection{margin-top:5px}',
   '.dsh-pet-menu-chip{justify-content:center;min-width:0;padding:6px 8px;border:1px solid #cdbfa6;border-radius:8px;',
   'background:#fffaf0;text-align:center}',
   '.dsh-pet-menu-chip:hover{border-color:#3f7d5a;background:#fff}',
-  '.dsh-pet-menu-footer{display:flex;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid #cdbfa6}',
-  '.dsh-pet-menu-footer .dsh-pet-menu-item{flex:1;min-width:0;justify-content:center;gap:4px;padding:5px 4px;font-size:12px}',
+  '.dsh-pet-menu-footer{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid #cdbfa6}',
+  '.dsh-pet-menu-footer .dsh-pet-menu-item{flex:1 1 42%;min-width:0;justify-content:center;gap:4px;padding:5px 4px;font-size:12px}',
   '.dsh-pet-menu-hint{color:#8a7a5c;font-size:12px;flex:none;white-space:nowrap}',
   '.dsh-pet-menu-arrow{color:#8a7a5c;font-size:12px;flex:none}',
 ].join('');
@@ -358,8 +376,36 @@ export function mountContextMenu(opts: {
   layout?: 'panel' | 'cascade';
   /** 宠物身体在视口里的矩形：面板优先落在它上下方，避免一开出来就盖住宠物 */
   avoid?: { x: number; y: number; w: number; h: number };
+  /** 面板宽度上限（缺省 420）；脱离宠物窗口的窄面板传 320 */
+  width?: number;
+  /** 面板高度上限（缺省 clamp.h - 8）；脱离窗口时按窗口留白收紧 */
+  maxHeight?: number;
+  /** 显式落点（视口坐标）；传入后不再按 x/y/avoid 自动避让 */
+  position?: { left: number; top: number };
+  /** 拖拽标题时的行为：panel = 在窗口内移动面板（默认）；window = 交给宿主移动整个窗口 */
+  dragMode?: 'panel' | 'window';
+  /** dragMode='window' 时的回调；坐标是屏幕坐标（PointerEvent.screenX/screenY） */
+  onDrag?: (phase: 'start' | 'move' | 'end', screenX: number, screenY: number) => void;
+  /** 面板模式下把一级分组收成可展开的 <details>，二级分类默认收起；避免动作/串门一次铺满 */
+  collapsible?: boolean;
 }): ContextMenuMount {
-  const { tree, x, y, onAction, onClose, clamp, title, layout = 'panel', avoid } = opts;
+  const {
+    tree,
+    x,
+    y,
+    onAction,
+    onClose,
+    clamp,
+    title,
+    layout = 'panel',
+    avoid,
+    width,
+    maxHeight,
+    position,
+    dragMode = 'panel',
+    onDrag,
+    collapsible = false,
+  } = opts;
   // 夹取基准：缺省整个视口；桌面传入「窗口 ∩ 工作区」后各级面板都只在这个矩形内落位/翻转。
   // 防御：clamp 含非有限值（如坐标来源缺失变成 NaN）时回落整个视口——否则面板会落到 (0,0)
   const c =
@@ -450,8 +496,8 @@ export function mountContextMenu(opts: {
         item.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          close();
           onAction(node);
+          close();
         });
       }
       panel.appendChild(item);
@@ -459,12 +505,31 @@ export function mountContextMenu(opts: {
     return panel;
   };
 
+  const makeDisclosure = (title: string, kind: 'section' | 'subsection', open: boolean, count: number): HTMLElement => {
+    const details = document.createElement('details');
+    details.className = `dsh-pet-menu-${kind}`;
+    details.open = open;
+    const summary = document.createElement('summary');
+    summary.className = 'dsh-pet-menu-section-title';
+    const label = document.createElement('span');
+    label.textContent = title;
+    summary.appendChild(label);
+    if (count > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'dsh-pet-menu-count';
+      badge.textContent = String(count);
+      summary.appendChild(badge);
+    }
+    details.appendChild(summary);
+    return details;
+  };
+
   const buildMainPanel = (): HTMLElement => {
     const panel = document.createElement('div');
     panel.className = 'dsh-pet-menu-panel';
     if (c.w < 300) panel.classList.add('is-narrow');
-    panel.style.width = Math.max(0, Math.min(420, c.w - 8)) + 'px';
-    panel.style.maxHeight = Math.max(0, c.h - 8) + 'px';
+    panel.style.width = Math.max(0, Math.min(width ?? 420, c.w - 8)) + 'px';
+    panel.style.maxHeight = Math.max(0, maxHeight ?? c.h - 8) + 'px';
     root.appendChild(panel);
 
     const appendLeaf = (parent: HTMLElement, node: MenuLeaf, className?: string): void => {
@@ -483,8 +548,8 @@ export function mountContextMenu(opts: {
       item.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        close();
         onAction(node);
+        close();
       });
       parent.appendChild(item);
     };
@@ -500,7 +565,7 @@ export function mountContextMenu(opts: {
     heading.className = 'dsh-pet-menu-title';
     heading.textContent = title || '菜单';
     panel.appendChild(heading);
-    // 按住标题拖面板：面板默认落在宠物上下方，挡住时还能自己挪开
+    // 按住标题拖：默认在窗口内挪面板；dragMode='window' 交给宿主挪整个窗口（脱离宠物窗口时用）
     heading.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || closed) return;
       e.preventDefault();
@@ -508,20 +573,36 @@ export function mountContextMenu(opts: {
       panel.classList.add('is-dragging');
       for (const child of [...openChild.values()]) hideChain(child);
       openChild.clear();
+      const windowDrag = dragMode === 'window' ? onDrag : undefined;
+      if (windowDrag) {
+        // 合成事件没有 active pointer，setPointerCapture 会抛；真实拖拽才需要捕获
+        if (e.isTrusted) heading.setPointerCapture(e.pointerId);
+        windowDrag('start', e.screenX, e.screenY);
+      }
       const startX = e.clientX;
       const startY = e.clientY;
       const startLeft = parseFloat(panel.style.left) || 0;
       const startTop = parseFloat(panel.style.top) || 0;
       const move = (event: PointerEvent): void => {
         if (closed) return;
+        if (windowDrag) {
+          windowDrag('move', event.screenX, event.screenY);
+          return;
+        }
         const w = panel.offsetWidth;
         const h = panel.offsetHeight;
         panel.style.left = Math.max(c.x + 4, Math.min(startLeft + event.clientX - startX, c.x + c.w - w - 4)) + 'px';
         panel.style.top = Math.max(c.y + 4, Math.min(startTop + event.clientY - startY, c.y + c.h - h - 4)) + 'px';
       };
-      const end = (): void => {
+      const end = (event: PointerEvent): void => {
         dragging = false;
         panel.classList.remove('is-dragging');
+        if (windowDrag) {
+          windowDrag('end', event.screenX, event.screenY);
+          if (event.isTrusted && heading.hasPointerCapture(event.pointerId)) {
+            heading.releasePointerCapture(event.pointerId);
+          }
+        }
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', end);
         window.removeEventListener('pointercancel', end);
@@ -537,21 +618,34 @@ export function mountContextMenu(opts: {
       panel.appendChild(quick);
     }
     for (const sectionLayout of panelLayout.sections) {
-      const section = document.createElement('section');
-      section.className = 'dsh-pet-menu-section';
-      const heading = document.createElement('div');
-      heading.className = 'dsh-pet-menu-section-title';
-      heading.textContent = sectionLayout.title;
-      section.appendChild(heading);
+      const count =
+        sectionLayout.leaves.length +
+        sectionLayout.subsections.reduce((sum, subsection) => sum + subsection.leaves.length, 0);
+      // 一级分组：小分组默认展开，动作/串门这类大分组先收起；组内滚动由面板负责
+      const section = collapsible
+        ? makeDisclosure(sectionLayout.title, 'section', count <= 6, count)
+        : document.createElement('section');
+      if (!collapsible) {
+        section.className = 'dsh-pet-menu-section';
+        const heading = document.createElement('div');
+        heading.className = 'dsh-pet-menu-section-title';
+        heading.textContent = sectionLayout.title;
+        section.appendChild(heading);
+      }
       if (sectionLayout.leaves.length > 6) appendChips(section, sectionLayout.leaves);
       else for (const node of sectionLayout.leaves) appendLeaf(section, node);
       for (const subsectionLayout of sectionLayout.subsections) {
-        const subsection = document.createElement('div');
-        subsection.className = 'dsh-pet-menu-subsection';
-        const subheading = document.createElement('div');
-        subheading.className = 'dsh-pet-menu-section-title';
-        subheading.textContent = subsectionLayout.title;
-        subsection.appendChild(subheading);
+        // 二级分类（动作的待机/移动……、修炼的切磋）默认收起：点开才铺开，避免菜单过长
+        const subsection = collapsible
+          ? makeDisclosure(subsectionLayout.title, 'subsection', false, subsectionLayout.leaves.length)
+          : document.createElement('div');
+        if (!collapsible) {
+          subsection.className = 'dsh-pet-menu-subsection';
+          const subheading = document.createElement('div');
+          subheading.className = 'dsh-pet-menu-section-title';
+          subheading.textContent = subsectionLayout.title;
+          subsection.appendChild(subheading);
+        }
         appendChips(subsection, subsectionLayout.leaves);
         section.appendChild(subsection);
       }
@@ -597,10 +691,13 @@ export function mountContextMenu(opts: {
   // 关键：把菜单根容器真正挂进文档（v1→v2 重写时漏掉的挂载——不 append 则一切"静默无显示"）
   document.body.appendChild(root);
 
-  // 根面板定位：面板优先落在宠物上下方（不挡宠物），cascade 仍按 (x,y) 从光标处展开
+  // 根面板定位：显式落点优先；否则面板优先落在宠物上下方（不挡宠物），cascade 仍按 (x,y) 从光标处展开
   const rw = rootPanel.offsetWidth;
   const rh = rootPanel.offsetHeight;
-  if (layout === 'panel') {
+  if (position) {
+    rootPanel.style.left = Math.max(c.x + 4, Math.min(position.left, c.x + c.w - rw - 4)) + 'px';
+    rootPanel.style.top = Math.max(c.y + 4, Math.min(position.top, c.y + c.h - rh - 4)) + 'px';
+  } else if (layout === 'panel') {
     const placement = placeMenuPanel({ x, y, width: rw, height: rh, clamp: c, avoid });
     rootPanel.style.maxHeight = placement.maxHeight + 'px';
     rootPanel.style.left = placement.left + 'px';
