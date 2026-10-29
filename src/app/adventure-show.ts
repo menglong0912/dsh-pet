@@ -98,30 +98,47 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
     const roster = SANWANG.foes[foeId];
     if (!roster) return null;
     const prefix = roster.skin ?? roster.prefix;
-    const foe = openFoeWindow(
-      deps.electron,
-      `${new URL(deps.petBase).origin}/app/foe`,
-      {
-        name: roster.name,
-        portrait: `${deps.petBase}/pic/adventure/${encodeURIComponent('三王传承')}/${encodeURIComponent(`${prefix}.png`)}`,
+    /** 已经开出来的窗口：半路开不出下一扇就先关掉，别留下没人管的 */
+    const opened: { close(afterMs: number): void }[] = [];
+    try {
+      const foe = openFoeWindow(
+        deps.electron,
+        `${new URL(deps.petBase).origin}/app/foe`,
+        {
+          name: roster.name,
+          portrait: `${deps.petBase}/pic/adventure/${encodeURIComponent('三王传承')}/${encodeURIComponent(`${prefix}.png`)}`,
+          prefix,
+          ...(roster.filter ? { filter: roster.filter } : {}),
+          ...(roster.eliteLook ? { elite: true } : {}),
+        },
+        deps.home,
+      );
+      opened.push(foe);
+      const arena = openArenaWindow(deps.electron, `${new URL(deps.petBase).origin}/app/arena`, deps.home, () =>
+        foe.bounds(),
+      );
+      opened.push(arena);
+      // 开演前把对手要播的动作取到窗口里（Y2）：换源不等网络，出手才和飞行物对得上
+      foe.preload(['起手', '出手', '绝招', '受击', '闪避', '倒地', '胜利']);
+      const fx = deps.openFx(
+        () => foe.bounds(),
+        () => foe.side === 'left',
+      );
+      opened.push(fx);
+      // 这一组窗口进 groups 的是 scene 本身：closeOne 按对象身份删，返回副本会删不掉、窗口全漏
+      const scene: FightWindows & { roster: NonNullable<(typeof SANWANG.foes)[string]>; prefix: string } = {
+        foe,
+        arena,
+        fx,
+        roster,
         prefix,
-        ...(roster.filter ? { filter: roster.filter } : {}),
-        ...(roster.eliteLook ? { elite: true } : {}),
-      },
-      deps.home,
-    );
-    const arena = openArenaWindow(deps.electron, `${new URL(deps.petBase).origin}/app/arena`, deps.home, () =>
-      foe.bounds(),
-    );
-    // 开演前把对手要播的动作取到窗口里（Y2）：换源不等网络，出手才和飞行物对得上
-    foe.preload(['起手', '出手', '绝招', '受击', '闪避', '倒地', '胜利']);
-    const fx = deps.openFx(
-      () => foe.bounds(),
-      () => foe.side === 'left',
-    );
-    const windows: FightWindows = { foe, arena, fx };
-    groups.add(windows);
-    return { ...windows, roster, prefix };
+      };
+      groups.add(scene);
+      return scene;
+    } catch (error) {
+      for (const win of opened) win.close(0);
+      throw error;
+    }
   }
 
   /** 这一场的几只手：自家播宠物动作、对手走它的皮，气血条与飞行物跟着两边挪 */
@@ -167,31 +184,36 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
   async function fight(request: AdventureFightRequest): Promise<void> {
     const scene = openScene(request.result.foe);
     if (!scene) return;
-    const you = request.result.fighters[0];
-    const foeFighter = request.result.fighters[1];
-    const scoreboard = arenaScoreboard({
-      self: { label: `${you.name} · ${deps.stageLabel()}`, maxHp: you.hp },
-      foe: { label: `${scene.roster.name} · ${tierName(scene.roster.tier)}`, maxHp: foeFighter.hp },
-    });
-    const rng = rngFrom(`${request.result.seed}:show`);
-    const names: [string, string] = [you.name, foeFighter.name];
-    const skills: [SkillId[], SkillId[]] = [you.skills, foeFighter.skills];
-    const options = { foe: { prefix: scene.prefix } };
-    const steps = request.full
-      ? timeline(request.result.events, names, rng, skills, options)
-      : quickTimeline(request.result.events, names, rng, skills, options);
-    const show = new BattleShow(
-      steps,
-      showSides(scene, (hp) => scoreboard(hp, scene.foe.side === 'left'), dashOf(scene)),
-    );
-    deps.setBattle(show);
-    deps.refreshMenu();
-    await deps.holdPet(steps);
-    await show.run();
-    deps.setBattle(null);
-    deps.releasePet(deps.disposed() ? 0 : deps.closeHoldMs);
-    closeOne(scene, deps.closeHoldMs);
-    deps.refreshMenu();
+    // 这一组窗口进 groups 的是 scene 本身：closeOne 按对象身份删，返回副本会删不掉、窗口全漏
+    try {
+      const you = request.result.fighters[0];
+      const foeFighter = request.result.fighters[1];
+      const scoreboard = arenaScoreboard({
+        self: { label: `${you.name} · ${deps.stageLabel()}`, maxHp: you.hp },
+        foe: { label: `${scene.roster.name} · ${tierName(scene.roster.tier)}`, maxHp: foeFighter.hp },
+      });
+      const rng = rngFrom(`${request.result.seed}:show`);
+      const names: [string, string] = [you.name, foeFighter.name];
+      const skills: [SkillId[], SkillId[]] = [you.skills, foeFighter.skills];
+      const options = { foe: { prefix: scene.prefix } };
+      const steps = request.full
+        ? timeline(request.result.events, names, rng, skills, options)
+        : quickTimeline(request.result.events, names, rng, skills, options);
+      const show = new BattleShow(
+        steps,
+        showSides(scene, (hp) => scoreboard(hp, scene.foe.side === 'left'), dashOf(scene)),
+      );
+      deps.setBattle(show);
+      deps.refreshMenu();
+      await deps.holdPet(steps);
+      await show.run();
+    } finally {
+      // 演完 / 中途出错都收：状态先放掉，窗口按 CLOSE_HOLD_MS 关
+      deps.setBattle(null);
+      deps.releasePet(deps.disposed() ? 0 : deps.closeHoldMs);
+      closeOne(scene, deps.closeHoldMs);
+      deps.refreshMenu();
+    }
   }
 
   /**
@@ -201,34 +223,39 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
   async function liveFight(request: AdventureLiveFightRequest): Promise<BattleEvent[] | null> {
     const scene = openScene(request.foe);
     if (!scene) return null;
-    const scoreboard = arenaScoreboard({
-      self: { label: `${request.a.name} · ${deps.stageLabel()}`, maxHp: request.a.hp },
-      foe: { label: `${scene.roster.name} · ${tierName(scene.roster.tier)}`, maxHp: request.b.hp },
-    });
-    const live = startLiveBattle({
-      a: request.a,
-      b: request.b,
-      seed: request.seed,
-      mode: request.mode,
-      show: showSides(scene, (hp) => scoreboard(hp, scene.foe.side === 'left'), dashOf(scene)),
-      lineRng: rngFrom(`${request.seed}:show`),
-      timeline: { foe: { prefix: scene.prefix } },
-      initialActions: request.initialActions,
-      onDecision: request.onDecision,
-      decide: request.decide,
-      think: request.think,
-      log: request.log,
-    });
-    deps.setLiveBattle(live);
-    deps.refreshMenu();
-    // 逐手一场事先不知道多久：先占住宠物（holdPet 会夹到 /lock 的上限）
-    await deps.holdPet([], 20 * 60_000);
-    const events = await live.done;
-    deps.setLiveBattle(null);
-    deps.releasePet(deps.disposed() ? 0 : deps.closeHoldMs);
-    closeOne(scene, deps.closeHoldMs);
-    deps.refreshMenu();
-    return events;
+    let live: LiveBattle | null = null;
+    try {
+      const scoreboard = arenaScoreboard({
+        self: { label: `${request.a.name} · ${deps.stageLabel()}`, maxHp: request.a.hp },
+        foe: { label: `${scene.roster.name} · ${tierName(scene.roster.tier)}`, maxHp: request.b.hp },
+      });
+      live = startLiveBattle({
+        a: request.a,
+        b: request.b,
+        seed: request.seed,
+        mode: request.mode,
+        show: showSides(scene, (hp) => scoreboard(hp, scene.foe.side === 'left'), dashOf(scene)),
+        lineRng: rngFrom(`${request.seed}:show`),
+        timeline: { foe: { prefix: scene.prefix } },
+        initialActions: request.initialActions,
+        onDecision: request.onDecision,
+        decide: request.decide,
+        think: request.think,
+        log: request.log,
+      });
+      deps.setLiveBattle(live);
+      deps.refreshMenu();
+      // 逐手一场事先不知道多久：先占住宠物（holdPet 会夹到 /lock 的上限）
+      await deps.holdPet([], 20 * 60_000);
+      return await live.done;
+    } finally {
+      // 演完 / 中途出错都收：先停掉逐手局，再放状态、关这一组窗口
+      live?.dispose();
+      deps.setLiveBattle(null);
+      deps.releasePet(deps.disposed() ? 0 : deps.closeHoldMs);
+      closeOne(scene, deps.closeHoldMs);
+      deps.refreshMenu();
+    }
   }
 
   /**
@@ -251,20 +278,23 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
       deps.home,
     );
     cameos.add(foe);
-    foe.play('起手');
-    const lineMs = Math.max(1, deps.cameoLineMs ?? 2_500);
-    for (let i = 0; i < request.lines.length; i += 1) {
+    try {
+      foe.play('起手');
+      const lineMs = Math.max(1, deps.cameoLineMs ?? 2_500);
+      for (let i = 0; i < request.lines.length; i += 1) {
+        if (!cameos.has(foe)) return;
+        foe.say(request.lines[i], lineMs + 400);
+        if (i < request.lines.length - 1) await wait(lineMs);
+      }
       if (!cameos.has(foe)) return;
-      foe.say(request.lines[i], lineMs + 400);
-      if (i < request.lines.length - 1) await wait(lineMs);
+      await wait(Math.min(1_500, lineMs));
+      if (!cameos.has(foe)) return;
+      foe.fade();
+      await wait(500);
+    } finally {
+      // 说完 / 中途出错：都别再留这扇窗（被 closeAll 先收掉的就不重复关）
+      if (cameos.delete(foe)) foe.close(0);
     }
-    if (!cameos.has(foe)) return;
-    await wait(Math.min(1_500, lineMs));
-    if (!cameos.has(foe)) return;
-    foe.fade();
-    await wait(500);
-    cameos.delete(foe);
-    foe.close(0);
   }
 
   return {
