@@ -334,13 +334,9 @@ export function createSpar(ctx: FeatureContext): Spar {
       // 逐手对传（X19）：每一手一段一段演；发起方发 HTTP，应战方等协议层递进来
       const sendTurn = show.live.sendTurn;
       if (show.live.role === 'client' && !sendTurn) throw new Error('逐手局缺 sendTurn');
-      // 逐手局一创建就开演第一手：先占住宠物，别让 /lock 的往返和第一段动画抢先后（X19 测试踩过）
-      await holdPet([], 20 * 60_000);
-      if (ctx.state.disposed || show.cancelled?.() === true) {
-        releasePet(0);
-        closeSparWindows(windows, 0);
-        return null;
-      }
+      // 逐手局一创建就开演第一手，而占锁要等一个来回：先把锁的请求发出去，第一段演出等锁到手再开。
+      // 不能把整局往后挪——应战方要先把 live 局注册上，对端第一手才递得进来（X19 回归测试踩过）
+      const held = holdPet([], 20 * 60_000);
       const live =
         show.live.role === 'client'
           ? startLiveClient({
@@ -356,6 +352,7 @@ export function createSpar(ctx: FeatureContext): Spar {
               log: ctx.log,
               waitMs: deps.turnWaitMs ?? TURN_WAIT_MS,
               sendTurn: sendTurn!,
+              ready: held,
             })
           : startLiveServer({
               a: show.zero,
@@ -369,12 +366,15 @@ export function createSpar(ctx: FeatureContext): Spar {
               think: () => show.think?.(),
               log: ctx.log,
               waitMs: deps.turnWaitMs ?? TURN_WAIT_MS,
+              ready: held,
             });
       ctx.state.liveBattle = live;
       const turn = live.turn;
       if (show.live.role === 'server') ctx.state.liveTurn = turn;
       show.beforeShow?.();
       void refreshMenu();
+      // 逐手一场事先不知道多久：占住宠物（holdPet 会夹到 /lock 的上限），第一段演出由 ready 挡在锁后面
+      await held;
       events = await live.done;
       if (ctx.state.liveBattle === live) ctx.state.liveBattle = null;
       if (show.live.role === 'server' && ctx.state.liveTurn === turn) ctx.state.liveTurn = null;

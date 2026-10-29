@@ -449,6 +449,11 @@ export interface LiveVersusOptions {
   /** 演完一段、本地这一手还没定：宠物头上「想一想…」 */
   think: () => void;
   log: (message: string) => void;
+  /**
+   * 开演闸门：占住宠物这类准备动作（`/lock` 要一个来回）。给上就先等它再演第一段，
+   * 免得第一段动画抢在锁前面；局本身照样立刻注册，对端递进来的第一手不会丢。
+   */
+  ready?: Promise<unknown>;
 }
 
 /** 发起方 / 客人那一侧：发 HTTP 的总是这一边 */
@@ -528,6 +533,7 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
   /** 演一段：步骤的绝对时刻从上一段结尾接着排，所以平移到 0 起播；本地是 1 号时换边 */
   const play = async (steps: Step[]): Promise<void> => {
     if (steps.length === 0 || fastForward || disposed) return;
+    if (options.ready) await options.ready;
     const local = options.local === 1 ? swapSides(steps) : steps;
     const start = local[0].at;
     const show = new BattleShow(
@@ -691,6 +697,7 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
 
   const play = async (steps: Step[]): Promise<void> => {
     if (steps.length === 0 || fastForward || disposed) return;
+    if (options.ready) await options.ready;
     const local = options.local === 1 ? swapSides(steps) : steps;
     const start = local[0].at;
     const show = new BattleShow(
