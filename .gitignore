@@ -40,7 +40,6 @@ temp/
 
 # ── 桌宠应用打包产物（electron-builder 输出，`node scripts/dist.mjs` 可重生）──
 dist-app/
-dist-app2/
 
 # ── IDE / 编辑器 ──
 .idea/
