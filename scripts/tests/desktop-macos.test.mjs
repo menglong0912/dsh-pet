@@ -129,6 +129,13 @@ test(
         const workTop = await app.evaluate(({ screen }) => screen.getPrimaryDisplay().workArea.y);
         assert.ok(metrics.y >= workTop);
         assert.ok(metrics.font <= 16, `menu font unexpectedly doubled: ${metrics.font}`);
+        const clearOfPet = await page.evaluate(`(() => {
+          const pet = sprites[0].hit.getBoundingClientRect();
+          const panel = document.querySelector('.dsh-pet-menu-panel').getBoundingClientRect();
+          return panel.top >= pet.bottom || panel.bottom <= pet.top ||
+            panel.left >= pet.right || panel.right <= pet.left;
+        })()`);
+        assert.ok(clearOfPet, 'menu panel must not cover the pet');
         const menu = await page.locator('.dsh-pet-menu-panel').first().boundingBox();
         const win = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentBounds());
         await app.evaluate(
@@ -160,6 +167,18 @@ test(
           true,
           'transparent margin must pass through even while menu stays open',
         );
+        const moved = await page.evaluate(`(() => {
+          const panel = document.querySelector('.dsh-pet-menu-panel');
+          const title = panel.querySelector('.dsh-pet-menu-title');
+          const before = panel.getBoundingClientRect();
+          const x = before.left + 20, y = before.top + 8;
+          title.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y }));
+          window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: x + 30, clientY: y + 20 }));
+          window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+          const after = panel.getBoundingClientRect();
+          return { dx: Math.round(after.left - before.left), dy: Math.round(after.top - before.top) };
+        })()`);
+        assert.ok(moved.dx !== 0 || moved.dy !== 0, `dragging the title must move the panel: ${JSON.stringify(moved)}`);
         await page.evaluate('sprites[0].closeMenu()');
         await page.waitForFunction(
           () => window.__dshPetDebug.inputBusy === false && window.__dshPetDebug.interactive === false,

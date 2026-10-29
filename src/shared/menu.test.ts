@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAppMenuNodes, buildMenuPanel, buildMenuTree, buildMoreBranch, type MenuNode } from './menu.ts';
+import {
+  buildAppMenuNodes,
+  buildMenuPanel,
+  buildMenuTree,
+  buildMoreBranch,
+  placeMenuPanel,
+  type MenuNode,
+} from './menu.ts';
 
 const app = (label: string) => ({ owner: 'dsh-pet-app', label });
 
@@ -108,5 +115,36 @@ test('animation and third-party roots are marked to retain cascading submenus', 
     label: '更多',
     cascade: true,
     children: [{ label: '弹弓', action: 'third-party', owner: '插件' }],
+  });
+});
+
+test('placeMenuPanel puts the panel below the pet first, above when there is no room, and falls back to the cursor', () => {
+  const clamp = { x: 0, y: 0, w: 900, h: 700 };
+  const pet = { x: 350, y: 200, w: 200, h: 200 };
+  // 下面有空间：贴宠物下沿、水平居中，高度按剩余空间收紧
+  assert.deepEqual(placeMenuPanel({ x: 450, y: 300, width: 420, height: 300, clamp, avoid: pet }), {
+    left: 240,
+    top: 408,
+    maxHeight: 288,
+  });
+  // 宠物贴底：下面不够，放到上面
+  const low = { x: 350, y: 480, w: 200, h: 200 };
+  assert.deepEqual(placeMenuPanel({ x: 450, y: 580, width: 420, height: 300, clamp, avoid: low }), {
+    left: 240,
+    top: 172,
+    maxHeight: 300,
+  });
+  // 上下都不够：退回光标位置
+  const tall = { x: 350, y: 100, w: 200, h: 500 };
+  assert.deepEqual(placeMenuPanel({ x: 450, y: 300, width: 420, height: 300, clamp, avoid: tall }), {
+    left: 450,
+    top: 300,
+    maxHeight: 692,
+  });
+  // 没有宠物矩形（浏览器）：照旧从光标处展开
+  assert.deepEqual(placeMenuPanel({ x: 450, y: 300, width: 420, height: 300, clamp }), {
+    left: 450,
+    top: 300,
+    maxHeight: 692,
   });
 });

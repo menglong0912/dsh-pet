@@ -235,6 +235,40 @@ export function buildMenuPanel(tree: MenuNode[]): MenuPanelLayout {
   return layout;
 }
 
+/**
+ * 面板的首选落点：**先躲开宠物**——优先放在宠物正下方，放不下再放正上方（高度按剩余空间收紧，
+ * 内容多了在面板里滚）。上下都不够时退回原来「从光标处展开、夹进可视矩形」。
+ * 宠物矩形与 clamp 都用视口局部坐标；width/height 是面板的估算尺寸。
+ */
+export function placeMenuPanel(input: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  clamp: { x: number; y: number; w: number; h: number };
+  avoid?: { x: number; y: number; w: number; h: number };
+}): { left: number; top: number; maxHeight: number } {
+  const { x, y, width, height, clamp, avoid } = input;
+  const gap = 8;
+  const minRoom = 120;
+  const left = (value: number): number => Math.max(clamp.x + 4, Math.min(value, clamp.x + clamp.w - width - 4));
+  const top = (value: number): number => Math.max(clamp.y + 4, Math.min(value, clamp.y + clamp.h - height - 4));
+  const fallback = { left: left(x), top: top(y), maxHeight: Math.max(0, clamp.h - 8) };
+  if (!avoid) return fallback;
+  const centered = avoid.x + avoid.w / 2 - width / 2;
+  const belowTop = avoid.y + avoid.h + gap;
+  const belowRoom = clamp.y + clamp.h - 4 - belowTop;
+  if (belowRoom >= minRoom) {
+    return { left: left(centered), top: belowTop, maxHeight: Math.min(height, belowRoom) };
+  }
+  const aboveRoom = avoid.y - gap - (clamp.y + 4);
+  if (aboveRoom >= minRoom) {
+    const h = Math.min(height, aboveRoom);
+    return { left: left(centered), top: Math.max(clamp.y + 4, avoid.y - gap - h), maxHeight: h };
+  }
+  return fallback;
+}
+
 /** 该动画是否属于 noMirror 分类（文字类）：朝右（镜像）时点播前强制朝左，避免文字镜像 */
 export function isNoMirrorAnimation(categories: Category[], anim: string): boolean {
   return (categories ?? []).some((c) => c.noMirror === true && c.actions.includes(anim));
@@ -259,8 +293,9 @@ export const MENU_CSS = [
   '.dsh-pet-menu-panel::-webkit-scrollbar-thumb:hover,.dsh-pet-menu-column::-webkit-scrollbar-thumb:hover{',
   'background:rgba(63,125,90,.55);border:2px solid transparent;background-clip:content-box}',
   '.dsh-pet-menu-panel::-webkit-scrollbar-corner,.dsh-pet-menu-column::-webkit-scrollbar-corner{background:transparent}',
-  '.dsh-pet-menu-title{padding:2px 6px 9px;color:#3f7d5a;font-size:16px;font-weight:600;',
-  'white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.dsh-pet-menu-title{padding:2px 6px 9px;color:#3f7d5a;font-size:16px;font-weight:600;cursor:grab;',
+  'touch-action:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.dsh-pet-menu-panel.is-dragging .dsh-pet-menu-title{cursor:grabbing}',
   '.dsh-pet-menu-quick-grid,.dsh-pet-menu-chips{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}',
   '.dsh-pet-menu-quick-grid{margin-bottom:10px}',
   '.dsh-pet-menu-panel.is-narrow .dsh-pet-menu-quick-grid,.dsh-pet-menu-panel.is-narrow .dsh-pet-menu-chips{',
@@ -317,12 +352,14 @@ export function mountContextMenu(opts: {
   onClose?: () => void;
   /** 菜单允许占用的矩形（视口局部坐标）；缺省 = 整个视口（浏览器既有行为） */
   clamp?: { x: number; y: number; w: number; h: number };
-  /** 面板头部的宠物名；缺省不渲染头部 */
+  /** 面板头部的宠物名；缺省显示「菜单」 */
   title?: string;
   /** 默认单块面板；cascade 保留旧三级级联菜单 */
   layout?: 'panel' | 'cascade';
+  /** 宠物身体在视口里的矩形：面板优先落在它上下方，避免一开出来就盖住宠物 */
+  avoid?: { x: number; y: number; w: number; h: number };
 }): ContextMenuMount {
-  const { tree, x, y, onAction, onClose, clamp, title, layout = 'panel' } = opts;
+  const { tree, x, y, onAction, onClose, clamp, title, layout = 'panel', avoid } = opts;
   // 夹取基准：缺省整个视口；桌面传入「窗口 ∩ 工作区」后各级面板都只在这个矩形内落位/翻转。
   // 防御：clamp 含非有限值（如坐标来源缺失变成 NaN）时回落整个视口——否则面板会落到 (0,0)
   const c =
@@ -336,6 +373,8 @@ export function mountContextMenu(opts: {
   root.addEventListener('contextmenu', (e) => e.preventDefault());
 
   let closed = false;
+  /** 正在拖面板：拖拽期间指针可能短暂离开菜单树，不能按 mouseleave 收起 */
+  let dragging = false;
 
   /** 每个面板当前展开的子面板（无 = 未展开）；hideChain 会沿链清除 */
   const openChild = new Map<HTMLElement, HTMLElement>();
@@ -457,12 +496,40 @@ export function mountContextMenu(opts: {
     };
 
     const panelLayout = buildMenuPanel(tree);
-    if (title) {
-      const heading = document.createElement('div');
-      heading.className = 'dsh-pet-menu-title';
-      heading.textContent = title;
-      panel.appendChild(heading);
-    }
+    const heading = document.createElement('div');
+    heading.className = 'dsh-pet-menu-title';
+    heading.textContent = title || '菜单';
+    panel.appendChild(heading);
+    // 按住标题拖面板：面板默认落在宠物上下方，挡住时还能自己挪开
+    heading.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || closed) return;
+      e.preventDefault();
+      dragging = true;
+      panel.classList.add('is-dragging');
+      for (const child of [...openChild.values()]) hideChain(child);
+      openChild.clear();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startLeft = parseFloat(panel.style.left) || 0;
+      const startTop = parseFloat(panel.style.top) || 0;
+      const move = (event: PointerEvent): void => {
+        if (closed) return;
+        const w = panel.offsetWidth;
+        const h = panel.offsetHeight;
+        panel.style.left = Math.max(c.x + 4, Math.min(startLeft + event.clientX - startX, c.x + c.w - w - 4)) + 'px';
+        panel.style.top = Math.max(c.y + 4, Math.min(startTop + event.clientY - startY, c.y + c.h - h - 4)) + 'px';
+      };
+      const end = (): void => {
+        dragging = false;
+        panel.classList.remove('is-dragging');
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', end);
+        window.removeEventListener('pointercancel', end);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', end);
+      window.addEventListener('pointercancel', end);
+    });
     if (panelLayout.quick.length) {
       const quick = document.createElement('div');
       quick.className = 'dsh-pet-menu-quick-grid';
@@ -530,17 +597,23 @@ export function mountContextMenu(opts: {
   // 关键：把菜单根容器真正挂进文档（v1→v2 重写时漏掉的挂载——不 append 则一切"静默无显示"）
   document.body.appendChild(root);
 
-  // 根面板定位：按 (x,y) 下落，超出 clamp 矩形时夹回（与子面板同一套逻辑但无触发项）
-  rootPanel.style.left = '';
-  rootPanel.style.top = '';
+  // 根面板定位：面板优先落在宠物上下方（不挡宠物），cascade 仍按 (x,y) 从光标处展开
   const rw = rootPanel.offsetWidth;
   const rh = rootPanel.offsetHeight;
-  rootPanel.style.left = Math.max(c.x + 4, Math.min(x, c.x + c.w - rw - 4)) + 'px';
-  rootPanel.style.top = Math.max(c.y + 4, Math.min(y, c.y + c.h - rh - 4)) + 'px';
+  if (layout === 'panel') {
+    const placement = placeMenuPanel({ x, y, width: rw, height: rh, clamp: c, avoid });
+    rootPanel.style.maxHeight = placement.maxHeight + 'px';
+    rootPanel.style.left = placement.left + 'px';
+    rootPanel.style.top = placement.top + 'px';
+  } else {
+    rootPanel.style.left = Math.max(c.x + 4, Math.min(x, c.x + c.w - rw - 4)) + 'px';
+    rootPanel.style.top = Math.max(c.y + 4, Math.min(y, c.y + c.h - rh - 4)) + 'px';
+  }
 
   // 指针整体离开菜单树（离开全部面板的并集）→ 200ms 后关闭整棵菜单；
   // 期间任何指针移动（mouseover 冒泡到 root）都视为仍在菜单内，取消关闭
   root.addEventListener('mouseleave', () => {
+    if (dragging) return;
     if (leaveTimer !== null) window.clearTimeout(leaveTimer);
     leaveTimer = window.setTimeout(() => {
       leaveTimer = null;

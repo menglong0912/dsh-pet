@@ -1706,6 +1706,11 @@ class PetSprite {
     const m = S.mountContextMenu({
       tree,
       title: this.pet.name,
+      // 面板优先落在宠物上下方，别一开出来就盖住宠物
+      avoid: (() => {
+        const r = this.hit.getBoundingClientRect();
+        return { x: r.x, y: r.y, w: r.width, h: r.height };
+      })(),
       x: e.clientX,
       y: e.clientY,
       // 只允许在「窗口 ∩ 工作区」内显示：宠物贴边时外扩余量伸出屏幕，菜单走进那里会被 OS 裁掉（#41）
