@@ -5,9 +5,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ARENA_COLUMN_WIDTH,
   ARENA_HEIGHT,
+  ARENA_ROW_HEIGHT,
   arenaBounds,
   arenaPage,
+  arenaPlaceCode,
+  arenaPlacement,
+  arenaRows,
   arenaUpdate,
   arenaUpdateCode,
   hpPercent,
@@ -44,6 +49,55 @@ test('arenaBounds：居中在两只宠物中间，落在它们头顶，宽度夹
   const blind = arenaBounds(null, null, workArea);
   assert.equal(blind.width, 324, '假定 300 宽的一侧 + 两边让开 12');
   assert.ok(Math.abs(blind.x + blind.width / 2 - (workArea.x + workArea.width / 2)) <= 1);
+});
+
+test('arenaRows：两条血各自贴在自己宠物正头顶，窗口只包住这两小段', () => {
+  // 自家宠物头顶 = 包围盒顶 + bottomPad + 舞台 62/360（看得见的发梢顶）；客人同理，舞台贴窗口底
+  const homeHead = home.top + home.bottomPad + ((home.size * 9) / 16) * (62 / 360);
+  const foeHead =
+    foeWindow.y + foeWindow.height - 6 - (foeWindow.width * 9) / 16 + ((foeWindow.width * 9) / 16) * (62 / 360);
+  const rows = arenaRows(home, foeWindow, workArea);
+  const homeRow = rows.right;
+  const foeRow = rows.left;
+  assert.equal(homeRow.x + homeRow.width / 2, home.left + home.size / 2, '横向对准自家宠物舞台中心');
+  assert.equal(foeRow.x + foeRow.width / 2, foeWindow.x + foeWindow.width / 2, '横向对准客人舞台中心');
+  assert.equal(homeRow.width, ARENA_COLUMN_WIDTH);
+  assert.equal(homeRow.height, ARENA_ROW_HEIGHT);
+  // 血条在名字下面，底边离头顶 2px
+  assert.ok(Math.abs(homeRow.y + homeRow.height - (homeHead - 2)) <= 1, `底边离头顶 2px：${homeRow.y}`);
+  assert.ok(Math.abs(foeRow.y + foeRow.height - (foeHead - 2)) <= 1, `底边离头顶 2px：${foeRow.y}`);
+  // 窗口是两小段的并集 + 四周 8px：中间整段是透的
+  assert.equal(rows.bounds.x, foeRow.x - 8);
+  assert.equal(rows.bounds.y, Math.min(foeRow.y, homeRow.y) - 8);
+  assert.equal(rows.bounds.width, homeRow.x + homeRow.width - foeRow.x + 16);
+  assert.equal(
+    rows.bounds.height,
+    Math.max(foeRow.y + foeRow.height, homeRow.y + homeRow.height) - Math.min(foeRow.y, homeRow.y) + 16,
+  );
+  // 页面里两条相对窗口的位置
+  assert.deepEqual(arenaPlacement(rows), {
+    left: { x: foeRow.x - rows.bounds.x, y: foeRow.y - rows.bounds.y },
+    right: { x: homeRow.x - rows.bounds.x, y: homeRow.y - rows.bounds.y },
+  });
+  // 客人站到自家宠物右边：两条血跟着换边（不是按谁是自家固定左右）
+  const swapped = arenaRows({ ...home, left: 100 }, foeWindow, workArea);
+  assert.equal(swapped.left.x + swapped.left.width / 2, 100 + home.size / 2);
+  // 对手窗口还没开：两条并排放在自家宠物正头顶，不跑到屏幕中间去
+  const alone = arenaRows(home, null, workArea);
+  assert.ok(
+    Math.abs(alone.left.x + alone.left.width / 2 + (ARENA_COLUMN_WIDTH + 16) / 2 - (home.left + home.size / 2)) <= 1,
+  );
+  assert.ok(
+    Math.abs(alone.right.x + alone.right.width / 2 - (ARENA_COLUMN_WIDTH + 16) / 2 - (home.left + home.size / 2)) <= 1,
+  );
+  assert.ok(Math.abs(alone.left.y + alone.left.height - (homeHead - 2)) <= 1, '并排也在正头顶');
+  // 贴边：夹回工作区
+  const edge = arenaRows({ ...home, left: -200 }, foeWindow, workArea);
+  assert.ok(edge.bounds.x >= workArea.x - 8, `不越出屏幕左沿：${edge.bounds.x}`);
+  // 谁都不知道在哪：屏幕上方中间也有两条（等位置到了再摆）
+  const blind = arenaRows(null, null, workArea);
+  assert.ok(blind.left.width === ARENA_COLUMN_WIDTH && blind.right.width === ARENA_COLUMN_WIDTH);
+  assert.ok(blind.bounds.width >= ARENA_COLUMN_WIDTH * 2, `中间留空：${blind.bounds.width}`);
 });
 
 test('hpPercent：四舍五入、夹在 0–100，非法值当空血（绝不画成满的）', () => {
@@ -86,11 +140,19 @@ test('arenaPage 页面契约：只用 textContent 与 style.width，没有 inner
   // 页面里没有别的通道（没开 preload、不开 IPC）
   assert.equal(arenaPage.includes('require('), false);
   assert.equal(arenaPage.includes('ipcRenderer'), false);
-  // 挂出 window.arena，主进程只调 update
+  // 挂出 window.arena，主进程只调 update / place
   assert.ok(arenaPage.includes('window.arena = {'));
+  assert.ok(arenaPage.includes('place(pos)'), '两条血的位置由主进程送进来');
+  assert.ok(arenaPage.includes("document.getElementById('row-' + side)"));
   // 两条血一条在左一条在右（右边那条从右边涨）
   assert.match(arenaPage, /\.row\.right\{align-items:flex-end\}/);
   assert.match(arenaPage, /\.row\.right \.fill\{margin-left:auto\}/);
+  // 两条是各自贴在自己宠物正头顶的一小段：绝对定位摆，不再一条长血横穿屏幕挡字
+  assert.match(arenaPage, /\.row\{position:absolute;left:0;top:0;/);
+  assert.ok(arenaPage.includes(`width:${ARENA_COLUMN_WIDTH}px`), '两条血各自的宽度');
+  assert.ok(ARENA_COLUMN_WIDTH * 2 < 520, `两条加起来 ${ARENA_COLUMN_WIDTH * 2} 小于最宽窗，中间必须留空`);
+  // 位置也是 JSON 字面量送进来
+  assert.ok(arenaPlaceCode({ left: { x: 1, y: 2 }, right: { x: 3, y: 4 } }).startsWith('arena.place({'));
   // 血少于两成变红
   assert.match(arenaPage, /\.fill\.low\{/);
   assert.ok(arenaPage.includes('percent < 20'));
@@ -163,22 +225,65 @@ test('openArenaWindow：透明 / 置顶 / 不可聚焦 / 整窗穿透，加载�
   assert.equal((options.webPreferences as Record<string, unknown>).sandbox, true);
   assert.equal((options.webPreferences as Record<string, unknown>).nodeIntegration, false);
   assert.equal((options.webPreferences as Record<string, unknown>).backgroundThrottling, false);
-  // 初位置按两只宠物算好塞进构造参数
-  assert.equal(options.width, 520);
-  assert.equal(options.height, ARENA_HEIGHT);
+  // 初位置就是两条血的并集（只包住两小段，不是 520 宽的整条）
+  const opening = arenaRows(home, foeWindow, workArea).bounds;
+  assert.equal(options.x, opening.x);
+  assert.equal(options.y, opening.y);
+  assert.equal(options.width, opening.width);
+  assert.equal(options.height, opening.height);
+  assert.ok(options.width > ARENA_COLUMN_WIDTH * 2, '窗口横跨两只宠物的头顶（中间透）');
   // 整窗鼠标穿透（没有 hover 检查去解禁它）
   assert.ok(fake.created.some((entry) => entry.ignoreMouseEvents === true));
 
-  // 还没 ready：update 排队，加载完按顺序补上
+  // 还没 ready：place / update 排队，加载完按顺序补上
   arena.update(arenaUpdate({ label: '小鱼', hp: 10, maxHp: 10 }, { label: '心魔', hp: 0, maxHp: 10 }));
   assert.equal(fake.executed.length, 0);
   await new Promise((done) => setImmediate(done));
-  assert.equal(fake.executed.length, 1);
-  assert.match(fake.executed[0], /^arena\.update\(\{.*"percent":100/);
-  assert.equal(fake.executed[0].includes('innerHTML'), false);
+  assert.equal(fake.executed.length, 2);
+  assert.match(fake.executed[0], /^arena\.place\(\{/);
+  assert.match(fake.executed[1], /^arena\.update\(\{.*"percent":100/);
+  assert.equal(fake.executed[1].includes('innerHTML'), false);
 });
 
-test('place：宠物挪了跟着挪，位置没变一个字都不发', () => {
+test('血条让位：加载完把宠物 / 对手窗口提到前面，别的窗口不动', async () => {
+  const fake = fakeElectron();
+  const moved: string[] = [];
+  const other = (url: string): WindowLike => ({
+    isDestroyed: () => false,
+    getBounds: () => ({ x: 0, y: 0, width: 0, height: 0 }),
+    setBounds: () => undefined,
+    setIgnoreMouseEvents: () => undefined,
+    setAlwaysOnTop: () => undefined,
+    moveTop: () => void moved.push(url),
+    setVisibleOnAllWorkspaces: () => undefined,
+    loadURL: () => Promise.resolve(),
+    showInactive: () => undefined,
+    show: () => undefined,
+    focus: () => undefined,
+    once: () => undefined,
+    destroy: () => undefined,
+    webContents: { getURL: () => url, executeJavaScript: () => Promise.resolve(undefined) },
+  });
+  const pets = [
+    'file:///helper/index.html?configUrl=file%3A%2F%2Fx&petIndex=0',
+    'http://127.0.0.1:1/app/guest',
+    'http://127.0.0.1:1/app/foe',
+  ];
+  const bystanders = ['http://127.0.0.1:1/app/panel', 'http://127.0.0.1:1/app/adventure'];
+  const windows = [...pets, ...bystanders].map(other);
+  (fake.electron.BrowserWindow as unknown as { getAllWindows: () => WindowLike[] }).getAllWindows = () => windows;
+  openArenaWindow(
+    fake.electron,
+    'http://127.0.0.1:1/app/arena',
+    () => home,
+    () => foeWindow,
+  );
+  assert.deepEqual(moved, [], '还没加载完不动');
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(moved, pets, '气泡能压住血条；面板 / 历练窗不动（血条盖在它们上面照旧看得见）');
+});
+
+test('place：宠物挪了跟着挪，位置没变一个字都不发', async () => {
   const fake = fakeElectron();
   const arena = openArenaWindow(
     fake.electron,
@@ -186,12 +291,18 @@ test('place：宠物挪了跟着挪，位置没变一个字都不发', () => {
     () => home,
     () => foeWindow,
   );
+  await new Promise((done) => setImmediate(done));
+  const executed = fake.executed.length;
   arena.place(home, foeWindow);
   assert.equal(fake.bounds.length, 0, '没变就不挪窗口');
+  assert.equal(fake.executed.length, executed, '没变就不重发两条血的位置');
   arena.place({ ...home, left: 200 }, foeWindow);
   assert.equal(fake.bounds.length, 1);
-  assert.ok(fake.bounds[0].x >= workArea.x, '挪完仍在屏内');
-  assert.equal(arena.bounds().x, fake.bounds[0].x);
+  assert.deepEqual(fake.bounds[0], arenaRows({ ...home, left: 200 }, foeWindow, workArea).bounds, '窗口跟着两条血');
+  assert.ok(fake.executed.length > executed, '两条血的新位置送进页面');
+  assert.match(fake.executed[fake.executed.length - 1] ?? '', /^arena\.place\(\{/);
+  // bounds() 仍是面板锚点（整场不动的那种，不是血条窗的实时包围盒）
+  assert.deepEqual(arena.bounds(), arenaBounds({ ...home, left: 200 }, foeWindow, workArea));
 });
 
 test('close(afterMs)：先让结果那几步放完，到点才销毁窗口', async (t) => {
