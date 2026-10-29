@@ -72,4 +72,18 @@ contextBridge.exposeInMainWorld('petBridge', {
   onDisplays(cb) {
     ipcRenderer.on('pet:displays', (e, geo) => cb(geo));
   },
+  // ---- 脱离宠物窗口的右键菜单 ----
+  // 渲染端只上报菜单树 + 宠物身体矩形；菜单窗口与动作路由都在主进程。
+  openMenu(payload) {
+    ipcRenderer.send('pet:open-menu', payload);
+  },
+  closeMenu() {
+    ipcRenderer.send('pet:close-menu');
+  },
+  onMenuAction(cb) {
+    ipcRenderer.on('pet:menu-action', (e, leaf) => cb(leaf));
+  },
+  onMenuClosed(cb) {
+    ipcRenderer.on('pet:menu-closed', () => cb());
+  },
 });

@@ -155,8 +155,8 @@ test('X18 历练逐手：GET /app/battle 看到在选方式 / 等一手，POST �
       const mode = features.battle.state();
       assert.deepEqual(
         mode?.options.map((option) => option.label),
-        ['自动', 'AI 出招', '手动'],
-        '选方式三个按钮',
+        ['自动', 'AI 出招', '手动', '攻略'],
+        '选方式四个按钮',
       );
       assert.ok(features.battle.choose(3), 'curl 选手动');
       await until(() => features.battle.state()?.kind === 'action', '本机接口看到手动出招');

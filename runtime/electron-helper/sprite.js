@@ -123,9 +123,10 @@ class PetSprite {
     this.moveToken = 0;
     this.pendingMove = null;
     this.customPos = null; // 拖拽后的会话内位置（{rx, ry} 比例）；restart 回角落
-    // 右键菜单（统一自绘组件，两端共用同一份：树+渲染均来自 shared-core）
-    this.menuOpen = false; // 菜单开启期间强制整窗可交互（悬停菜单不触发穿透翻转）
-    this.menuClose = null; // 当前菜单的 close()（打开时挂载，关闭后置空）
+    // 右键菜单（独立菜单窗口：树与渲染仍在 shared-core，窗口由主进程建在宠物旁边）
+    this.menuOpen = false; // 菜单开启期间上报 busy，宠物窗口自己的失焦/鼠标离开不当作菜单关闭
+    this.menuDetached = false; // 当前菜单是否已脱离本窗口（true 时 blur/mouseleave 不收起）
+    this.menuClose = null; // 当前菜单的关闭入口（通知主进程关菜单窗口）
     // 气泡（碎碎念 / 工作状态共用单槽）
     this.bubbleTimer = null;
     // 悬浮提示（替代原生 title 属性）：显隐 + 最近一次光标位置（**视口坐标**，见 renderTip）
@@ -227,6 +228,13 @@ class PetSprite {
     this.hit.addEventListener('pointermove', (e) => this.onPointerMove(e), { signal: ac.signal });
     this.hit.addEventListener('click', (e) => this.onClick(e), { signal: ac.signal });
     this.hit.addEventListener('contextmenu', (e) => this.onContextMenu(e), { signal: ac.signal });
+    // 脱离宠物窗口的右键菜单：菜单窗口在主进程，选中项 / 关闭都经 IPC 回到本宠物
+    if (window.petBridge && window.petBridge.onMenuAction) {
+      window.petBridge.onMenuAction((leaf) => this.onMenuAction(leaf));
+    }
+    if (window.petBridge && window.petBridge.onMenuClosed) {
+      window.petBridge.onMenuClosed(() => this.onMenuClosed());
+    }
     window.addEventListener('pointerup', (e) => this.onPointerUp(e), { signal: ac.signal });
     window.addEventListener('pointercancel', (e) => this.onPointerUp(e), { signal: ac.signal });
     this.hit.addEventListener('lostpointercapture', (e) => this.onPointerUp(e), { signal: ac.signal });
@@ -238,7 +246,8 @@ class PetSprite {
       'blur',
       () => {
         // 切到其它应用后旧菜单不应继续占着整个透明窗口；丢失松手时也释放拖拽。
-        this.closeMenu();
+        // 菜单已脱离宠物窗口时由菜单窗口自己的 blur 收起，宠物失焦/鼠标离开不能误关。
+        if (!this.menuDetached) this.closeMenu();
         if (this.dragState.active) this.onPointerUp();
         if (!this.chatOpen) this.setInteractive(false);
       },
@@ -249,8 +258,8 @@ class PetSprite {
       () => {
         // 光标离开窗口：菜单若开着立刻收起（菜单是窗口内 DOM，离开即不可达），再恢复穿透。
         // 拖拽中与对话弹窗开着都不恢复：前者会绕过 busy 造成穿透并丢失 pointerup，
-        // 后者要留光标回来点输入框。
-        this.closeMenu();
+        // 后者要留光标回来点输入框。脱离式菜单不受此限（指针本来就要移向菜单窗口）。
+        if (!this.menuDetached) this.closeMenu();
         if (!this.chatOpen && !this.dragState.active) this.setInteractive(false);
       },
       { signal: ac.signal },
@@ -1489,7 +1498,7 @@ class PetSprite {
     if (!window.petBridge || !window.petBridge.setInputRegions) return;
     const rects = [];
     // 控件矩形 = 主进程允许接收点击的区域（矩形外的余量区继续穿透）。
-    const controls = [...document.querySelectorAll('.dsh-pet-menu-column, .dsh-pet-chat')];
+    const controls = [...document.querySelectorAll('.dsh-pet-menu-panel, .dsh-pet-menu-column, .dsh-pet-chat')];
     for (const el of this.inputRegionElements) {
       if (!controls.includes(el)) {
         this.inputRegionResize.unobserve(el);
@@ -1697,29 +1706,36 @@ class PetSprite {
     );
     tools.splice(tools.findIndex((leaf) => leaf.action === 'chat') + 1, 0, ...appLeaves);
     const more = S.buildMoreBranch(this.menuItems.filter((item) => !APP_MENU_OWNER || item.owner !== APP_MENU_OWNER));
-    const tree = tools.concat(S.buildMenuTree(this.animations), more ? [more] : []);
+    // 脱离式菜单只有一列窄面板：动作 / 更多不再开侧边子菜单，全部摊进面板里滚动
+    const tree = S.flattenMenuTree(tools.concat(S.buildMenuTree(this.animations), more ? [more] : []));
     if (!tree.length) return;
+    const body = this.hit.getBoundingClientRect();
+    // 首帧/刚重建的 sprite 可能还量不到 DOM（rect=0）：退回右键点 + 静态命中区尺寸
+    const petRect =
+      body.width > 0 && body.height > 0
+        ? { x: body.x, y: body.y, w: body.width, h: body.height }
+        : {
+            x: e.clientX - this.hitRect.w / 2,
+            y: e.clientY - this.hitRect.h / 2,
+            w: this.hitRect.w,
+            h: this.hitRect.h,
+          };
     this.menuOpen = true;
-    this.setInteractive(true); // 菜单是窗口内 DOM：悬停期间整窗保持可交互，关闭后恢复命中区穿透
+    this.menuDetached = true; // 菜单窗口独立：宠物失焦 / 鼠标离开不能当成菜单关闭
     this.syncInputBusy();
     window.__dshPetDebug.menuOpen = true;
-    const m = S.mountContextMenu({
-      tree,
-      x: e.clientX,
-      y: e.clientY,
-      // 只允许在「窗口 ∩ 工作区」内显示：宠物贴边时外扩余量伸出屏幕，菜单走进那里会被 OS 裁掉（#41）
-      clamp: this.visibleClampRect(),
-      onAction: (leaf) => this.onMenuAction(leaf),
-      // 菜单被点外/Esc 关闭（非菜单项路径）：同样复位可交互标记，恢复命中区判定
-      onClose: () => {
-        this.menuOpen = false;
-        window.__dshPetDebug.menuOpen = false;
-        this.syncInputBusy();
-        if (!this.inputBusy()) this.setInteractive(false);
-      },
-    });
-    this.menuClose = m.close;
-    this.syncInputRegions(); // mountContextMenu 完成布局后才能读取菜单矩形
+    // 本窗口不再挂菜单 DOM；只把树和宠物身体矩形交给主进程，由主进程开独立窗口
+    this.menuClose = () => {
+      if (window.petBridge && window.petBridge.closeMenu) window.petBridge.closeMenu();
+    };
+    if (window.petBridge && window.petBridge.openMenu) {
+      window.petBridge.openMenu({
+        tree,
+        title: this.pet.name,
+        petRect,
+        scale: CONFIG.scale,
+      });
+    }
   }
 
   /** `keepFacing` = 调用方已**显式指定**朝向（POST /anim 的 facing）：跳过下面"文字类动画点播前
@@ -1780,12 +1796,26 @@ class PetSprite {
 
   closeMenu() {
     if (this.menuClose) {
-      this.menuClose();
+      const close = this.menuClose;
       this.menuClose = null;
+      close();
     }
+    if (!this.menuOpen && !this.menuDetached) return;
     this.menuOpen = false;
+    this.menuDetached = false;
     window.__dshPetDebug.menuOpen = false;
     this.syncInputBusy(); // 菜单关：若没有别的占用（拖拽/弹窗）则交还常规判定
+    if (!this.inputBusy()) this.setInteractive(false);
+  }
+
+  /** 菜单窗口自己关了（点外 / Esc / 失焦）：主进程通知本宠物复位状态 */
+  onMenuClosed() {
+    if (!this.menuOpen) return;
+    this.menuOpen = false;
+    this.menuDetached = false;
+    this.menuClose = null;
+    window.__dshPetDebug.menuOpen = false;
+    this.syncInputBusy();
     if (!this.inputBusy()) this.setInteractive(false);
   }
 

@@ -341,10 +341,10 @@ describe('守卫：渲染端的输入租约必须在位（helper 随包发行，
       /closeMenu\(\) \{[\s\S]{0,400}?this\.syncInputBusy\(\)/.test(sprite),
       'closeMenu 必须上报（菜单的四条关闭路径都走它）',
     );
-    // 菜单被点外/Esc 关闭：走的是 mountContextMenu 的 onClose，不经 closeMenu
+    // 菜单被点外/Esc 关闭：主进程发 pet:menu-closed → onMenuClosed（不经 closeMenu）
     assert.ok(
-      /onClose: \(\) => \{\s*this\.menuOpen = false;[\s\S]{0,200}?this\.syncInputBusy\(\)/.test(sprite),
-      '菜单 onClose（点外/Esc）必须上报——这条路径不经 closeMenu',
+      /onMenuClosed\(\) \{[\s\S]{0,300}?this\.menuOpen = false;[\s\S]{0,200}?this\.syncInputBusy\(\)/.test(sprite),
+      '菜单 onMenuClosed（点外/Esc）必须上报——这条路径不经 closeMenu',
     );
     // 对话弹窗关闭
     assert.ok(/this\.chatOpen = false;[\s\S]{0,300}?this\.syncInputBusy\(\)/.test(sprite), '对话弹窗关闭必须上报');

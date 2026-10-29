@@ -58,6 +58,7 @@ const { shouldLinearize, resolveForcedScale, resolvePetScale } = require('./dpi-
 // 托盘的平台差异（模板图 / 左键是否自动弹菜单 / Dock）：规则住在模块里，main.js 只接线
 const { trayPlatform } = require('./tray-platform.js');
 const { buildDeskGeometry } = require('./desktop-geometry.js');
+const { placeMenuWindow } = require('./menu-window.js');
 
 // 允许无用户手势直接播放（动画素材）
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -322,6 +323,95 @@ function petWindowSize(size) {
   const bottomPad = (size * (9 / 16) * (360 - 330)) / 360;
   const m = Math.round(size * 0.5);
   return { width: Math.round(size) + m * 2, height: Math.round(height + bottomPad) + m * 2 };
+}
+
+// ---------- 脱离宠物窗口的右键菜单 ----------
+/** 面板 320 + 两侧各 16 的阴影留白 */
+const MENU_WIDTH = 352;
+const MENU_MAX_HEIGHT = 720;
+/** 同一时间只有一个菜单窗口；win/ownerId/petRect/workArea/drag 都随它生命周期 */
+let menuState = null;
+
+function destroyMenuWindow(notifyOwner) {
+  const state = menuState;
+  menuState = null;
+  if (!state) return;
+  const win = state.win;
+  if (win && !win.isDestroyed()) win.destroy();
+  if (notifyOwner) {
+    const owner = windows.get(state.ownerId);
+    if (owner && !owner.isDestroyed()) owner.webContents.send('pet:menu-closed');
+  }
+}
+
+/**
+ * 菜单窗口 = 面板自身大小（透明四周留白只容纳阴影），因此**不受宠物窗口边界裁剪**。
+ * 渲染端量好面板后回 menu:size，这里再定位并显示。
+ */
+function openMenuWindow(owner, petId, payload) {
+  const bounds = owner.getContentBounds();
+  const scale = Number(payload?.scale) > 0 ? Number(payload.scale) : 1;
+  const local = payload?.petRect || {};
+  const pet = {
+    x: bounds.x + (Number(local.x) || 0) * scale,
+    y: bounds.y + (Number(local.y) || 0) * scale,
+    w: Math.max(1, (Number(local.w) || 0) * scale),
+    h: Math.max(1, (Number(local.h) || 0) * scale),
+  };
+  const display = screen.getDisplayMatching({
+    x: Math.round(pet.x),
+    y: Math.round(pet.y),
+    width: Math.round(pet.w),
+    height: Math.round(pet.h),
+  });
+  const area = display.workArea;
+  const workArea = { x: area.x, y: area.y, w: area.width, h: area.height };
+  const width = Math.max(180, Math.min(MENU_WIDTH, area.width - 16));
+  const maxHeight = Math.max(120, Math.min(MENU_MAX_HEIGHT, area.height - 16));
+
+  destroyMenuWindow(true);
+  const win = new BrowserWindow({
+    width,
+    height: maxHeight,
+    x: area.x + 8,
+    y: area.y + 8,
+    show: false,
+    useContentSize: true,
+    enableLargerThanScreen: true,
+    transparent: true,
+    frame: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    hasShadow: false,
+    focusable: true,
+    roundedCorners: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'menu-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false,
+    },
+  });
+  win.setAlwaysOnTop(true, topmostLevel(process.platform));
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.webContents.setBackgroundThrottling(false);
+  win.webContents.on('context-menu', (event) => event.preventDefault());
+  const state = { win, ownerId: petId, petRect: pet, workArea, maxHeight, drag: null, positioned: false };
+  menuState = state;
+  // 菜单以外的位置在当前显示器上点不到这个窗口，点别的应用/桌面只会让它失焦 → 收起
+  win.on('blur', () => {
+    if (menuState === state && !state.drag) destroyMenuWindow(true);
+  });
+  win.on('closed', () => {
+    if (menuState === state) menuState = null;
+  });
+  win.loadFile(path.join(__dirname, 'menu.html'));
+  win.webContents.once('did-finish-load', () => {
+    if (menuState !== state) return;
+    win.webContents.send('menu:render', { tree: payload.tree, title: payload.title });
+  });
 }
 
 /**
@@ -706,6 +796,109 @@ app.whenReady().then(() => {
     inputRegions.set(win.id, { dragging: input.dragging === true, rects });
   });
 
+  // ---- 脱离宠物窗口的右键菜单 ----
+  // 渲染端只发树和宠物身体矩形；菜单窗口由主进程建在宠物旁边，动作再转发回原宠物窗口。
+  ipcMain.on('pet:open-menu', (event, payload) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || owner.isDestroyed()) return;
+    const petId = [...windows.keys()].find((id) => windows.get(id) === owner);
+    if (!petId) return;
+    const tree = Array.isArray(payload?.tree) ? payload.tree : [];
+    if (!tree.length) return;
+    openMenuWindow(owner, petId, {
+      tree,
+      title: typeof payload?.title === 'string' ? payload.title : '',
+      petRect: payload?.petRect,
+      scale: payload?.scale,
+    });
+  });
+
+  ipcMain.on('pet:close-menu', (event) => {
+    const state = menuState;
+    if (!state) return;
+    const owner = windows.get(state.ownerId);
+    if (!owner || owner.webContents !== event.sender) return;
+    destroyMenuWindow(false);
+  });
+
+  // 渲染端量好面板尺寸后上报：按内容收紧窗口，再放到宠物旁边并显示。
+  ipcMain.on('menu:size', (event, size) => {
+    const state = menuState;
+    if (!state || state.win.isDestroyed() || event.sender !== state.win.webContents) return;
+    const width = Math.max(120, Math.min(MENU_WIDTH, Math.round(Number(size?.width) || MENU_WIDTH)));
+    const height = Math.max(80, Math.min(state.maxHeight, Math.round(Number(size?.height) || state.maxHeight)));
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return;
+    state.win.setContentSize(width, height);
+    if (!state.positioned) {
+      const pos = placeMenuWindow(state.petRect, width, height, state.workArea);
+      if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return;
+      state.win.setPosition(pos.x, pos.y);
+      state.positioned = true;
+    } else {
+      // 展开/收起分组后高度变化：保持用户拖到的位置，只把它夹回工作区内
+      const b = state.win.getBounds();
+      const area = state.workArea;
+      const x = Math.max(area.x + 8, Math.min(b.x, area.x + area.w - width - 8));
+      const y = Math.max(area.y + 8, Math.min(b.y, area.y + area.h - height - 8));
+      state.win.setPosition(Math.round(x), Math.round(y));
+    }
+    if (!state.win.isVisible()) {
+      state.win.show();
+      state.win.focus();
+    }
+  });
+
+  // 拖标题 = 移动整个菜单窗口（面板在窗口内固定，不参与位移）
+  ipcMain.on('menu:drag', (event, payload) => {
+    const state = menuState;
+    if (!state || state.win.isDestroyed() || event.sender !== state.win.webContents) return;
+    const x = Number(payload?.screenX);
+    const y = Number(payload?.screenY);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const phase = payload?.phase;
+    if (phase === 'start') {
+      const b = state.win.getBounds();
+      state.drag = { startX: x, startY: y, winX: b.x, winY: b.y };
+      return;
+    }
+    if (!state.drag) return;
+    if (phase === 'end') {
+      state.drag = null;
+      return;
+    }
+    if (phase !== 'move') return;
+    const b = state.win.getBounds();
+    const area = state.workArea;
+    const nextX = Math.max(
+      area.x + 8,
+      Math.min(state.drag.winX + x - state.drag.startX, area.x + area.w - b.width - 8),
+    );
+    const nextY = Math.max(
+      area.y + 8,
+      Math.min(state.drag.winY + y - state.drag.startY, area.y + area.h - b.height - 8),
+    );
+    state.win.setPosition(Math.round(nextX), Math.round(nextY));
+  });
+
+  // 点外 / Esc / 失焦：菜单自己关了，通知宠物复位 menuOpen / 输入状态
+  ipcMain.on('menu:closed', (event) => {
+    const state = menuState;
+    if (!state || event.sender !== state.win.webContents) return;
+    destroyMenuWindow(true);
+  });
+
+  // 选中项：先把窗口收掉，再把动作转给菜单所属的宠物窗口（chat 等需要宠物窗口有焦点）
+  ipcMain.on('menu:action', (event, leaf) => {
+    const state = menuState;
+    if (!state || event.sender !== state.win.webContents) return;
+    const owner = windows.get(state.ownerId);
+    destroyMenuWindow(false);
+    if (owner && !owner.isDestroyed()) {
+      owner.focus();
+      owner.webContents.send('pet:menu-action', leaf);
+    }
+  });
+
   // 右键菜单「设置」：交给**系统默认浏览器**打开带令牌的本机设置页，
   // 不建专属窗口——宠物窗口机制是透明小窗，不该承载常规网页浏览。URL 由渲染端从
   // configUrl 推导，端口变化自动跟随。
@@ -893,14 +1086,20 @@ app.whenReady().then(() => {
                 return { threw: String(err), menuMounted: false };
               }
               var menu = document.querySelector('.dsh-pet-menu');
+              var opened = d.menuOpen === true;
               var out = {
                 threw: null,
-                menuMounted: !!menu,
-                menuOpen: d.menuOpen === true,
+                // 菜单已脱离宠物窗口：看 menuOpen，不再看本页 DOM
+                menuMounted: opened,
+                menuInPet: !!menu,
+                menuOpen: opened,
                 rootText: menu ? menu.textContent.slice(0, 60) : '',
                 errsNew: (d.errors || []).length - errsBefore,
               };
+              if (opened && typeof sprites !== 'undefined' && sprites[0]) sprites[0].closeMenu();
               if (menu) {
+                // 默认是单块面板（.dsh-pet-menu-panel），旧级联布局的根才是 .dsh-pet-menu-column
+                var rootIsPanel = !!menu.querySelector('.dsh-pet-menu-panel');
                 var branch = menu.querySelector('.dsh-pet-menu-branch');
                 if (branch) {
                   branch.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, relatedTarget: menu }));
@@ -915,9 +1114,11 @@ app.whenReady().then(() => {
                   out.panelCount = panels.length;
                   out.lvl2AfterHoverRoot = visible().length;
                   // 二级：悬停「动作」下的第一个分类 → 打开三级面板（具体动画）
-                  var panel1 = visible().filter(function (p) {
-                    return p !== panels[0];
-                  })[0];
+                  var panel1 = rootIsPanel
+                    ? visible()[0]
+                    : visible().filter(function (p) {
+                        return p !== panels[0];
+                      })[0];
                   if (panel1) {
                     var cat = panel1.querySelector('.dsh-pet-menu-branch');
                     if (cat) {

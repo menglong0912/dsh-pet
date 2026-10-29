@@ -1,5 +1,5 @@
 import { openActionPanel } from '../action-panel-window';
-import type { ActionPanelWindow, TurnMode } from '../action-panel-window';
+import type { ActionPanelWindow, TurnMode, TurnModePrompt } from '../action-panel-window';
 import { arenaScoreboard, openArenaWindow } from '../arena-window';
 import { askAiTurn, legalChoices, startLiveClient, startLiveServer } from '../battle-live';
 import { createDashRig, screenUnion } from '../battle-dash';
@@ -7,6 +7,7 @@ import type { DashFoe } from '../battle-dash';
 import type { TurnDecision } from '../battle-live';
 import { fighterSheet, guideAction, statsBrief } from '../battle';
 import type { Action, BattleEvent, BattleView, Fighter } from '../battle';
+import { fairSparPair } from '../battle';
 import { BattleShow, LINE_MS, SHOW_ANIMS, swapSides, timeline } from '../battle-show';
 import type { Shot } from '../battle-show';
 import { stageLabel } from '../cultivation';
@@ -75,6 +76,7 @@ export async function pickTurnMode(
   ctx: FeatureContext,
   arena: () => Rect | null = () => null,
   foe: () => Rect | null = () => null,
+  prompt: TurnModePrompt = {},
 ): Promise<TurnMode | null> {
   if (ctx.state.actionPanel) return null;
   const panel = openActionPanel(
@@ -88,7 +90,7 @@ export async function pickTurnMode(
   const initial = arena();
   if (initial) panel.place(initial);
   try {
-    return await panel.chooseMode(ctx.ai.isReady(), ctx.deps.modeTimeoutMs ?? 10_000);
+    return await panel.chooseMode(ctx.ai.isReady(), ctx.deps.modeTimeoutMs ?? 10_000, prompt);
   } finally {
     panel.close();
     if (ctx.state.actionPanel === panel) ctx.state.actionPanel = null;
@@ -324,7 +326,12 @@ export function createSpar(ctx: FeatureContext): Spar {
       const panel = ensureManualPanel();
       const choices = legalChoices(view);
       const pick = await panel.chooseAction(
-        choices.map((choice) => ({ label: choice.label, ...(choice.note ? { note: choice.note } : {}) })),
+        choices.map((choice) => ({
+          label: choice.label,
+          ...(choice.note ? { note: choice.note } : {}),
+          effect: choice.effect,
+          tone: choice.tone,
+        })),
         deps.actionTimeoutMs ?? 20_000,
       );
       if (pick === null) {
@@ -339,6 +346,9 @@ export function createSpar(ctx: FeatureContext): Spar {
       // 逐手对传（X19）：每一手一段一段演；发起方发 HTTP，应战方等协议层递进来
       const sendTurn = show.live.sendTurn;
       if (show.live.role === 'client' && !sendTurn) throw new Error('逐手局缺 sendTurn');
+      // 逐手局一创建就开演第一手，而占锁要等一个来回：先把锁的请求发出去，第一段演出等锁到手再开。
+      // 不能把整局往后挪——应战方要先把 live 局注册上，对端第一手才递得进来（X19 回归测试踩过）
+      const held = holdPet([], 20 * 60_000);
       const live =
         show.live.role === 'client'
           ? startLiveClient({
@@ -354,6 +364,7 @@ export function createSpar(ctx: FeatureContext): Spar {
               log: ctx.log,
               waitMs: deps.turnWaitMs ?? TURN_WAIT_MS,
               sendTurn: sendTurn!,
+              ready: held,
             })
           : startLiveServer({
               a: show.zero,
@@ -367,14 +378,15 @@ export function createSpar(ctx: FeatureContext): Spar {
               think: () => show.think?.(),
               log: ctx.log,
               waitMs: deps.turnWaitMs ?? TURN_WAIT_MS,
+              ready: held,
             });
       ctx.state.liveBattle = live;
       const turn = live.turn;
       if (show.live.role === 'server') ctx.state.liveTurn = turn;
       show.beforeShow?.();
       void refreshMenu();
-      // 逐手一场事先不知道多久：先占住宠物（holdPet 会夹到 /lock 的上限）
-      await holdPet([], 20 * 60_000);
+      // 逐手一场事先不知道多久：占住宠物（holdPet 会夹到 /lock 的上限），第一段演出由 ready 挡在锁后面
+      await held;
       events = await live.done;
       if (ctx.state.liveBattle === live) ctx.state.liveBattle = null;
       if (show.live.role === 'server' && ctx.state.liveTurn === turn) ctx.state.liveTurn = null;
@@ -481,12 +493,17 @@ export function createSpar(ctx: FeatureContext): Spar {
       // 自己发起时在邀约前就选好了；客人发起时这会儿在自己的出招面板里选（10 秒不点按自动）
       if (invited?.live && invited.mode) mode = invited.mode;
       else {
+        // 客人来切磋：直接弹「自动 / AI / 手动 / 不应战」，主人不用先右键再找应战项
         const picked = await pickTurnMode(
           ctx,
           () => null,
           () => null,
+          {
+            title: `${visitor.owner} 家的 ${visitor.pet} 想跟你切磋：怎么出招？`,
+            declineLabel: '不应战',
+          },
         );
-        if (!picked) return { ok: false, reason: 'busy' };
+        if (!picked) return { ok: false, reason: 'declined' };
         // 选方式的 10 秒里客人可能已经走了：别再挂一场没人亮的切磋
         if (!ctx.state.hosting || ctx.state.hosting.visitor !== visitor) return { ok: false, reason: 'not-visiting' };
         mode = picked;
@@ -652,8 +669,8 @@ export function createSpar(ctx: FeatureContext): Spar {
     const current = ctx.state.hosting;
     if (!practice || !current || !visitor.id || !state.guestCard || !state.hostNonce) return;
     const guestCard = state.guestCard;
-    const you = practice.fighter(petName());
-    const foe = cardFighter(visitor.pet, guestCard);
+    // 切磋不比修为（X20）：名帖照旧收真实属性，开打和演出都用拉平后的这一对
+    const [you, foe] = fairSparPair(practice.fighter(petName()), cardFighter(visitor.pet, guestCard));
     if (state.live) {
       await runHostLiveSparShow(visitor, state, current, you, foe, guestCard, guestNonce, guestLine);
       return;
@@ -768,8 +785,22 @@ export function createSpar(ctx: FeatureContext): Spar {
     // 自己发起的一律走逐手局，主人家也能选它的；只有旧主人家邀的全自动局才整场算好
     let mode: TurnMode = 'auto';
     if (!invite || invite.live) {
-      const picked = await pickTurnMode(ctx);
-      if (!picked) return;
+      // 主人家邀战也直接弹确认：多一个「不应战」，超时按不应战收
+      const picked = await pickTurnMode(
+        ctx,
+        () => null,
+        () => null,
+        invite
+          ? {
+              title: `${current.host.owner} 家的 ${current.host.pet} 邀你切磋：怎么出招？`,
+              declineLabel: '不应战',
+            }
+          : {},
+      );
+      if (!picked) {
+        if (invite) relay('（切磋）这次不打了');
+        return;
+      }
       if (ctx.state.trip !== current || ctx.state.disposed) return;
       mode = picked;
     }
@@ -802,8 +833,8 @@ export function createSpar(ctx: FeatureContext): Spar {
       guestSparFailed(state, reply.reason, live);
       return;
     }
-    const you = practice.fighter(petName());
-    const hostFighter = cardFighter(current.host.pet, reply.card);
+    // 切磋不比修为（X20）：名帖照旧收真实属性，开打和演出都用拉平后的这一对
+    const [hostFighter, you] = fairSparPair(cardFighter(current.host.pet, reply.card), practice.fighter(petName()));
     // 名帖里的境界没法验证真伪（§设计 4.7）：奖励小、还封顶，照它报的打就是了
     const beforeShow = (): void => {
       // 做客时自家宠物是半透明的（AWAY_OPACITY）：开演亮回原色；演出期间转播不改亮度，
@@ -1007,6 +1038,8 @@ export function createSpar(ctx: FeatureContext): Spar {
         return '对方没开修炼，切不了';
       case 'busy':
         return '对方正在切磋，等会儿吧';
+      case 'declined':
+        return '对方这次不应战';
       case 'version':
         return '两边版本不一样，切磋不了';
       case 'unsupported-mode':

@@ -1,4 +1,5 @@
 import { timeline, swapSides } from './battle-show.ts';
+import { fairSparPair } from './battle.ts';
 import {
   FAREWELL_WAIT_MS,
   guestFarewellDiary,
@@ -49,6 +50,7 @@ import {
   encodeBeacon,
   sendDuel,
   sendDuelReveal,
+  SPAR_LIVE_MODE,
 } from './visit.ts';
 import type { SparCard } from './visit.ts';
 import assert from 'node:assert/strict';
@@ -95,13 +97,14 @@ test('切磋（主人家）：旧客人开口的全自动局 → 应战 → 亮�
           await sendReveal({ address: '127.0.0.1', port }, { token, nonce: ownNonce, line: '承让承让～' }),
           { ok: true },
         );
-        const fightEvents = sparFight(hostFighter, cardFighter('阿花', guestCard()), ownNonce, hostNonce);
+        const [zero, one] = fairSparPair(hostFighter, cardFighter('阿花', guestCard()));
+        const fightEvents = sparFight(zero, one, ownNonce, hostNonce);
         const fightEnd = fightEvents[fightEvents.length - 1]!;
         const won = fightEnd.kind === 'end' && fightEnd.winner === 0;
         // 主人家这边的解说也用 sparLineRng（X12）：复算一遍时间线，自己那一方的第一句要在 /broadcast 里出现
         const expectedSteps = timeline(fightEvents, [petNameIn(home), '阿花'], sparLineRng(ownNonce, hostNonce), [
-          hostFighter.skills,
-          guestCard().skills,
+          zero.skills,
+          one.skills,
         ]);
         const ownLine = expectedSteps.find((step) => step.line && step.who === 0)?.line;
         const firstLine = ownLine ?? expectedSteps.find((step) => step.line)?.line;
@@ -179,6 +182,41 @@ test('切磋（主人家）：旧客人开口的全自动局 → 应战 → 亮�
     env.memeAnswer = '无';
     gate.resolve();
   }
+});
+
+test('切磋（主人家）：客人开打前直接弹应战确认，点不应战就回 declined', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const beaconPort = await freeUdpPort();
+  await withFeatures(
+    {
+      config: visitConfig(),
+      cultivation: cultivationEarly(),
+      clicks,
+      modeTimeoutMs: 2_000,
+      beacon: { port: beaconPort, targets: () => [] },
+    },
+    async (features, _said, _bodies, home, extras) => {
+      const { port, token } = await knockIn(home, clicks, extras);
+      const target = { address: '127.0.0.1', port };
+      const asking = sendSpar(target, {
+        token,
+        mode: SPAR_LIVE_MODE,
+        card: guestCard(),
+        commit: sparCommit('c'.repeat(64)),
+      });
+      await until(() => features.battle.state() !== null, '切磋应战确认面板');
+      const prompt = features.battle.state()!;
+      assert.match(prompt.title, /阿花 想跟你切磋/);
+      assert.deepEqual(
+        prompt.options.map((option) => option.label),
+        ['自动', 'AI 出招', '手动', '攻略', '不应战'],
+      );
+      assert.equal(features.battle.choose(5), true, '面板上直接点不应战');
+      assert.deepEqual(await asking, { ok: false, reason: 'declined' });
+      assert.equal(windowOn('/app/arena'), undefined, '没开擂台');
+    },
+  );
 });
 
 test('切磋：随机数对不上、超时没亮、邀约没人接，各按各的口径收场（不开打、没有擂台）', async () => {
@@ -327,15 +365,13 @@ test('切磋（客人）：旧主人家邀的全自动局 → 应战、亮随机
         await until(() => saw.nonce !== null, '亮了随机数');
         assert.equal(saw.line, env.memeAnswer, '感言走 compose（假模型的回答，不是兜底模板）');
         // 账：测试拿同一对随机数复核这场谁赢，客人的记录必须一致
-        const expected = sparFight(cardFighter('大个', fakeCard), hostFighter, saw.nonce!, HOST_NONCE);
+        const [away, own] = fairSparPair(cardFighter('大个', fakeCard), hostFighter);
+        const expected = sparFight(away, own, saw.nonce!, HOST_NONCE);
         const expectedEnd = expected[expected.length - 1]!;
         const won = expectedEnd.kind === 'end' && expectedEnd.winner === 1;
         // 两边台词用同一颗种子（X12）：客人这边换边后的时间线里，第一句要在自己的 /broadcast 里出现
         const guestSteps = swapSides(
-          timeline(expected, ['大个', petNameIn(home)], sparLineRng(saw.nonce!, HOST_NONCE), [
-            fakeCard.skills,
-            hostFighter.skills,
-          ]),
+          timeline(expected, ['大个', petNameIn(home)], sparLineRng(saw.nonce!, HOST_NONCE), [away.skills, own.skills]),
         );
         const ownGuestLine = guestSteps.find((step) => step.line && step.who === 0)?.line;
         const firstGuestLine = ownGuestLine ?? guestSteps.find((step) => step.line)?.line;
@@ -473,7 +509,8 @@ test('隔空切磋（应战方）：冒话、两个菜单项 → 点应战 → �
           ),
           { ok: true },
         );
-        const expected = sparFight(hostFighter, cardFighter('阿花', card), ownNonce, hostNonce);
+        const [zero, one] = fairSparPair(hostFighter, cardFighter('阿花', card));
+        const expected = sparFight(zero, one, ownNonce, hostNonce);
         const end = expected[expected.length - 1]!;
         const won = end.kind === 'end' && end.winner === 0;
         // 这边的账：修为进账、战绩、邻居簿、日记（都是开打那一步记的）
@@ -578,6 +615,45 @@ test('隔空切磋（应战方）：点不应战不记账，也不开窗', async
         const day = JSON.parse(readFileSync(path, 'utf8')) as DiaryDay;
         assert.ok(!day.events.some((event) => event.text.includes('隔空切磋')), '不应战不记日记');
       }
+    },
+  );
+});
+
+test('隔空切磋（应战方）：收到挑战直接弹确认面板，点不应战就回 declined', async () => {
+  const clicks: string[] = [];
+  windows.length = 0;
+  const beaconPort = await freeUdpPort();
+  const challenger = generateVisitIdentity();
+  await withFeatures(
+    {
+      config: visitConfig(),
+      cultivation: cultivationEarly(),
+      neighbors: { neighbors: [neighborRecord(challenger.id, '小李', '阿花')] },
+      clicks,
+      modeTimeoutMs: 2_000,
+      beacon: { port: beaconPort, targets: () => [] },
+    },
+    async (features, said, _bodies, home, extras) => {
+      const { port, hostId } = await hostedApp(home, extras);
+      const asking = sendDuel({ address: '127.0.0.1', port }, hostId, { owner: '小李', pet: '阿花' }, challenger, {
+        mode: SPAR_MODE,
+        card: guestCard(),
+        commit: sparCommit('c'.repeat(64)),
+      });
+      // 不用等右键菜单，也不点菜单：挑战一到面板就弹出来
+      await until(() => features.battle.state() !== null, '应战确认面板');
+      const prompt = features.battle.state()!;
+      assert.match(prompt.title, /小李 家的 阿花 想跟你切磋/);
+      assert.deepEqual(
+        prompt.options.map((option) => option.label),
+        ['应战', '不应战'],
+      );
+      assert.equal(features.battle.choose(2), true, '面板上直接点不应战');
+      assert.deepEqual(await asking, { ok: false, reason: 'declined' });
+      await until(() => said.some((text) => text.includes('不跟 阿花 切磋')), '说了不应战');
+      assert.equal(windowOn('/app/arena'), undefined, '没开擂台');
+      assert.equal(windowOn('/app/guest'), undefined, '没开对手窗口');
+      assert.equal(fightCount(home), 0, '不应战不记账');
     },
   );
 });

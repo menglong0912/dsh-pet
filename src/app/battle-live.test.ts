@@ -4,10 +4,10 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startLiveClient, startLiveServer } from './battle-live.ts';
+import { legalChoices, startLiveClient, startLiveServer, toneOf } from './battle-live.ts';
 import type { LiveVersus } from './battle-live.ts';
 import { fight, rngFrom } from './battle.ts';
-import type { Controller, Fighter } from './battle.ts';
+import type { BattleView, Controller, Fighter } from './battle.ts';
 import type { ShowSides } from './battle-show.ts';
 
 const a: Fighter = {
@@ -200,4 +200,56 @@ test('X19 逐手对传：收到对面不合法的招 / 等不到对面都按掉�
   });
   late.skip();
   assert.equal(await late.done, null, '等超时按掉线');
+});
+
+test('X17 出招分类：控制、回复保命与伤害按动作效果归类', () => {
+  const cases = [
+    [{ kind: 'weapon', weapon: 'snowball' }, 'control'],
+    [{ kind: 'weapon', weapon: 'duster' }, 'control'],
+    [{ kind: 'skill', skill: 'lion-roar' }, 'control'],
+    [{ kind: 'skill', skill: 'ink' }, 'control'],
+    [{ kind: 'skill', skill: 'whale-gulp' }, 'sustain'],
+    [{ kind: 'skill', skill: 'bloom' }, 'sustain'],
+    [{ kind: 'skill', skill: 'myriad-self' }, 'sustain'],
+    [{ kind: 'skill', skill: 'finger-sword' }, 'damage'],
+    [{ kind: 'skill', skill: 'dragon-palm' }, 'damage'],
+    [{ kind: 'weapon', weapon: 'water-gun' }, 'damage'],
+    [{ kind: 'unarmed' }, 'damage'],
+  ] as const;
+  for (const [action, tone] of cases) assert.equal(toneOf(action), tone);
+});
+
+test('X17 出招分类：legalChoices 带上 tone，pick 与动作顺序不变', () => {
+  const view: BattleView = {
+    self: 0,
+    hp: [60, 60],
+    maxHp: [60, 60],
+    you: {
+      weapons: ['snowball', 'duster', 'water-gun'],
+      skills: ['lion-roar', 'bloom', 'whale-gulp', 'myriad-self', 'ink', 'finger-sword', 'dragon-palm'],
+      used: [],
+    },
+    foe: { weapons: [], skills: [] },
+  };
+  const choices = legalChoices(view);
+  assert.deepEqual(
+    choices.map((choice) => choice.pick),
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  );
+  assert.deepEqual(
+    choices.map((choice) => choice.tone),
+    [
+      'control',
+      'control',
+      'damage',
+      'damage',
+      'control',
+      'sustain',
+      'sustain',
+      'sustain',
+      'control',
+      'damage',
+      'damage',
+    ],
+  );
 });

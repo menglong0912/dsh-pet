@@ -109,70 +109,123 @@ test(
         assert.ok(Math.abs(geometry.negative + 20) <= 1);
       });
 
-      await t.test('menu stays below the system menu bar and closes with immediate click-through', async () => {
-        // Use a larger pet so the menu fits; unlike zoom, size must not enlarge menu typography.
-        await page.evaluate(`(() => {
+      await t.test(
+        'right-click opens a narrow, tall menu in its own window beside the pet, draggable and closable',
+        async () => {
+          // Use a larger pet so the menu window has a body rect beside it.
+          await page.evaluate(`(() => {
         config.pets[0].size = 462;
         config.pets[0].position.marginY = 100;
         sprites[0].dispose();
         sprites = [new PetSprite(config.pets[0])];
+      })()`);
+          // 等布局落定：紧接着 new 出来的 hit 还没量出 rect，菜单拿不到宠物身体位置
+          await page.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+          const menuPagePromise = app.waitForEvent('window');
+          await page.evaluate(`(() => {
         const s = sprites[0], r = s.hit.getBoundingClientRect();
         s.onContextMenu(new MouseEvent('contextmenu', {clientX:r.x+r.width/2, clientY:r.y+r.height/2}));
       })()`);
-        await page.waitForSelector('.dsh-pet-menu-column');
-        const metrics = await page.evaluate(`(() => {
-        const s = sprites[0], menu = document.querySelector('.dsh-pet-menu-column');
-        const rect = menu.getBoundingClientRect();
-        return { y: s.pos.y + VIEW.y - s.margin.t + rect.y,
-          font: parseFloat(getComputedStyle(menu).fontSize) };
-      })()`);
-        const workTop = await app.evaluate(({ screen }) => screen.getPrimaryDisplay().workArea.y);
-        assert.ok(metrics.y >= workTop);
-        assert.ok(metrics.font <= 16, `menu font unexpectedly doubled: ${metrics.font}`);
-        const menu = await page.locator('.dsh-pet-menu-column').first().boundingBox();
-        const win = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentBounds());
-        await app.evaluate(
-          ({ screen }, point) => {
-            screen.getCursorScreenPoint = () => point;
-          },
-          {
-            x: win.x + menu.x + 10,
-            y: win.y + menu.y + 10,
-          },
-        );
-        await assertEventually(async () =>
-          app.evaluate(({ BrowserWindow }) => !BrowserWindow.getAllWindows()[0].testIgnoring),
-        );
-        await app.evaluate(
-          ({ screen }, point) => {
-            screen.getCursorScreenPoint = () => point;
-          },
-          {
-            x: win.x + 2,
-            y: win.y + win.height - 2,
-          },
-        );
-        await assertEventually(async () =>
-          app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].testIgnoring),
-        );
-        assert.equal(
-          await page.evaluate('sprites[0].menuOpen'),
-          true,
-          'transparent margin must pass through even while menu stays open',
-        );
-        await page.evaluate('sprites[0].closeMenu()');
-        await page.waitForFunction(
-          () => window.__dshPetDebug.inputBusy === false && window.__dshPetDebug.interactive === false,
-        );
-        await assertEventually(async () =>
-          app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].testIgnoring),
-        );
-      });
+          const menuPage = await menuPagePromise;
+          await menuPage.waitForSelector('.dsh-pet-menu-panel');
+          assert.equal(await page.evaluate('sprites[0].menuOpen'), true);
+
+          const menuBounds = () =>
+            app.evaluate(({ BrowserWindow }) => {
+              const win = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('menu.html'));
+              return win && !win.isDestroyed() ? win.getContentBounds() : null;
+            });
+          const initialBounds = await menuBounds();
+          assert.ok(initialBounds, 'menu window must exist');
+          assert.ok(initialBounds.width <= 360, `detached menu should be narrow, got ${initialBounds.width}`);
+
+          const panel = await menuPage.evaluate(`(() => {
+          const el = document.querySelector('.dsh-pet-menu-panel');
+          const r = el.getBoundingClientRect();
+          return { width: r.width, font: parseFloat(getComputedStyle(el).fontSize) };
+        })()`);
+          assert.ok(panel.width <= 320, `panel width should be narrow, got ${panel.width}`);
+          assert.ok(panel.font <= 16, `menu font unexpectedly doubled: ${panel.font}`);
+          assert.equal(await menuPage.evaluate('document.querySelectorAll(".dsh-pet-menu-column").length'), 0);
+
+          // 动作/串门这类大分组默认收起，避免一次铺满整屏；点开后面板长高并出现滚动区
+          const actionSection = `[...document.querySelectorAll('details.dsh-pet-menu-section')].find(
+            (d) => (d.querySelector('summary')?.textContent || '').includes('动作'))`;
+          assert.equal(
+            await menuPage.evaluate(`(() => { const d = ${actionSection}; return !d || !d.open; })()`),
+            true,
+          );
+          await menuPage.evaluate(
+            `(() => { const d = ${actionSection}; if (d) d.querySelector('summary').click(); })()`,
+          );
+          await assertEventually(async () => {
+            const after = await menuBounds();
+            return !!after && after.height > initialBounds.height;
+          });
+          const bounds = await menuBounds();
+          assert.ok(bounds.height > bounds.width, `expanded menu should be tall, got ${bounds.width}x${bounds.height}`);
+          assert.equal(
+            await menuPage.evaluate(`(() => { const d = ${actionSection}; return !!d && d.open; })()`),
+            true,
+          );
+
+          // 和宠物身体不重叠（可以压住窗口的透明余量，但不能盖住宠物本体）
+          const body = await page.evaluate(`(() => {
+          const r = sprites[0].hit.getBoundingClientRect();
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        })()`);
+          const petBounds = await app.evaluate(({ BrowserWindow }) => {
+            const win = BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('menu.html'));
+            return win ? win.getContentBounds() : null;
+          });
+          assert.ok(petBounds, 'pet window must exist');
+          const bodyScreen = {
+            x: petBounds.x + body.x,
+            y: petBounds.y + body.y,
+            w: body.w,
+            h: body.h,
+          };
+          assert.ok(
+            bounds.x >= bodyScreen.x + bodyScreen.w ||
+              bounds.x + bounds.width <= bodyScreen.x ||
+              bounds.y >= bodyScreen.y + bodyScreen.h ||
+              bounds.y + bounds.height <= bodyScreen.y,
+            `menu window must not cover the pet body: ${JSON.stringify({ bounds, bodyScreen })}`,
+          );
+
+          // 拖标题移动整个菜单窗口
+          const before = bounds;
+          await menuPage.evaluate(`(() => {
+          const title = document.querySelector('.dsh-pet-menu-title');
+          const r = title.getBoundingClientRect();
+          const sx = Math.round(window.screenX + r.x + 10);
+          const sy = Math.round(window.screenY + r.y + 5);
+          title.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: r.x + 10, clientY: r.y + 5, screenX: sx, screenY: sy }));
+          window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: r.x + 40, clientY: r.y + 25, screenX: sx + 30, screenY: sy + 20 }));
+          window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, screenX: sx + 30, screenY: sy + 20 }));
+        })()`);
+          await assertEventually(async () => {
+            const after = await menuBounds();
+            return !!after && (after.x !== before.x || after.y !== before.y);
+          });
+
+          // Esc 收起：菜单窗口消失、宠物状态复位
+          await menuPage.evaluate(
+            `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`,
+          );
+          await assertEventually(async () => (await menuBounds()) === null);
+          await assertEventually(async () => (await page.evaluate('sprites[0].menuOpen')) === false);
+          assert.equal(await page.evaluate('sprites[0].inputBusy()'), false);
+        },
+      );
 
       await t.test('chat input stays usable while its surrounding transparent area passes through', async () => {
         await page.evaluate('sprites[0].showChatFromMenu()');
         await page.waitForSelector('.dsh-pet-chat');
-        const bounds = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentBounds());
+        const bounds = await app.evaluate(({ BrowserWindow }) => {
+          const win = BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('menu.html'));
+          return win ? win.getContentBounds() : null;
+        });
         const chat = await page.locator('.dsh-pet-chat').boundingBox();
         await app.evaluate(
           ({ screen }, p) => {
@@ -184,7 +237,10 @@ test(
           },
         );
         await assertEventually(async () =>
-          app.evaluate(({ BrowserWindow }) => !BrowserWindow.getAllWindows()[0].testIgnoring),
+          app.evaluate(({ BrowserWindow }) => {
+            const win = BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('menu.html'));
+            return win ? !win.testIgnoring : false;
+          }),
         );
         await page
           .locator('.dsh-pet-chat-input')
@@ -201,7 +257,10 @@ test(
           },
         );
         await assertEventually(async () =>
-          app.evaluate(({ BrowserWindow }) => !BrowserWindow.getAllWindows()[0].testIgnoring),
+          app.evaluate(({ BrowserWindow }) => {
+            const win = BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('menu.html'));
+            return win ? !win.testIgnoring : false;
+          }),
         );
         await app.evaluate(
           ({ screen }, p) => {
@@ -213,7 +272,10 @@ test(
           },
         );
         await assertEventually(async () =>
-          app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].testIgnoring),
+          app.evaluate(({ BrowserWindow }) => {
+            const win = BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('menu.html'));
+            return win ? win.testIgnoring === true : false;
+          }),
         );
         assert.equal(await page.evaluate('sprites[0].chatOpen'), true);
         await page.evaluate('sprites[0].chatClose()');
@@ -238,7 +300,10 @@ test(
       })()`);
         assert.equal(await page.evaluate('sprites[0].inputBusy()'), false);
         await assertEventually(async () =>
-          app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].testIgnoring),
+          app.evaluate(({ BrowserWindow }) => {
+            const win = BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('menu.html'));
+            return win ? win.testIgnoring === true : false;
+          }),
         );
       });
     } finally {

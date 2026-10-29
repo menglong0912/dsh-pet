@@ -48,7 +48,11 @@ test('修炼：开着就建档，菜单里有「修炼」信息项', async () =>
     assert.equal(save.stage, 0);
     const view = features.cultivation.view();
     assert.equal(view?.label, '炼气一层');
-    assert.ok(menus.some((labels) => labels.some((label) => /^修炼\/炼气一层 · \d+%$/.test(label))));
+    // 菜单是建档之后异步刷新的：等它出来再看（Windows CI 上机器慢，立刻断言偶发失败）
+    await until(
+      () => menus.some((labels) => labels.some((label) => /^修炼\/炼气一层 · \d+%$/.test(label))),
+      '修炼信息项',
+    );
   });
 });
 
@@ -339,6 +343,32 @@ test('心魔试炼：开演前占住宠物（两段动画之间不插播随机�
       '占着的时候应用自己的动画与台词都带锁（不带会被宿主当成别人、回 lock-required）',
     );
   });
+});
+
+test('心魔试炼（手动逐手）：先占住宠物再开演，占锁慢一点也不让第一段动画抢前面', async () => {
+  const clicks: string[] = [];
+  const lockMs = 400;
+  windows.length = 0;
+  await withFeatures(
+    { cultivation: cultivationEarly(), clicks, lockDelayMs: lockMs },
+    async (features, _said, _bodies, _home, extras) => {
+      const { menus, requests } = extras;
+      await until(() => menus.some((labels) => labels.includes('修炼/心魔试炼')), 'trial menu');
+      clicks.push('修炼/心魔试炼');
+      await pickPanel(features, 3, '这一场');
+      await until(() => requests.some((r) => r.path === '/anim'), 'opening anim');
+      // 回归：逐手局一创建就演第一手，第一段动画得等 /lock 到手（假 /lock 故意晚 400ms）
+      const lock = requests.find((one) => one.path === '/lock');
+      const first = requests.find((one) => one.path === '/anim');
+      assert.ok(lock && first && lock.at !== undefined && first.at !== undefined, '记下了占锁与第一段动画的时刻');
+      assert.ok(
+        first.at >= lock.at + lockMs,
+        `第一段动画在锁到手之后（锁 ${lockMs}ms，动画晚 ${first.at - lock.at}ms）`,
+      );
+      clicks.push('修炼/快进');
+      await until(() => requests.some((r) => r.path === '/lock/release'), 'release', 600);
+    },
+  );
 });
 
 test('心魔试炼：锁被用户撤掉（点了 / 拖了宠物）就不带锁重发，接着照常演，演完也不再放锁', async () => {

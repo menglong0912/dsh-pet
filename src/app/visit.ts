@@ -582,6 +582,7 @@ export type SparReply =
         | 'bad-card'
         | 'bad-request'
         | 'sent-home'
+        | 'declined'
         | 'not-visiting'
         | 'old-host';
     };
@@ -1380,6 +1381,7 @@ const SPAR_FAILURES: readonly string[] = [
   'bad-card',
   'bad-request',
   'sent-home',
+  'declined',
 ];
 
 /**

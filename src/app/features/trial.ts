@@ -160,6 +160,13 @@ export function createTrial(ctx: FeatureContext): Trial {
       ctx.state.battle = null;
     } else {
       // 逐手：AI 出招 / 手动出招（X17）
+      // 逐手局一创建就开演第一手：先占住宠物，别让 /lock 的往返和第一段动画抢先后（同 spar）
+      await holdPet([], 20 * 60_000);
+      if (ctx.state.disposed) {
+        releasePet(0);
+        closeTrialWindows(windows, 0);
+        return;
+      }
       const live = startLiveBattle({
         a: you,
         b: foe,
@@ -175,7 +182,12 @@ export function createTrial(ctx: FeatureContext): Trial {
           if (mode === 'manual') {
             const choices = legalChoices(view);
             const pick = await panel.chooseAction(
-              choices.map((choice) => ({ label: choice.label, ...(choice.note ? { note: choice.note } : {}) })),
+              choices.map((choice) => ({
+                label: choice.label,
+                ...(choice.note ? { note: choice.note } : {}),
+                effect: choice.effect,
+                tone: choice.tone,
+              })),
               deps.actionTimeoutMs ?? 20_000,
             );
             if (pick === null) {
@@ -204,8 +216,6 @@ export function createTrial(ctx: FeatureContext): Trial {
       });
       ctx.state.liveBattle = live;
       void refreshMenu();
-      // 逐手一场事先不知道多久：先占住宠物（holdPet 会夹到 /lock 的上限）
-      await holdPet([], 20 * 60_000);
       const finished = await live.done;
       if (ctx.state.liveBattle === live) ctx.state.liveBattle = null;
       if (!finished || ctx.state.disposed) {

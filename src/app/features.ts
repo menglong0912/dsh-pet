@@ -114,6 +114,7 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     tribulationFx: null,
     liveBattle: null,
     actionPanel: null,
+    duelPrompt: null,
     adventureTurn: null,
     liveTurn: null,
     meditateAt: 0,
@@ -214,8 +215,9 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
     cultivation: { view: () => state.cultivation?.view() ?? null },
     battle: {
       // 出招面板（心魔 / 切磋）与历练小窗里的手动出招（X18）共用一个本机接口
-      choose: (pick) => state.actionPanel?.choose(pick) ?? state.adventureTurn?.choose(pick) ?? false,
-      state: () => state.actionPanel?.state() ?? state.adventureTurn?.state() ?? null,
+      choose: (pick) =>
+        state.actionPanel?.choose(pick) ?? state.duelPrompt?.choose(pick) ?? state.adventureTurn?.choose(pick) ?? false,
+      state: () => state.actionPanel?.state() ?? state.duelPrompt?.state() ?? state.adventureTurn?.state() ?? null,
     },
     dispose() {
       state.disposed = true;
@@ -232,6 +234,8 @@ export function startAppFeatures(deps: FeatureDeps): AppFeatures {
       state.liveBattle = null;
       state.actionPanel?.close();
       state.actionPanel = null;
+      state.duelPrompt?.close();
+      state.duelPrompt = null;
       state.adventureTurn = null;
       fns.closeTrial(0);
       fns.closeTribulationFx(0);

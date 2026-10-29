@@ -28,6 +28,8 @@
  * visit 的标准输入命令：say <话> / note <话>（捎给对方主人）/ spar [live]（找主人家的宠物切磋；收到邀约不自动应战，也输 spar）/ leave（告辞，后面可以带告别的话）。
  * 两种模式 10 分钟后自动退出。切磋按 X5 的协议走：名帖都是脚本里这份假的（境界 2、水枪、化鸽遁），
  * host 模式按它应战、两边各自算出同一场后打印输赢；visit 模式发名帖与承诺、亮随机数，主人家的屏幕上开演。
+ * X20 起两边都先过 `fairSparPair`（境界、四维拉到中点、法宝招式截到两边都有的），跟真 app 同一口径；
+ * 不拉平的话逐手局对面会按「这一手不合法」判掉线（真机踩过）。
  * 逐手局（X19）按 mode: live 对传：脚本这边每一手都按后备挑法出（fallbackAction），等对面那一手时挂着；
  * 加 --drop <序号> 时在这一手故意不回，对面 35 秒（测试里可调短）没收到就按掉线。
  */
@@ -61,7 +63,7 @@ import {
   sparFight,
   tripRequest,
 } from '../../src/app/visit.ts';
-import { fallbackAction, fightUntilDecision, legalActions } from '../../src/app/battle.ts';
+import { fairSparPair, fallbackAction, fightUntilDecision, legalActions } from '../../src/app/battle.ts';
 import { generateVisitIdentity, loadVisitIdentity } from '../../src/app/visit-identity.ts';
 
 const OWNER_DEFAULT = '测试邻居';
@@ -325,8 +327,7 @@ async function runHost(options) {
         }
         if (pendingSpar.live) {
           liveSpar = newLiveMatch(
-            fakeFighter,
-            cardFighter(visitor.pet, pendingSpar.guestCard),
+            ...fairSparPair(fakeFighter, cardFighter(visitor.pet, pendingSpar.guestCard)),
             `${nonce}:${pendingSpar.hostNonce}`,
             0,
             options.pet,
@@ -338,8 +339,7 @@ async function runHost(options) {
           return { ok: true };
         }
         const events = sparFight(
-          fakeFighter,
-          cardFighter(visitor.pet, pendingSpar.guestCard),
+          ...fairSparPair(fakeFighter, cardFighter(visitor.pet, pendingSpar.guestCard)),
           nonce,
           pendingSpar.hostNonce,
         );
@@ -398,8 +398,7 @@ async function runHost(options) {
         }
         if (live) {
           liveDuel = newLiveMatch(
-            fakeFighter,
-            cardFighter(visitor.pet, card),
+            ...fairSparPair(fakeFighter, cardFighter(visitor.pet, card)),
             `${nonce}:${hostNonce}`,
             0,
             options.pet,
@@ -409,7 +408,7 @@ async function runHost(options) {
           if (line) print(`它家宠物的赛后感言：${line}`);
           return;
         }
-        const events = sparFight(fakeFighter, cardFighter(visitor.pet, card), nonce, hostNonce);
+        const events = sparFight(...fairSparPair(fakeFighter, cardFighter(visitor.pet, card)), nonce, hostNonce);
         const end = events[events.length - 1];
         const won = end.kind === 'end' && end.winner === 0;
         print(
@@ -699,8 +698,7 @@ async function runVisit(options) {
             return;
           }
           const match = newLiveMatch(
-            cardFighter('主人家的宠物', reply.card),
-            fakeFighter,
+            ...fairSparPair(cardFighter('主人家的宠物', reply.card), fakeFighter),
             `${ownNonce}:${reply.nonce}`,
             1,
             options.pet,
@@ -710,7 +708,11 @@ async function runVisit(options) {
           await runLiveClient(match, (body) => sendSparTurn(host, { token, ...body }), options.drop);
           return;
         }
-        const events = sparFight(cardFighter('主人家的宠物', reply.card), fakeFighter, ownNonce, reply.nonce);
+        const events = sparFight(
+          ...fairSparPair(cardFighter('主人家的宠物', reply.card), fakeFighter),
+          ownNonce,
+          reply.nonce,
+        );
         const end = events[events.length - 1];
         const won = end.kind === 'end' && end.winner === 1;
         print(`两边各自算的这场（${events.length} 个事件）：${won ? options.pet : '主人家的宠物'} 赢`);
@@ -830,8 +832,7 @@ async function runDuel(options) {
       process.exit(1);
     }
     const match = newLiveMatch(
-      cardFighter(targetLabel, reply.card),
-      fakeFighter,
+      ...fairSparPair(cardFighter(targetLabel, reply.card), fakeFighter),
       `${ownNonce}:${reply.nonce}`,
       1,
       options.pet,
@@ -845,7 +846,7 @@ async function runDuel(options) {
     );
     process.exit(events ? 0 : 1);
   }
-  const events = sparFight(cardFighter(targetLabel, reply.card), fakeFighter, ownNonce, reply.nonce);
+  const events = sparFight(...fairSparPair(cardFighter(targetLabel, reply.card), fakeFighter), ownNonce, reply.nonce);
   const end = events[events.length - 1];
   const won = end.kind === 'end' && end.winner === 1;
   print(`两边各自算的这场（${events.length} 个事件）：${won ? options.pet : targetLabel} 赢`);

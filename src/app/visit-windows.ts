@@ -31,6 +31,8 @@ export interface WindowLike {
   setBounds(rect: Rect): void;
   setIgnoreMouseEvents(ignore: boolean): void;
   setAlwaysOnTop(flag: boolean, level: 'floating'): void;
+  /** 提到同一层的最前面（擂台把宠物窗口抬到血条上面用；测试假窗口可以不给） */
+  moveTop?(): void;
   setVisibleOnAllWorkspaces(visible: boolean, options: { visibleOnFullScreen: boolean }): void;
   loadURL(url: string): Promise<void>;
   showInactive(): void;
@@ -73,8 +75,8 @@ export const RELAY_OPACITY = 0.9;
 const GUEST_SCALE = 0.7;
 /** 客人窗口里，宠物上方留给气泡的高度 */
 const BUBBLE_ROOM = 96;
-/** 名牌的余量：tag 负 margin 精确抵消透明边后净占 0，这里只留字体行高的溢出余量 */
-const TAG_ROOM = 6;
+/** 名牌的余量：tag 负 margin 精确抵消透明边后净占 0，这里只留字体行高的溢出余量（擂台算客人头顶也用它） */
+export const GUEST_TAG_ROOM = 6;
 /** 看光标在不在客人身上的间隔 */
 const HOVER_MS = 100;
 /** 跟着自家宠物走的间隔 */
@@ -220,7 +222,7 @@ export function guestBounds(
   const width = Math.round(Math.min((400 / GUEST_SCALE) * scale, Math.max(200, (home?.size ?? 300) * scale)));
   const videoHeight = (width * 9) / 16;
   // 页面里 #tag 的负 margin 精确抵消舞台透明边（净占 0），窗口高 = 气泡 + 舞台 + tag 余量
-  const height = Math.round(videoHeight) + BUBBLE_ROOM + TAG_ROOM;
+  const height = Math.round(videoHeight) + BUBBLE_ROOM + GUEST_TAG_ROOM;
   const clampX = (x: number) => Math.min(Math.max(x, workArea.x), workArea.x + workArea.width - width);
   const clampY = (y: number) => Math.min(Math.max(y, workArea.y), workArea.y + workArea.height - height);
   if (!home) return { x: workArea.x, y: workArea.y + workArea.height - height, width, height };
@@ -281,7 +283,7 @@ export function followGuest(
 export function petHitRect(bounds: Rect): Rect {
   const videoHeight = (bounds.width * 9) / 16;
   // 舞台贴窗口底（页面 flex-end，底下只有名牌的行高余量）：从底往上算，贴屏幕顶时气泡空间被压缩也不偏
-  const stageTop = bounds.y + bounds.height - TAG_ROOM - videoHeight;
+  const stageTop = bounds.y + bounds.height - GUEST_TAG_ROOM - videoHeight;
   const top = stageTop + videoHeight * 0.15;
   return {
     x: Math.round(bounds.x + bounds.width * 0.32),

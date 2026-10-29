@@ -31,6 +31,23 @@ export interface TurnDecision {
   line?: string;
 }
 
+export type ActionTone = 'damage' | 'control' | 'sustain';
+
+/** 主动招式的面板分类；没列出的动作按伤害处理 */
+export const SKILL_TONE: Partial<Record<SkillId, ActionTone>> = {
+  bloom: 'sustain',
+  'lion-roar': 'control',
+  'blue-whale': 'damage',
+  'whale-song': 'control',
+  ink: 'control',
+  'whale-gulp': 'sustain',
+  'myriad-self': 'sustain',
+  'dream-chant': 'control',
+  'finger-sword': 'damage',
+  'dragon-palm': 'damage',
+  'farewell-wind': 'control',
+};
+
 /** 编号清单里的一项（面板按钮与 AI 的 `pick` 共用一份） */
 export interface LegalChoice {
   /** 从 1 数（AI 的 JSON 与 curl 的 pick 同一口径） */
@@ -40,6 +57,7 @@ export interface LegalChoice {
   note?: string;
   /** 给 AI 看的一句效果 */
   effect: string;
+  tone: ActionTone;
 }
 
 function weaponEffect(id: WeaponId): string {
@@ -69,24 +87,24 @@ function moveEffect(id: MoveId): string {
 
 /** 主动招式的一句效果（AI 提示词用；图鉴里没有伤害数字） */
 const SKILL_EFFECT: Record<SkillId, string> = {
-  'play-dead': '致命一击时保命一次',
+  'play-dead': '致命一击时保命一次，但要躺一拍',
   dove: '提高闪避',
   bubble: '挨打时挡下两次并减伤',
   'sixth-sense': '挨打后可能反劈一刀',
   'shadow-fists': '连击时追打一串拳影',
   critical: '提高会心',
   'spirit-beast': '前几次出手后追加一击',
-  bloom: '回 25% 气血并马上再出一手',
-  'lion-roar': '伤害并震晕对方一次',
+  bloom: '回 18% 气血并马上再出一手',
+  'lion-roar': '伤害并可能震晕对方一拍',
   'blue-whale': '大伤害',
-  'whale-song': '让对方睡过下一拍',
-  ink: '让对方接下来两次出手可能打空',
+  'whale-song': '伤害并可能让对方睡过下一拍',
+  ink: '让对方接下来三次出手可能打空',
   'whale-gulp': '伤害并回复一半',
   'myriad-self': '召出三重魂影替自己挨打',
-  'dream-chant': '必中伤害并把对方牵进梦里一拍',
+  'dream-chant': '必中伤害并可能把对方牵进梦里一拍',
   'finger-sword': '必中且穿护体',
   'dragon-palm': '必中伤害，下一手法宝或空手带后劲',
-  'farewell-wind': '必中伤害并让对方飘过下一拍',
+  'farewell-wind': '必中伤害并可能让对方飘过下一拍',
   'jelly-clone': '挨打时可能用水母替身挡下',
 };
 
@@ -104,6 +122,17 @@ export function actionEffect(action: Action): string {
   if (action.kind === 'move') return moveEffect(action.move);
   if (action.kind === 'skill') return SKILL_EFFECT[action.skill];
   return '伤害 3–6';
+}
+
+/** 手动面板按主要效果分成伤害、控制、回复与保命三组 */
+export function toneOf(action: Action): ActionTone {
+  if (action.kind === 'weapon') {
+    const weapon = WEAPONS[action.weapon];
+    return weapon.skipChance > 0 || weapon.slow ? 'control' : 'damage';
+  }
+  if (action.kind === 'move') return MOVES[action.move].skipChance > 0 ? 'control' : 'damage';
+  if (action.kind === 'skill') return SKILL_TONE[action.skill] ?? 'damage';
+  return 'damage';
 }
 
 /**
@@ -124,6 +153,7 @@ export function legalChoices(view: BattleView): LegalChoice[] {
       label: actionLabel(action),
       ...(note ? { note } : {}),
       effect: actionEffect(action),
+      tone: toneOf(action),
     };
   });
 }
@@ -449,6 +479,11 @@ export interface LiveVersusOptions {
   /** 演完一段、本地这一手还没定：宠物头上「想一想…」 */
   think: () => void;
   log: (message: string) => void;
+  /**
+   * 开演闸门：占住宠物这类准备动作（`/lock` 要一个来回）。给上就先等它再演第一段，
+   * 免得第一段动画抢在锁前面；局本身照样立刻注册，对端递进来的第一手不会丢。
+   */
+  ready?: Promise<unknown>;
 }
 
 /** 发起方 / 客人那一侧：发 HTTP 的总是这一边 */
@@ -528,6 +563,7 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
   /** 演一段：步骤的绝对时刻从上一段结尾接着排，所以平移到 0 起播；本地是 1 号时换边 */
   const play = async (steps: Step[]): Promise<void> => {
     if (steps.length === 0 || fastForward || disposed) return;
+    if (options.ready) await options.ready;
     const local = options.local === 1 ? swapSides(steps) : steps;
     const start = local[0].at;
     const show = new BattleShow(
@@ -691,6 +727,7 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
 
   const play = async (steps: Step[]): Promise<void> => {
     if (steps.length === 0 || fastForward || disposed) return;
+    if (options.ready) await options.ready;
     const local = options.local === 1 ? swapSides(steps) : steps;
     const start = local[0].at;
     const show = new BattleShow(

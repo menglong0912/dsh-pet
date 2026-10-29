@@ -345,8 +345,9 @@ test('X18 逐手局：重放到缺决策处，补一手从头算，事件前缀�
   }
   const full: BattleEvent[] = result.events;
 
-  // 中断：只有前两手的串，重放出来的事件必须是整场的前缀
-  const prefix = actions.slice(0, 2);
+  // 中断：留下最后一手不交，重放出来的事件必须是整场的前缀
+  assert.ok(actions.length >= 2, `整场至少两手：${actions.length}`);
+  const prefix = actions.slice(0, actions.length - 1);
   const partial = fightUntilDecision(prepared.party[0], prepared.foe, prepared.seed, [prefix, 'auto']);
   assert.ok(partial.need, '还缺决策');
   assert.deepEqual(partial.events, full.slice(0, partial.events.length));

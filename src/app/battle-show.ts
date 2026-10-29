@@ -343,6 +343,17 @@ export const ATTACK_SHOW: Record<string, AttackShow> = {
 };
 
 /**
+ * 凭空生花：素材里花在手心绽开那一刻（**原速**毫秒，逐帧看的 0.5 秒还没花、1.0 秒已经开满）。
+ * 气血条和「气血 +N」等到这一刻再刷——一出招就回满会像血条抢在动画前面。
+ */
+const BLOOM_HEAL_MS = 1_000;
+
+/** 回血那一步在动作起播后多久（按动画倍速压缩） */
+function healOffset(): number {
+  return Math.round(BLOOM_HEAL_MS / actionRate(ATTACK_SHOW.bloom.action));
+}
+
+/**
  * 招式表（Y0 的 `MOVES`）的演出：宠物用的一转蛊复用现有出手素材；对手招式换成它自己的皮
  * （`foe` 决定播「出手」还是「绝招」，一场一次的那招是绝招），飞行物优先用 YA 的新贴图。
  */
@@ -1074,6 +1085,12 @@ export function timeline(
           who: event.actor,
           anim: ATTACK_SHOW.bloom.action,
           rate: rateFor(ATTACK_SHOW.bloom.action, SLOT_MS),
+          hp: before,
+        });
+        // 血条和「气血 +N」等花绽开那一刻再刷（用户反馈：血条先回、动画后播）
+        steps.push({
+          at: cursor + healOffset(),
+          who: event.actor,
           ...(line === undefined ? {} : { line }),
           hp: event.hp,
         });
@@ -1156,7 +1173,10 @@ export function timeline(
       // 自己装死：对准致命那一下的命中时刻倒下（那一下的受击已经被 playDeadAfter 省掉）；
       // 手喂的序列里没有命中时刻就排在这一拍
       if (lastImpact !== null && lastImpact >= cursor) {
-        pushReaction(lastImpact, event.actor, PLAY_DEAD_ANIM, event.hp, line, true);
+        // 同一只前面还排着反击 / 连拳时等那段演完再倒，免得装死那一下被从中间切断（X20）
+        const skinned = foeSkinOf(PLAY_DEAD_ANIM, event.actor, foePrefix);
+        const impact = Math.max(lastImpact, busy[event.actor] + windupOf(skinned));
+        pushReaction(impact, event.actor, PLAY_DEAD_ANIM, event.hp, line, true);
       } else {
         const anim = foeSkinOf(PLAY_DEAD_ANIM, event.actor, foePrefix);
         pushAnim({
@@ -1315,7 +1335,18 @@ export function timeline(
       continue;
     }
 
-    // skip（被定住 / 晕了）、回血、替挡（Y0 的 guard）：只有台词、没有飞行物；气血条照 `event.hp` 刷新
+    // 回血（凭空生花）：血条和「气血 +N」等花绽开那一刻再刷，不能一出招就回满
+    if (event.kind === 'skill' && event.heal !== undefined) {
+      steps.push({
+        at: cursor + healOffset(),
+        who: event.actor,
+        ...(line === undefined ? {} : { line }),
+        hp: event.hp,
+      });
+      continue;
+    }
+
+    // skip（被定住 / 晕了）、替挡（Y0 的 guard）：只有台词、没有飞行物；气血条照 `event.hp` 刷新
     if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
   }
   return steps.sort((a, b) => a.at - b.at);

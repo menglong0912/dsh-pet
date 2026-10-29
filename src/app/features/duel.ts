@@ -1,4 +1,6 @@
+import { openActionPanel } from '../action-panel-window';
 import type { Action, BattleEvent } from '../battle';
+import { fairSparPair } from '../battle';
 import type { TurnMode } from '../action-panel-window';
 import { stageLabel } from '../cultivation';
 import { orderNeighbors, shouldAutoAdmit } from '../neighbors';
@@ -38,7 +40,7 @@ const DUEL_NEIGHBORS_MAX = 3;
 export interface Duel {
   cancelDuels(): void;
   hostDuel(visitor: Visitor, card: SparCard, commit: string, live?: boolean): Promise<DuelAnswer>;
-  answerDuel(accept: boolean): Promise<void>;
+  answerDuel(accept: boolean, pickedMode?: TurnMode): Promise<void>;
   hostDuelReveal(visitor: Visitor, nonce: string, line: string): void;
   duelTurn(visitor: Visitor, index: number, action?: Action): Promise<SparTurnReply>;
   hostDuelConceded(visitor: Visitor, why: 'mismatch' | 'late'): void;
@@ -48,8 +50,16 @@ export interface Duel {
 export function createDuel(ctx: FeatureContext): Duel {
   const { compose, cultivationOn, nickname, onCultivation, petName, refreshMenu, runSparShow, say } = lazyFns(ctx);
   const { deps, log, tracker, diary, neighbors, sparWaitMs } = ctx;
+  /** 应战面板已经由别处（右键应战 / 超时 / 收摊）接管：面板 Promise 收尾时别再重复结算 */
+  let promptSuperseded = false;
   /** 收掉还挂着的隔空挑战（退出 / 收摊）：等主人答复的那次回 timeout，已应战的那场不再记账 */
   function cancelDuels(): void {
+    if (ctx.state.duelPrompt) {
+      promptSuperseded = true;
+      const panel = ctx.state.duelPrompt;
+      ctx.state.duelPrompt = null;
+      panel.close();
+    }
     const waiting = ctx.state.duelWait;
     if (waiting) {
       ctx.state.duelWait = null;
@@ -68,6 +78,11 @@ export function createDuel(ctx: FeatureContext): Duel {
    */
   function settleDuel(state: DuelWait, answer: DuelAnswer, mode: TurnMode = 'auto'): void {
     if (ctx.state.duelWait !== state) return;
+    if (ctx.state.duelPrompt) {
+      promptSuperseded = true;
+      ctx.state.duelPrompt.close();
+      ctx.state.duelPrompt = null;
+    }
     ctx.state.duelWait = null;
     if (state.timer !== null) clearTimeout(state.timer);
     if (answer.ok)
@@ -119,13 +134,71 @@ export function createDuel(ctx: FeatureContext): Duel {
       }
       void say(`${visitor.owner} 家的 ${visitor.pet} 想跟我切磋～`);
       void refreshMenu();
+      void askDuel(state);
     });
   }
 
+  /**
+   * 有人来挑战：直接弹应战面板，不再让主人先右键找「应战」。
+   * 逐手局把出招方式一起选（自动 / AI / 手动 / 不应战），全自动局只问应战 / 不应战；
+   * 菜单里的两项仍保留，右键点应战时会把这块面板收掉。
+   */
+  async function askDuel(state: DuelWait): Promise<void> {
+    if (ctx.state.duelWait !== state) return;
+    let panel;
+    try {
+      panel = openActionPanel(
+        ctx.electron,
+        `${new URL(deps.petBase).origin}/app/panel`,
+        () => null,
+        () => ctx.homePet.box(),
+      );
+    } catch (error) {
+      // 面板开不出来就退回右键菜单：这一场还挂在 duelWait 上，主人仍能应战
+      log(`串门：隔空切磋的应战面板没开出来：${errorText(error)}`);
+      return;
+    }
+    ctx.state.duelPrompt = panel;
+    promptSuperseded = false;
+    // 逐手局要接着选出招方式，面板只等模式选择的时限；全自动局就是等主人应战，和旧菜单一样等满答复时限
+    const timeout = Math.max(
+      1,
+      state.live ? Math.min(ctx.deps.modeTimeoutMs ?? 10_000, sparWaitMs - 100) : sparWaitMs - 100,
+    );
+    try {
+      if (state.live) {
+        const picked = await panel.chooseMode(ctx.ai.isReady(), timeout, {
+          title: `${state.visitor.owner} 家的 ${state.visitor.pet} 想跟你切磋：怎么出招？`,
+          declineLabel: '不应战',
+        });
+        if (promptSuperseded || ctx.state.duelWait !== state) return;
+        await answerDuel(picked !== null, picked ?? undefined);
+      } else {
+        const pick = await panel.choosePrompt(
+          `${state.visitor.owner} 家的 ${state.visitor.pet} 想跟你切磋，要应战吗？`,
+          ['应战', '不应战'],
+          timeout,
+        );
+        if (promptSuperseded || ctx.state.duelWait !== state) return;
+        await answerDuel(pick === 1);
+      }
+    } finally {
+      if (ctx.state.duelPrompt === panel) ctx.state.duelPrompt = null;
+      panel.close();
+    }
+  }
+
   /** 主人点了「应战 / 不应战」；逐手局在答应以后选自家方式（10 秒不点按自动） */
-  async function answerDuel(accept: boolean): Promise<void> {
+  async function answerDuel(accept: boolean, pickedMode?: TurnMode): Promise<void> {
     const state = ctx.state.duelWait;
     if (!state) return;
+    // 右键应战 / 收摊时把自动弹出的应战面板收掉；面板自己的 Promise 收尾时不再重复结算
+    if (ctx.state.duelPrompt) {
+      promptSuperseded = true;
+      const panel = ctx.state.duelPrompt;
+      ctx.state.duelPrompt = null;
+      panel.close();
+    }
     // 逐手局正在选出招方式：再点一次「应战」不要把这场的面板顶掉
     if (accept && state.live && ctx.state.actionPanel) return;
     if (!accept) {
@@ -138,8 +211,8 @@ export function createDuel(ctx: FeatureContext): Duel {
       settleDuel(state, { ok: false, reason: 'off' });
       return;
     }
-    let mode: TurnMode = 'auto';
-    if (state.live) {
+    let mode: TurnMode = pickedMode ?? 'auto';
+    if (state.live && pickedMode === undefined) {
       const picked = await pickTurnMode(ctx);
       if (ctx.state.duelWait !== state) return;
       if (!picked) {
@@ -202,8 +275,8 @@ export function createDuel(ctx: FeatureContext): Duel {
       if (state.live) ctx.state.visitHost?.finishDuel();
       return;
     }
-    const you = practice.fighter(petName());
-    const foe = cardFighter(state.visitor.pet, state.card);
+    // 切磋不比修为（X20）：名帖照旧收真实属性，开打和演出都用拉平后的这一对
+    const [you, foe] = fairSparPair(practice.fighter(petName()), cardFighter(state.visitor.pet, state.card));
     const baseShow = {
       zero: you,
       one: foe,
@@ -335,8 +408,8 @@ export function createDuel(ctx: FeatureContext): Duel {
       void refreshMenu();
       return;
     }
-    const you = practice.fighter(petName());
-    const foe = cardFighter(neighbor.pet, reply.card);
+    // 切磋不比修为（X20）：名帖照旧收真实属性，开打和演出都用拉平后的这一对
+    const [foe, you] = fairSparPair(cardFighter(neighbor.pet, reply.card), practice.fighter(petName()));
     // 引擎里应战方是 0 号、挑战方是 1 号：两边各自算同一场
     const baseShow = {
       zero: foe,
