@@ -78,16 +78,43 @@ test('X17 出招面板：挂在擂台下面，下面放不下就夹在工作区�
   assert.equal(alone.x, (1440 - 320) / 2);
 });
 
-test('X17 出招面板：高度跟着按钮数走——三选一一行，21 招排成几行全露出来，再多才在窗内滚动', () => {
+test('X17 出招面板：高度跟着按钮数走——三选一一行，21 招分组全露出来，再多才在窗内滚动', () => {
+  const tones: Record<string, NonNullable<PanelView['options'][number]['tone']>> = {
+    毽子: 'damage',
+    扑克牌: 'damage',
+    水枪: 'damage',
+    雪球: 'control',
+    三球: 'damage',
+    鲸尾: 'damage',
+    烟花: 'damage',
+    鸡毛掸子: 'control',
+    银托盘: 'damage',
+    陀螺: 'control',
+    弹弓: 'damage',
+    空手: 'damage',
+    凭空生花: 'sustain',
+    狮子吼: 'control',
+    蓝鲸现世: 'damage',
+    鲸歌: 'control',
+    墨汁喷射: 'control',
+    鲸吞: 'sustain',
+    万我: 'sustain',
+    魂牵梦绕: 'control',
+    五指拳心剑: 'damage',
+  };
   const view = (labels: string[]): PanelView => ({
     kind: 'action',
     title: '轮到你了，出一手',
     seconds: 20,
-    options: labels.map((label, index) => ({ pick: index + 1, label })),
+    options: labels.map((label, index) => ({
+      pick: index + 1,
+      label,
+      ...(tones[label] ? { tone: tones[label] } : {}),
+    })),
   });
   assert.equal(panelHeight(null, 519), PANEL_HEIGHT);
-  assert.equal(panelHeight(view(['自动', 'AI 出招', '手动']), 324), PANEL_HEIGHT);
-  // 真机那一手：21 招在 519 宽的面板里（原来固定一行高，只露出两行 16 个）
+  assert.equal(panelHeight({ ...view(['自动', 'AI 出招', '手动']), kind: 'mode' }, 324), PANEL_HEIGHT);
+  // 519 宽三列：伤害 11 项四行、控制 7 项三行、回复 3 项一行，另加三个组标题。
   const many = [
     '毽子',
     '扑克牌',
@@ -112,8 +139,8 @@ test('X17 出招面板：高度跟着按钮数走——三选一一行，21 招�
     '五指拳心剑',
   ];
   const tall = panelHeight(view(many), 519);
-  assert.ok(tall >= PANEL_HEIGHT + 2 * 35, `至少三行：${tall}`);
-  assert.ok(tall <= PANEL_MAX_HEIGHT);
+  assert.equal(tall, 411, '21 招和三个组标题完整落在上限内');
+  assert.ok(tall < PANEL_MAX_HEIGHT);
   // 窄一点就得更多行
   assert.ok(panelHeight(view(many), 324) > tall);
   // 再多也不超过上限（剩下的在窗内滚动）
@@ -221,5 +248,36 @@ test('X17 出招面板：手动出招的按钮带剩余次数，点了回 0 起�
   // 超时：回 null（外层按后备挑法出）
   assert.equal(await panel.chooseAction([{ label: '空手' }], 20), null);
   assert.equal(panel.state(), null);
+  panel.close();
+});
+
+test('X17 出招面板：按伤害、控制、回复稳定分组，原始 pick 不随展示顺序改变', async () => {
+  const win = fakeWindow();
+  const panel = openActionPanel(
+    fakeElectron(win),
+    'http://127.0.0.1:1/app/panel',
+    () => arena,
+    () => null,
+  );
+  const deciding = panel.chooseAction(
+    [
+      { label: '凭空生花', effect: '回复气血', tone: 'sustain' },
+      { label: '水枪', effect: '伤害 6–10，远程', tone: 'damage' },
+      { label: '狮子吼', effect: '可能震晕', tone: 'control' },
+      { label: '蓝鲸现世', effect: '大伤害', tone: 'damage' },
+    ],
+    1_000,
+  );
+  assert.deepEqual(
+    panel.state()?.options.map(({ pick, label }) => ({ pick, label })),
+    [
+      { pick: 2, label: '水枪' },
+      { pick: 4, label: '蓝鲸现世' },
+      { pick: 3, label: '狮子吼' },
+      { pick: 1, label: '凭空生花' },
+    ],
+  );
+  assert.equal(panel.choose(4), true);
+  assert.equal(await deciding, 3, '展示位置变了，仍回原始动作下标');
   panel.close();
 });

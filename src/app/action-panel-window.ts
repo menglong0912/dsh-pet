@@ -13,49 +13,42 @@
  * 可点但不抢焦点：`focusable: false` + `acceptFirstMouse: true` + `showInactive()`；鼠标点按钮不会把主人正在打字的输入框顶掉。
  */
 import type { PetBox, Rect, WindowElectron, WindowLike } from './visit-windows';
+import type { ActionTone } from './battle-live';
 
 /** 出招方式（X17）：自动照旧整场算好；AI / 手动逐手出招 */
 export type TurnMode = 'auto' | 'ai' | 'manual';
 
-/** 一行按钮的高度与行距（对齐 panelPage 的 CSS：12px 字 + 上下 5px 内边距 + 边框，留一点余量） */
-const ROW_HEIGHT = 30;
-const ROW_GAP = 5;
-/** 按钮之外的部分：上下内边距 7 + 标题 16 + 两处间距 5 + 倒计时 12（见 panelPage 的 CSS） */
-const CHROME_HEIGHT = 7 + 16 + 5 + 5 + 12 + 7;
-/** 面板高度：标题 + 一行按钮 + 倒计时（还没问、或只有一行时） */
-export const PANEL_HEIGHT = CHROME_HEIGHT + ROW_HEIGHT + 4;
+/** 对齐 panelPage：两行卡片、分类标题和网格间距 */
+const CARD_HEIGHT = 34;
+const GROUP_HEIGHT = 12;
+const GRID_GAP = 6;
+const CARD_MIN_WIDTH = 140;
+/** 按钮之外的部分：上下内边距 7 + 标题 16 + 两处间距 5 + 3px 倒计时条 */
+const CHROME_HEIGHT = 7 + 16 + 5 + 3 + 5 + 7;
+/** 无选项和选方式都只留一行卡片的位置 */
+export const PANEL_HEIGHT = CHROME_HEIGHT + CARD_HEIGHT;
 /** 招多的时候最多这么高，再多就在窗内滚动 */
-export const PANEL_MAX_HEIGHT = 260;
+export const PANEL_MAX_HEIGHT = 420;
 /** 面板和擂台之间留一点缝 */
 const GAP = 4;
+const TONE_ORDER: readonly ActionTone[] = ['damage', 'control', 'sustain'];
 
-/** 估一段字在面板里有多宽：汉字按整个字号，其余按六成 */
-function textWidth(text: string, size: number): number {
-  let width = 0;
-  for (const char of text) width += (char.codePointAt(0) ?? 0) > 0xff ? size : size * 0.6;
-  return width;
-}
-
-/**
- * 面板要多高（X17）：按页面的 CSS 估每个按钮的宽（字宽 + 左右内边距 9 + 边框），
- * 一行一行排满，算出几行。固定一行高的话招一多就被截掉（真机 21 招只露出两行）。
- */
+/** 按分组标题和卡片行数估高；每组单独起行，实际高度仍由页面测量校正 */
 export function panelHeight(view: PanelView | null, width: number): number {
-  if (!view || view.options.length === 0) return PANEL_HEIGHT;
+  if (!view || view.options.length === 0 || view.kind === 'mode') return PANEL_HEIGHT;
   const usable = Math.max(1, width - 18);
-  let rows = 1;
-  let line = 0;
-  for (const option of view.options) {
-    const button = Math.ceil(textWidth(option.label, 12) + (option.note ? 4 + textWidth(option.note, 11) : 0) + 18 + 2);
-    const next = line === 0 ? button : line + ROW_GAP + button;
-    if (line > 0 && next > usable) {
-      rows += 1;
-      line = button;
-    } else {
-      line = next;
-    }
-  }
-  const height = CHROME_HEIGHT + rows * ROW_HEIGHT + (rows - 1) * ROW_GAP + 4;
+  const columns = Math.max(1, Math.floor((usable + GRID_GAP) / (CARD_MIN_WIDTH + GRID_GAP)));
+  const sections = [
+    { options: view.options.filter((option) => option.tone === undefined), grouped: false },
+    ...TONE_ORDER.map((tone) => ({
+      options: view.options.filter((option) => option.tone === tone),
+      grouped: true,
+    })),
+  ].filter((section) => section.options.length > 0);
+  const rows = sections.reduce((total, section) => total + Math.ceil(section.options.length / columns), 0);
+  const groups = sections.filter((section) => section.grouped).length;
+  const tracks = rows + groups;
+  const height = CHROME_HEIGHT + rows * CARD_HEIGHT + groups * GROUP_HEIGHT + Math.max(0, tracks - 1) * GRID_GAP;
   return Math.min(Math.max(height, PANEL_HEIGHT), PANEL_MAX_HEIGHT);
 }
 
@@ -70,6 +63,8 @@ export interface PanelOption {
   label: string;
   /** 有次数的招式标剩几次 */
   note?: string;
+  effect?: string;
+  tone?: ActionTone;
   /** 模型没配好时「AI 出招」灰掉 */
   disabled?: boolean;
 }
@@ -86,6 +81,8 @@ export interface PanelView {
 export interface PanelAction {
   label: string;
   note?: string;
+  effect?: string;
+  tone?: ActionTone;
 }
 
 interface Question {
@@ -303,15 +300,20 @@ export function openActionPanel(
       );
     },
     chooseAction(actions, timeoutMs) {
+      const rank = (tone: ActionTone | undefined): number => (tone === undefined ? -1 : TONE_ORDER.indexOf(tone));
       const view: PanelView = {
         kind: 'action',
         title: '轮到你了，出一手',
         seconds: Math.max(1, Math.ceil(timeoutMs / 1_000)),
-        options: actions.map((action, index) => ({
-          pick: index + 1,
-          label: action.label,
-          ...(action.note === undefined ? {} : { note: action.note }),
-        })),
+        options: actions
+          .map((action, index) => ({
+            pick: index + 1,
+            label: action.label,
+            ...(action.note === undefined ? {} : { note: action.note }),
+            ...(action.effect === undefined ? {} : { effect: action.effect }),
+            ...(action.tone === undefined ? {} : { tone: action.tone }),
+          }))
+          .sort((a, b) => rank(a.tone) - rank(b.tone)),
       };
       return ask(view, timeoutMs, null, null).then((pick) => (pick === null ? null : pick - 1));
     },
@@ -336,25 +338,45 @@ export const panelPage = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>出招</title>
 <style>
 @font-face{font-family:"ShangshouSoftCandy";src:url("/dsh-pet-7340/font/${encodeURIComponent('上首软糖体')}.ttf") format("truetype");font-display:swap}
+*{box-sizing:border-box}
 html,body{margin:0;height:100%;background:transparent;overflow:hidden;user-select:none;font-family:"ShangshouSoftCandy","PingFang SC",sans-serif}
-body{box-sizing:border-box;padding:7px 9px;border-radius:10px;background:rgba(20,24,32,.82);box-shadow:0 3px 10px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:5px;color:#fff}
-#title{font-size:12px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#f3e9d2}
-#buttons{display:flex;flex-wrap:wrap;gap:5px;overflow-y:auto}
-button{font:12px/1.2 inherit;color:#203b50;background:linear-gradient(#fff,#dfeaf1);border:1px solid rgba(255,255,255,.9);border-radius:7px;padding:5px 9px;cursor:pointer}
-button:hover{background:#fff}
-button:disabled{color:#8a99a3;background:#c7d2d9;cursor:default}
-button .note{margin-left:4px;font-size:11px;color:#526a78}
-#timer{font-size:10px;line-height:12px;color:rgba(255,255,255,.65);white-space:nowrap;overflow:hidden}
+body{padding:7px 9px;border-radius:12px;background:#f7f2e7;box-shadow:0 3px 10px rgba(43,42,38,.24);display:flex;flex-direction:column;gap:5px;color:#2b2a26}
+#titleRow{display:flex;align-items:center;gap:8px;height:16px;flex:none}
+#title{flex:1;min-width:0;font-size:12px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#timer{flex:none;font-size:11px;line-height:16px;color:#6b6254;font-variant-numeric:tabular-nums}
+#progress{height:3px;border-radius:2px;background:#e3d8c4;overflow:hidden;flex:none}
+#progressFill{width:100%;height:100%;background:#3f7d5a;transform-origin:left}
+#buttons{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;overflow-y:auto;overflow-x:hidden;min-height:0}
+#buttons.mode{grid-template-columns:repeat(3,minmax(0,1fr))}
+.group{grid-column:1 / -1;display:flex;align-items:center;gap:5px;height:12px;min-width:0;font-size:11px;line-height:12px;color:#6b6254;white-space:nowrap}
+.group::before{content:"";width:6px;height:6px;border-radius:50%;flex:none}
+.group.damage::before{background:#b23b32}
+.group.control::before{background:#4a5f9e}
+.group.sustain::before{background:#3f7d5a}
+button{font-family:inherit;color:#2b2a26;background:#fffaf0;border:1px solid #cdbfa6;border-radius:12px;cursor:pointer}
+button:hover{border-color:#3f7d5a;background:#fff}
+button:disabled{color:#9a9384;background:#e9e1d2;border-color:#d8cbb4;cursor:default}
+button.action{position:relative;height:34px;min-width:0;padding:3px 7px;text-align:left;overflow:hidden}
+.action .label{display:block;font-size:13px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.action.has-note .label{padding-right:42px}
+.action .effect{display:block;font-size:10.5px;line-height:12px;color:#7b7466;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+button.mode{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;height:34px;min-width:0;padding:2px 4px;font-size:12px;line-height:16px;text-align:center;overflow:hidden}
+button.mode .note{position:static;padding:0;background:none;color:#9a9384;font-size:9.5px;line-height:11px;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+button .note{position:absolute;top:3px;right:3px;padding:0 4px;border-radius:7px;background:#efe6d4;color:#6b6254;font-size:9px;line-height:12px;white-space:nowrap}
 </style></head>
 <body>
-<div id="title"></div>
+<div id="titleRow"><div id="title"></div><div id="timer"></div></div>
+<div id="progress"><div id="progressFill"></div></div>
 <div id="buttons"></div>
-<div id="timer"></div>
 <script>
 'use strict';
+const titleRow = document.getElementById('titleRow');
 const title = document.getElementById('title');
 const buttons = document.getElementById('buttons');
 const timer = document.getElementById('timer');
+const progress = document.getElementById('progress');
+const progressFill = document.getElementById('progressFill');
+const toneNames = { damage: '伤害', control: '控制', sustain: '回复 · 保命' };
 let deadline = 0;
 let tick = null;
 // 点击只发一个编号给本机接口：同一个接口 curl 也能调（真机核验不点鼠标）
@@ -367,17 +389,48 @@ function send(pick) {
 }
 function updateTimer(seconds) {
   const left = deadline > 0 ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : seconds;
-  timer.textContent = '还剩 ' + left + ' 秒';
+  const ratio = Math.max(0, Math.min(1, left / Math.max(1, seconds)));
+  timer.textContent = left + 's';
+  progressFill.style.transform = 'scaleX(' + ratio + ')';
+  progressFill.style.background = ratio > 0.5 ? '#3f7d5a' : ratio > 0.25 ? '#e9c46a' : '#b23b32';
 }
 window.panel = {
   show(state) {
     title.textContent = String(state.title || '');
     buttons.textContent = '';
+    buttons.classList.toggle('mode', state.kind === 'mode');
     const options = Array.isArray(state.options) ? state.options : [];
+    const counts = { damage: 0, control: 0, sustain: 0 };
+    if (state.kind === 'action') {
+      for (const option of options) {
+        if (Object.prototype.hasOwnProperty.call(counts, option.tone)) counts[option.tone] += 1;
+      }
+    }
+    let previousTone = '';
     for (const option of options) {
+      const tone = state.kind === 'action' && Object.prototype.hasOwnProperty.call(counts, option.tone) ? option.tone : '';
+      if (tone && tone !== previousTone) {
+        const group = document.createElement('div');
+        group.className = 'group ' + tone;
+        group.textContent = toneNames[tone] + ' · ' + counts[tone];
+        buttons.appendChild(group);
+      }
+      previousTone = tone;
       const button = document.createElement('button');
-      button.textContent = String(option.label || '');
+      button.className = state.kind === 'mode' ? 'mode' : 'action';
+      if (state.kind === 'mode') {
+        button.textContent = String(option.label || '');
+      } else {
+        const label = document.createElement('span');
+        label.className = 'label';
+        label.textContent = String(option.label || '');
+        const effect = document.createElement('span');
+        effect.className = 'effect';
+        effect.textContent = String(option.effect || '');
+        button.append(label, effect);
+      }
       if (option.note) {
+        if (state.kind !== 'mode') button.classList.add('has-note');
         const note = document.createElement('span');
         note.className = 'note';
         note.textContent = String(option.note);
@@ -392,15 +445,14 @@ window.panel = {
     updateTimer(Number(state.seconds) || 0);
     tick = setInterval(() => updateTimer(Number(state.seconds) || 0), 250);
   },
-  // 内容按 width 宽排开实际要多高（标题 + 全部按钮 + 倒计时 + 内边距与间距）：窗口按它校正高度。
-  // 先把 body 临时定成目标宽度再量，不依赖窗口的新尺寸有没有传到页面
+  // 按传入宽度量标题、进度条和完整网格（含组标题）；不依赖窗口新尺寸有没有传到页面。
   contentHeight(width) {
     const previous = document.body.style.width;
     if (Number(width) > 0) document.body.style.width = Number(width) + 'px';
     const style = getComputedStyle(document.body);
     const gap = parseFloat(style.rowGap) || 0;
     const height = Math.ceil(
-      title.offsetHeight + buttons.scrollHeight + timer.offsetHeight +
+      titleRow.offsetHeight + progress.offsetHeight + buttons.scrollHeight +
         parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + 2 * gap,
     );
     document.body.style.width = previous;
@@ -408,8 +460,10 @@ window.panel = {
   },
   hide() {
     buttons.textContent = '';
+    buttons.classList.remove('mode');
     title.textContent = '';
     timer.textContent = '';
+    progressFill.style.transform = 'scaleX(0)';
     deadline = 0;
     if (tick) clearInterval(tick);
     tick = null;

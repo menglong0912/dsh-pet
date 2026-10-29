@@ -31,6 +31,23 @@ export interface TurnDecision {
   line?: string;
 }
 
+export type ActionTone = 'damage' | 'control' | 'sustain';
+
+/** 主动招式的面板分类；没列出的动作按伤害处理 */
+export const SKILL_TONE: Partial<Record<SkillId, ActionTone>> = {
+  bloom: 'sustain',
+  'lion-roar': 'control',
+  'blue-whale': 'damage',
+  'whale-song': 'control',
+  ink: 'control',
+  'whale-gulp': 'sustain',
+  'myriad-self': 'sustain',
+  'dream-chant': 'control',
+  'finger-sword': 'damage',
+  'dragon-palm': 'damage',
+  'farewell-wind': 'control',
+};
+
 /** 编号清单里的一项（面板按钮与 AI 的 `pick` 共用一份） */
 export interface LegalChoice {
   /** 从 1 数（AI 的 JSON 与 curl 的 pick 同一口径） */
@@ -40,6 +57,7 @@ export interface LegalChoice {
   note?: string;
   /** 给 AI 看的一句效果 */
   effect: string;
+  tone: ActionTone;
 }
 
 function weaponEffect(id: WeaponId): string {
@@ -106,6 +124,17 @@ export function actionEffect(action: Action): string {
   return '伤害 3–6';
 }
 
+/** 手动面板按主要效果分成伤害、控制、回复与保命三组 */
+export function toneOf(action: Action): ActionTone {
+  if (action.kind === 'weapon') {
+    const weapon = WEAPONS[action.weapon];
+    return weapon.skipChance > 0 || weapon.slow ? 'control' : 'damage';
+  }
+  if (action.kind === 'move') return MOVES[action.move].skipChance > 0 ? 'control' : 'damage';
+  if (action.kind === 'skill') return SKILL_TONE[action.skill] ?? 'damage';
+  return 'damage';
+}
+
 /**
  * 这一手的选择清单：顺序与 `legalActions` 一致，编号从 1 数。
  * 有次数限制的招式在 `note` 里标还剩几次（面板照这个显示）。
@@ -124,6 +153,7 @@ export function legalChoices(view: BattleView): LegalChoice[] {
       label: actionLabel(action),
       ...(note ? { note } : {}),
       effect: actionEffect(action),
+      tone: toneOf(action),
     };
   });
 }

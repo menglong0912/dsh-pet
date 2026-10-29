@@ -319,7 +319,12 @@ export function createSpar(ctx: FeatureContext): Spar {
       const panel = ensureManualPanel();
       const choices = legalChoices(view);
       const pick = await panel.chooseAction(
-        choices.map((choice) => ({ label: choice.label, ...(choice.note ? { note: choice.note } : {}) })),
+        choices.map((choice) => ({
+          label: choice.label,
+          ...(choice.note ? { note: choice.note } : {}),
+          effect: choice.effect,
+          tone: choice.tone,
+        })),
         deps.actionTimeoutMs ?? 20_000,
       );
       if (pick === null) {

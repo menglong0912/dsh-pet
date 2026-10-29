@@ -1489,7 +1489,7 @@ class PetSprite {
     if (!window.petBridge || !window.petBridge.setInputRegions) return;
     const rects = [];
     // 控件矩形 = 主进程允许接收点击的区域（矩形外的余量区继续穿透）。
-    const controls = [...document.querySelectorAll('.dsh-pet-menu-column, .dsh-pet-chat')];
+    const controls = [...document.querySelectorAll('.dsh-pet-menu-panel, .dsh-pet-menu-column, .dsh-pet-chat')];
     for (const el of this.inputRegionElements) {
       if (!controls.includes(el)) {
         this.inputRegionResize.unobserve(el);
@@ -1705,6 +1705,7 @@ class PetSprite {
     window.__dshPetDebug.menuOpen = true;
     const m = S.mountContextMenu({
       tree,
+      title: this.pet.name,
       x: e.clientX,
       y: e.clientY,
       // 只允许在「窗口 ∩ 工作区」内显示：宠物贴边时外扩余量伸出屏幕，菜单走进那里会被 OS 裁掉（#41）

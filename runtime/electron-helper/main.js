@@ -898,6 +898,8 @@ app.whenReady().then(() => {
                 errsNew: (d.errors || []).length - errsBefore,
               };
               if (menu) {
+                // 默认是单块面板（.dsh-pet-menu-panel），旧级联布局的根才是 .dsh-pet-menu-column
+                var rootIsPanel = !!menu.querySelector('.dsh-pet-menu-panel');
                 var branch = menu.querySelector('.dsh-pet-menu-branch');
                 if (branch) {
                   branch.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, relatedTarget: menu }));
@@ -912,9 +914,11 @@ app.whenReady().then(() => {
                   out.panelCount = panels.length;
                   out.lvl2AfterHoverRoot = visible().length;
                   // 二级：悬停「动作」下的第一个分类 → 打开三级面板（具体动画）
-                  var panel1 = visible().filter(function (p) {
-                    return p !== panels[0];
-                  })[0];
+                  var panel1 = rootIsPanel
+                    ? visible()[0]
+                    : visible().filter(function (p) {
+                        return p !== panels[0];
+                      })[0];
                   if (panel1) {
                     var cat = panel1.querySelector('.dsh-pet-menu-branch');
                     if (cat) {

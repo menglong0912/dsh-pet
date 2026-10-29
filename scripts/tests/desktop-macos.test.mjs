@@ -119,9 +119,9 @@ test(
         const s = sprites[0], r = s.hit.getBoundingClientRect();
         s.onContextMenu(new MouseEvent('contextmenu', {clientX:r.x+r.width/2, clientY:r.y+r.height/2}));
       })()`);
-        await page.waitForSelector('.dsh-pet-menu-column');
+        await page.waitForSelector('.dsh-pet-menu-panel');
         const metrics = await page.evaluate(`(() => {
-        const s = sprites[0], menu = document.querySelector('.dsh-pet-menu-column');
+        const s = sprites[0], menu = document.querySelector('.dsh-pet-menu-panel');
         const rect = menu.getBoundingClientRect();
         return { y: s.pos.y + VIEW.y - s.margin.t + rect.y,
           font: parseFloat(getComputedStyle(menu).fontSize) };
@@ -129,7 +129,7 @@ test(
         const workTop = await app.evaluate(({ screen }) => screen.getPrimaryDisplay().workArea.y);
         assert.ok(metrics.y >= workTop);
         assert.ok(metrics.font <= 16, `menu font unexpectedly doubled: ${metrics.font}`);
-        const menu = await page.locator('.dsh-pet-menu-column').first().boundingBox();
+        const menu = await page.locator('.dsh-pet-menu-panel').first().boundingBox();
         const win = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentBounds());
         await app.evaluate(
           ({ screen }, point) => {
