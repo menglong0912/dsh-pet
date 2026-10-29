@@ -48,7 +48,11 @@ test('修炼：开着就建档，菜单里有「修炼」信息项', async () =>
     assert.equal(save.stage, 0);
     const view = features.cultivation.view();
     assert.equal(view?.label, '炼气一层');
-    assert.ok(menus.some((labels) => labels.some((label) => /^修炼\/炼气一层 · \d+%$/.test(label))));
+    // 菜单是建档之后异步刷新的：等它出来再看（Windows CI 上机器慢，立刻断言偶发失败）
+    await until(
+      () => menus.some((labels) => labels.some((label) => /^修炼\/炼气一层 · \d+%$/.test(label))),
+      '修炼信息项',
+    );
   });
 });
 
