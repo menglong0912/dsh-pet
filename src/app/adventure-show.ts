@@ -229,6 +229,9 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
         self: { label: `${request.a.name} · ${deps.stageLabel()}`, maxHp: request.a.hp },
         foe: { label: `${scene.roster.name} · ${tierName(scene.roster.tier)}`, maxHp: request.b.hp },
       });
+      // 逐手局一创建就开演第一手：先占住宠物，别让 /lock 的往返和第一段动画抢先后（同 spar）
+      await deps.holdPet([], 20 * 60_000);
+      if (deps.disposed()) return null;
       live = startLiveBattle({
         a: request.a,
         b: request.b,
@@ -245,8 +248,6 @@ export function createAdventureShows(deps: AdventureShowDeps): AdventureShows {
       });
       deps.setLiveBattle(live);
       deps.refreshMenu();
-      // 逐手一场事先不知道多久：先占住宠物（holdPet 会夹到 /lock 的上限）
-      await deps.holdPet([], 20 * 60_000);
       return await live.done;
     } finally {
       // 演完 / 中途出错都收：先停掉逐手局，再放状态、关这一组窗口

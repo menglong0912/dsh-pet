@@ -381,3 +381,37 @@ test('历练开窗：半路开不出下一扇，已经开出的先关掉、错�
     }
   }
 });
+
+test('历练逐手局：先占住宠物再起演', async () => {
+  const fake = fakeSceneElectron();
+  const order: string[] = [];
+  const shows = sceneShows(fake, {
+    holdPet: async () => {
+      order.push('holdPet');
+    },
+    setLiveBattle: (value) => {
+      if (value) order.push('setLiveBattle');
+      value?.skip();
+    },
+  });
+  try {
+    const events = await shows.liveFight({
+      a: YOU,
+      b: FOE,
+      seed: '逐手先占锁',
+      foe: 'tie-ruonan',
+      mode: 'ai',
+      initialActions: [],
+      decide: async () => null,
+      onDecision: () => undefined,
+      think: () => undefined,
+      log: () => undefined,
+    });
+    await settle();
+    assert.ok(events && events.length > 0, '逐手局打完了');
+    assert.deepEqual(order, ['holdPet', 'setLiveBattle'], '占锁在逐手局创建之前');
+  } finally {
+    shows.closeAll(0);
+    await settle();
+  }
+});
