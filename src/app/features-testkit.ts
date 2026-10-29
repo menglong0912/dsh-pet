@@ -234,7 +234,7 @@ export interface FeaturesExtras {
   menus: string[][];
   anims: Array<Record<string, unknown>>;
   logs: string[];
-  requests: Array<{ path: string; lock: string | null; body: Record<string, unknown> }>;
+  requests: Array<{ path: string; lock: string | null; body: Record<string, unknown>; at?: number }>;
 }
 
 /**
@@ -281,6 +281,8 @@ export async function withFeatures(
     };
     /** 占用锁已经被用户撤掉：带锁的 /anim、/broadcast 一律回 lock-lost（不带锁的照常成功） */
     lockLost?: boolean;
+    /** /lock 的应答晚多久（模拟占锁的往返：测第一段演出有没有抢在锁前面） */
+    lockDelayMs?: number;
     /** /whisper 的响应（降级成碎碎念时用） */
     whisper?: Record<string, unknown>;
   },
@@ -309,11 +311,15 @@ export async function withFeatures(
     req.on('data', (chunk: Buffer) => (raw += chunk.toString('utf8')));
     req.once('end', () => {
       const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
-      requests.push({ path: path.replace(/^\/dsh-pet-7340/, ''), lock, body });
+      // 只给调了 /lock 延迟的测试记时刻：拿它比「第一段动画有没有等到锁到手」
+      const at = options.lockDelayMs ? Date.now() : undefined;
+      requests.push({ path: path.replace(/^\/dsh-pet-7340/, ''), lock, body, ...(at === undefined ? {} : { at }) });
       if (options.lockLost && lock !== null && (path.endsWith('/anim') || path.endsWith('/broadcast'))) {
         reply({ ok: false, reason: 'lock-lost', cause: 'preempted' });
       } else if (path.endsWith('/lock')) {
-        reply({ ok: true, lockId: typeof body.lockId === 'string' ? body.lockId : 'show-lock', expiresAt: 0 });
+        const granted = { ok: true, lockId: typeof body.lockId === 'string' ? body.lockId : 'show-lock', expiresAt: 0 };
+        if (options.lockDelayMs) setTimeout(() => reply(granted), options.lockDelayMs);
+        else reply(granted);
       } else if (path.endsWith('/broadcast')) {
         bodies.push(body);
         said.push(String(body.text));
