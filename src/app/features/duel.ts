@@ -332,7 +332,7 @@ export function createDuel(ctx: FeatureContext): Duel {
         'cultivate',
         `和 ${state.visitor.owner} 家的 ${state.visitor.pet} 隔空切磋，${won ? '赢了' : '输了'}`,
       );
-      await runSparShow({ ...baseShow, events });
+      await runSparShow({ ...baseShow, events, seed: `${guestNonce}:${state.hostNonce}` });
       if (ctx.state.disposed) return;
     }
     void refreshMenu();

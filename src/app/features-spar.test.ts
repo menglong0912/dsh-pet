@@ -1,4 +1,4 @@
-import { timeline, swapSides } from './battle-show.ts';
+﻿import { timeline, swapSides } from './battle-show.ts';
 import { fairSparPair } from './battle.ts';
 import {
   FAREWELL_WAIT_MS,
@@ -55,7 +55,7 @@ import {
 import type { SparCard } from './visit.ts';
 import assert from 'node:assert/strict';
 import { createSocket } from 'node:dgram';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -128,6 +128,21 @@ test('切磋（主人家）：旧客人开口的全自动局 → 应战 → 亮�
           day.events.some((event) => event.kind === 'cultivate' && /切磋/.test(event.text)),
           '记了日记',
         );
+        // 战报：这一场的名帖、种子、逐手决策都落了盘（battles/ 下一条 battle-*.json）
+        const battleFiles = existsSync(join(home, 'battles'))
+          ? readdirSync(join(home, 'battles')).filter((name) => name.startsWith('battle-'))
+          : [];
+        assert.equal(battleFiles.length, 1, '战报写了一条');
+        const battle = JSON.parse(readFileSync(join(home, 'battles', battleFiles[0]!), 'utf8')) as {
+          mode: string;
+          seed: string;
+          turns: unknown[];
+          result: { won: boolean };
+        };
+        assert.equal(battle.mode, 'auto', '全自动局按 auto 记');
+        assert.equal(battle.seed, `${ownNonce}:${hostNonce}`, '种子对得上这一场');
+        assert.ok(battle.turns.length > 0, '逐手决策都在');
+        assert.equal(battle.result.won, won, '战报的输赢和记账一致');
         // 演出：擂台开了、客人窗口照旧粉色、打的时候菜单换成快进
         await until(() => windowOn('/app/arena') !== undefined, '擂台开了', 400);
         const guest = windowOn('/app/guest');

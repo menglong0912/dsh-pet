@@ -97,6 +97,8 @@ export interface FeatureDeps {
   appConfig: () => AppConfig;
   /** 宠物日记目录（$DSH_HOME/dsh-pet/diary） */
   diaryDir: string;
+  /** 战报目录（$DSH_HOME/dsh-pet/battles）；不给就取 diaryDir 的兄弟目录 */
+  battlesDir?: string;
   /** 零食袋文件（$DSH_HOME/dsh-pet/snacks.json） */
   snackPath: string;
   /** 串门身份文件（$DSH_HOME/dsh-pet/visit-identity.json） */
@@ -287,6 +289,11 @@ export interface SparShow {
   zeroStage: string;
   oneStage: string;
   events: BattleEvent[];
+  /**
+   * 这一场的种子（逐手局在 `live.seed` 里；全自动路径没有 live，由调用方捎在这里）。
+   * 只用于战报：种子 + 决策能完整复算这一场。
+   */
+  seed?: string;
   lineRng: () => number;
   /** 本地是 0 号还是 1 号（1 号换边成本地视角） */
   local: 0 | 1;

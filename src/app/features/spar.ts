@@ -1,6 +1,8 @@
+import { dirname, join } from 'node:path';
 import { openActionPanel } from '../action-panel-window';
 import type { ActionPanelWindow, TurnMode, TurnModePrompt } from '../action-panel-window';
 import { arenaScoreboard, openArenaWindow } from '../arena-window';
+import { battleLogOf, writeBattleLog } from '../battle-log';
 import { askAiTurn, legalChoices, startLiveClient, startLiveServer } from '../battle-live';
 import { createDashRig, screenUnion } from '../battle-dash';
 import type { DashFoe } from '../battle-dash';
@@ -130,6 +132,44 @@ export function createSpar(ctx: FeatureContext): Spar {
     showRelay,
   } = lazyFns(ctx);
   const { deps, log, electron, diary, neighbors, homePet, sparWaitMs } = ctx;
+
+  /** 战报目录：没显式给就跟日记放同一个家（`$DSH_HOME/dsh-pet/battles`） */
+  const battlesDir = deps.battlesDir ?? join(dirname(deps.diaryDir), 'battles');
+
+  /**
+   * 记一条战报。旁路：写不进去只打日志，绝不影响这一场的结算与演出。
+   * @param events 这一场打完的完整事件流（null / 空的不记）
+   */
+  function recordSpar(
+    events: BattleEvent[] | null,
+    meta: {
+      mode: string;
+      seed?: string;
+      local: 0 | 1;
+      stages: [string, string];
+      fighters: [Fighter, Fighter];
+      options?: { farewell?: boolean; damageScale?: number; maxHitShare?: number };
+    },
+  ): void {
+    if (!events || events.length === 0) return;
+    try {
+      const record = battleLogOf({
+        at: Date.now(),
+        kind: 'spar',
+        mode: meta.mode,
+        ...(meta.seed ? { seed: meta.seed } : {}),
+        local: meta.local,
+        stages: meta.stages,
+        fighters: meta.fighters,
+        options: meta.options ?? {},
+        events,
+      });
+      const file = writeBattleLog(battlesDir, record);
+      log(`战报：${file}`);
+    } catch (error) {
+      log(`战报没写成：${errorText(error)}`);
+    }
+  }
   /** 收摊一场切磋（客人走了 / 回家了 / 退出）：定时器停掉、演出停掉、窗口全部立刻关 */
   function cancelSpar(): void {
     const current = ctx.state.spar;
@@ -430,6 +470,19 @@ export function createSpar(ctx: FeatureContext): Spar {
       if (show.foeLine) foe.say(show.foeLine, LINE_MS);
       void refreshMenu();
     }
+    // 战报：逐手局和全自动都汇到这里（全自动的种子由调用方捎在 show.seed 里）
+    recordSpar(events, {
+      mode: show.live?.mode ?? 'auto',
+      seed: show.live?.seed ?? show.seed,
+      local: show.local,
+      stages: [show.zeroStage, show.oneStage],
+      fighters: [show.zero, show.one],
+      options: {
+        ...(show.live?.farewell === true ? { farewell: true } : {}),
+        damageScale: SPAR_DAMAGE_SCALE,
+        maxHitShare: SPAR_MAX_HIT_SHARE,
+      },
+    });
     closeSparWindows(windows, CLOSE_HOLD_MS);
     show.afterShow?.();
     return events;
@@ -690,6 +743,15 @@ export function createSpar(ctx: FeatureContext): Spar {
     const end = events[events.length - 1];
     const won = end.kind === 'end' && end.winner === 0;
     const farewell = end.kind === 'end' && end.reason === 'farewell';
+    // 战报（全自动这一条不走 runSparShow，单独记）
+    recordSpar(events, {
+      mode: 'auto',
+      seed: `${guestNonce}:${state.hostNonce}`,
+      local: 0,
+      stages: [practice.view().label, stageLabel(guestCard.stage)],
+      fighters: [you, foe],
+      options: { farewell: true, damageScale: SPAR_DAMAGE_SCALE, maxHitShare: SPAR_MAX_HIT_SHARE },
+    });
     // 记账：修为进账、战绩、邻居簿、日记（冒泡的 anim 一律 false，演出马上开场）
     onCultivation(Date.now(), practice.sparDone(Date.now(), visitor.id, won), { anim: false });
     neighbors.recordSpar(visitor.id, won);
@@ -920,7 +982,7 @@ export function createSpar(ctx: FeatureContext): Spar {
       // 演出：跟主人家同一张时间线（同一对随机数、同一个 timeline、同一颗台词种子）。引擎里主人家是 0 号，
       // 这里用共用的演出函数换边成本地视角（自家宠物 0 号、对手 1 号）
       state.stage = 'showing';
-      await runSparShow({ ...baseShow, events });
+      await runSparShow({ ...baseShow, events, seed: `${ownNonce}:${reply.nonce}` });
       if (ctx.state.trip !== current || ctx.state.spar !== state || ctx.state.disposed) return;
       if (ctx.state.spar === state) ctx.state.spar = null;
       if (farewell) {
