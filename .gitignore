@@ -15,6 +15,7 @@ prproj/
 
 # ── 本地工具（机器相关，不入仓库） ──
 .tools/
+.workbuddy/
 
 # ── Python ──
 __pycache__/
