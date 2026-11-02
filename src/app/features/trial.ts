@@ -1,6 +1,8 @@
+import { dirname, join } from 'node:path';
 import { openActionPanel } from '../action-panel-window';
 import type { ActionPanelWindow } from '../action-panel-window';
 import { arenaScoreboard, openArenaWindow } from '../arena-window';
+import { saveBattleLog } from '../battle-log';
 import { askAiTurn, legalChoices, startLiveBattle } from '../battle-live';
 import { createDashRig, screenUnion } from '../battle-dash';
 import { BattleShow, SHOW_ANIMS, timeline } from '../battle-show';
@@ -41,7 +43,7 @@ export function createTrial(ctx: FeatureContext): Trial {
     releasePet,
     say,
   } = lazyFns(ctx);
-  const { deps, electron, diary, homePet } = ctx;
+  const { deps, electron, diary, homePet, log } = ctx;
   /**
    * 开一场心魔试炼：心魔窗口 + 擂台 + 出招面板 → 选方式（自动 / AI 出招 / 手动）→ 演 → 算奖励、记日记、收摊、说赛后感言。
    * 演法（§X3）：每句台词走 /broadcast 的 anim: false、时长和一步相当，下一句自然顶替上一句；
@@ -68,6 +70,8 @@ export function createTrial(ctx: FeatureContext): Trial {
     const you = practice.fighter(petName());
     const foe = shadowOf(you);
     const seed = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    /** 战报目录：跟切磋同一个家（`$DSH_HOME/dsh-pet/battles`） */
+    const battlesDir = deps.battlesDir ?? join(dirname(deps.diaryDir), 'battles');
     const origin = new URL(deps.petBase).origin;
     const guest = openGuestWindow(
       electron,
@@ -238,6 +242,24 @@ export function createTrial(ctx: FeatureContext): Trial {
     if (ctx.state.disposed) return;
     const end = events[events.length - 1];
     const won = !forfeited && end.kind === 'end' && end.winner === 0;
+    // 战报：心魔也落一份（认输时事件流里不一定有 end，直接把 forfeit 标上）
+    try {
+      log(
+        `战报：${saveBattleLog(battlesDir, {
+          at: Date.now(),
+          kind: 'trial',
+          mode,
+          seed,
+          local: 0,
+          stages: [practice.view().label, practice.view().label],
+          fighters: [you, foe],
+          ...(forfeited ? { forfeit: true } : {}),
+          events,
+        })}`,
+      );
+    } catch (error) {
+      log(`战报没写成：${errorText(error)}`);
+    }
     const suffix = mode === 'ai' ? '（AI 出招）' : mode === 'manual' ? '（手动）' : '';
     // 奖励（修为进账、掉法宝、战绩都在 trialDone 里；冒泡与日记在 onCultivation）
     onCultivation(Date.now(), practice.trialDone(Date.now(), won), { anim: false });

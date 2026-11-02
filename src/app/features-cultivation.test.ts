@@ -1,4 +1,4 @@
-import { ANNOUNCE_AFTER_MS } from './claude-hooks.ts';
+﻿import { ANNOUNCE_AFTER_MS } from './claude-hooks.ts';
 import { diaryDate } from './diary.ts';
 import type { DiaryDay } from './diary.ts';
 import {
@@ -22,7 +22,7 @@ import {
   fightCount,
 } from './features-testkit.ts';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -308,6 +308,20 @@ test('心魔试炼：菜单里有该项；窗口与动画、血条按时间线�
       day.events.some((event) => event.kind === 'cultivate' && /心魔试炼/.test(event.text)),
       '记了日记',
     );
+    // 战报：心魔也落一份（kind=trial，逐手都在）
+    const battleFiles = existsSync(join(home, 'battles'))
+      ? readdirSync(join(home, 'battles')).filter((name) => name.startsWith('battle-'))
+      : [];
+    assert.equal(battleFiles.length, 1, '心魔战报写了一条');
+    const battle = JSON.parse(readFileSync(join(home, 'battles', battleFiles[0]!), 'utf8')) as {
+      kind: string;
+      mode: string;
+      turns: unknown[];
+      result: { won: boolean };
+    };
+    assert.equal(battle.kind, 'trial', '心魔按 trial 记');
+    assert.equal(battle.mode, 'auto', '这一场选的是自动');
+    assert.ok(battle.turns.length > 0, '逐手决策都在');
     // 演完收回菜单：又有「心魔试炼」、没有「快进」
     await until(
       () => menus.some((labels) => labels.includes('修炼/心魔试炼') && !labels.includes('修炼/快进')),
@@ -596,14 +610,15 @@ test('修炼关掉时没有「心魔试炼」这一项', async () => {
 
 test('群架：修炼开着时菜单里「群架」分组下挂 3 / 4 / 5 人三项', async () => {
   await withFeatures({}, async (_features, _said, _bodies, _home, { menus }) => {
-    await until(
-      () => menus.some((labels) => labels.includes('群架/3 人')),
-      '群架菜单项',
-    );
+    await until(() => menus.some((labels) => labels.includes('群架/3 人')), '群架菜单项');
     const tail = last(menus)!;
     for (const n of [3, 4, 5]) assert.ok(tail.includes(`群架/${n} 人`), JSON.stringify(tail));
     // 根菜单只占一项「群架」，人数都在它下面（不各占一个根菜单按钮）
-    assert.equal(tail.some((label) => label.startsWith('群架·')), false, JSON.stringify(tail));
+    assert.equal(
+      tail.some((label) => label.startsWith('群架·')),
+      false,
+      JSON.stringify(tail),
+    );
   });
 });
 

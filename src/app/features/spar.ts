@@ -2,7 +2,7 @@ import { dirname, join } from 'node:path';
 import { openActionPanel } from '../action-panel-window';
 import type { ActionPanelWindow, TurnMode, TurnModePrompt } from '../action-panel-window';
 import { arenaScoreboard, openArenaWindow } from '../arena-window';
-import { battleLogOf, writeBattleLog } from '../battle-log';
+import { saveBattleLog } from '../battle-log';
 import { askAiTurn, legalChoices, startLiveClient, startLiveServer } from '../battle-live';
 import { createDashRig, screenUnion } from '../battle-dash';
 import type { DashFoe } from '../battle-dash';
@@ -153,7 +153,7 @@ export function createSpar(ctx: FeatureContext): Spar {
   ): void {
     if (!events || events.length === 0) return;
     try {
-      const record = battleLogOf({
+      const file = saveBattleLog(battlesDir, {
         at: Date.now(),
         kind: 'spar',
         mode: meta.mode,
@@ -164,7 +164,6 @@ export function createSpar(ctx: FeatureContext): Spar {
         options: meta.options ?? {},
         events,
       });
-      const file = writeBattleLog(battlesDir, record);
       log(`战报：${file}`);
     } catch (error) {
       log(`战报没写成：${errorText(error)}`);

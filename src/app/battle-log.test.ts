@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+﻿import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +12,14 @@ import {
   type BattleEvent,
   type Fighter,
 } from './battle.ts';
-import { BATTLE_LOG_LIMIT, battleLogOf, formatBattleLog, pruneBattleLogs, writeBattleLog } from './battle-log.ts';
+import {
+  BATTLE_LOG_LIMIT,
+  battleLogOf,
+  formatBattleLog,
+  pruneBattleLogs,
+  saveBattleLog,
+  writeBattleLog,
+} from './battle-log.ts';
 import type { BattleLogInput } from './battle-log.ts';
 import { fighterAt, seededRng } from './battle-testkit.ts';
 
@@ -94,6 +101,28 @@ test('battleLogOf：认输那一场按 forfeit 记', () => {
   assert.equal(record.result.forfeit, true);
   assert.equal(record.result.reason, 'forfeit');
   assert.equal(record.result.won, false, '认输记负');
+});
+
+test('battleLogOf：心魔认输按 forfeit 记（全自动那条路没有 end 事件）', () => {
+  const events = fightOnce('trial').filter((event) => event.kind !== 'end');
+  const record = battleLogOf(input({ kind: 'trial', events, forfeit: true }));
+  assert.equal(record.kind, 'trial');
+  assert.equal(record.result.forfeit, true);
+  assert.equal(record.result.reason, 'forfeit');
+  assert.equal(record.result.won, false, '认输记负');
+});
+
+test('saveBattleLog：一条龙落盘（折档 + 写文件）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pet-battle-save-'));
+  try {
+    const file = saveBattleLog(dir, input({ kind: 'trial' }));
+    assert.ok(existsSync(file), '文件真写出来了');
+    assert.match(file, /battle-\d{13}-[a-z0-9]+\.json$/);
+    const record = JSON.parse(readFileSync(file, 'utf8')) as { kind: string };
+    assert.equal(record.kind, 'trial');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('writeBattleLog：落盘可读，超出上限只留最新的几份', () => {

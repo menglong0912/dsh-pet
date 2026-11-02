@@ -49,7 +49,7 @@ export interface BattleLogRecord {
   version: 1;
   /** 落盘时刻（毫秒） */
   at: number;
-  kind: 'spar';
+  kind: 'spar' | 'trial';
   /** 本地这一侧选的出招方式：auto / ai / manual / guide */
   mode: string;
   /** 这一场的种子（种子 + 决策就能完整复算；早期路径没传时会缺） */
@@ -73,13 +73,15 @@ export interface BattleLogRecord {
 
 export interface BattleLogInput {
   at: number;
-  kind: 'spar';
+  kind: 'spar' | 'trial';
   mode: string;
   seed?: string;
   local: 0 | 1;
   stages: [string, string];
   fighters: [Fighter, Fighter];
   options?: { farewell?: boolean; damageScale?: number; maxHitShare?: number };
+  /** 认输：引擎在认输那条路上不一定补 end 事件（心魔全自动局就没有），由调用方直接标 */
+  forfeit?: boolean;
   events: BattleEvent[];
 }
 
@@ -137,6 +139,8 @@ export function battleLogOf(input: BattleLogInput): BattleLogRecord {
     }
   }
   const winner = end ? end.winner : null;
+  // 认输优先：心魔全自动那条路只停演出，事件流里没有 end（按对方赢、本地负记）
+  const forfeit = input.forfeit === true || (end ? end.reason === 'forfeit' : false);
   return {
     version: 1,
     at: input.at,
@@ -148,15 +152,22 @@ export function battleLogOf(input: BattleLogInput): BattleLogRecord {
     fighters: input.fighters,
     cards,
     options: input.options ?? {},
-    result: {
-      winner,
-      ...(end ? { reason: end.reason } : {}),
-      forfeit: end ? end.reason === 'forfeit' : false,
-      won: winner === input.local,
-    },
+    result: forfeit
+      ? { winner: input.local === 0 ? 1 : 0, reason: 'forfeit', forfeit: true, won: false }
+      : {
+          winner,
+          ...(end ? { reason: end.reason } : {}),
+          forfeit: false,
+          won: winner === input.local,
+        },
     turns,
     events: input.events,
   };
+}
+
+/** 折档 + 落盘一步到位（切磋、心魔都用它；出错抛给调用方按旁路处理） */
+export function saveBattleLog(dir: string, input: BattleLogInput, limit = BATTLE_LOG_LIMIT): string {
+  return writeBattleLog(dir, battleLogOf(input), limit);
 }
 
 /**
