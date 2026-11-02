@@ -59,8 +59,8 @@ const POLL_WAIT_MS = 15_000;
 const MODE_MS = 10_000;
 /** 手动一手等多久；超时按后备自动挑一手 */
 const TURN_MS = 20_000;
-/** 菜单里最多列几家的「加入」项：菜单总共就 20 项，串门与切磋项还占着位置 */
-const JOIN_ITEMS_MAX = 2;
+/** 「加入邻居…」弹窗最多等多久：超时当没点（面板自己收起），不会替主人挑一家 */
+const JOIN_PICK_MS = 30_000;
 
 /** 开着的桌（房主或客人）。同一时间只有一张。 */
 interface LiveTable {
@@ -110,6 +110,8 @@ export function createBrawlLiveFeature(ctx: FeatureContext): BrawlLiveFeature {
   /** 同一收件地址串行发送：并发 POST 的到达顺序不可依赖，乱序的一手会被对家丢掉 */
   const sendChain = createSendChain();
   let table: LiveTable | null = null;
+  /** 「加入邻居…」的选人面板正开着（别叠第二个） */
+  let picking = false;
 
   /** 现在正打着别的（切磋 / 心魔 / 历练）：先排队 */
   function arenaBusy(): boolean {
@@ -552,6 +554,47 @@ export function createBrawlLiveFeature(ctx: FeatureContext): BrawlLiveFeature {
     void refreshMenu();
   }
 
+  /**
+   * 菜单「群架/加入邻居…」：弹窗列**全部**邻居再选一家。
+   * 右键菜单每个 owner 只有 20 项（串门 / 切磋 / 修炼已经占满），列不下这么多家；面板里能滚动。
+   */
+  async function pickNeighborToJoin(): Promise<void> {
+    if (picking) return; // 选邻居的面板已经开着，别再叠一个
+    if (table) {
+      void say('已经在桌上了，打完再说～');
+      return;
+    }
+    const neighbors = ctx.state.neighborhood?.list() ?? [];
+    if (neighbors.length === 0) {
+      void say('附近还没发现开着串门的桌宠～');
+      return;
+    }
+    if (!ready()) return;
+    picking = true;
+    const panel = openActionPanel(
+      electron,
+      `${new URL(deps.petBase).origin}/app/panel`,
+      () => null,
+      homePet.box,
+      () => null,
+    );
+    ctx.state.actionPanel = panel;
+    let chosen: string | null = null;
+    try {
+      const labels = neighbors.map((neighbor) => `${neighbor.owner} 家的 ${neighbor.pet}`);
+      const pick = await panel.choosePrompt('加入哪家的群架桌？', labels, JOIN_PICK_MS);
+      if (pick !== null) chosen = neighbors[pick - 1]?.id ?? null;
+    } catch (error) {
+      log(`群架：选邻居出错：${errorText(error)}`);
+    } finally {
+      picking = false;
+      // 先收面板再报名：joinNeighbor 的 ready() 把「面板开着」当成正在打
+      panel.close();
+      if (ctx.state.actionPanel === panel) ctx.state.actionPanel = null;
+    }
+    if (chosen !== null) await joinNeighbor(chosen);
+  }
+
   function brawlLiveActions(): Map<string, () => unknown> {
     const actions = new Map<string, () => unknown>();
     if (!cultivationOn()) return actions;
@@ -573,13 +616,13 @@ export function createBrawlLiveFeature(ctx: FeatureContext): BrawlLiveFeature {
       return actions;
     }
     actions.set(`${MENU_BRAWL_GROUP}/联机开桌`, () => void openTable());
-    // 加入哪家：列最近的几家邻居（菜单一共 20 项，列三家就够）
-    const nearby = (ctx.state.neighborhood?.list() ?? []).slice(0, JOIN_ITEMS_MAX);
-    for (const neighbor of nearby) {
-      let label = `${MENU_BRAWL_GROUP}/加入 ${neighbor.pet} 家`;
-      for (let n = 2; actions.has(label); n += 1) label = `${MENU_BRAWL_GROUP}/加入 ${neighbor.pet} 家（${n}）`;
-      actions.set(label, () => void joinNeighbor(neighbor.id));
-    }
+    // 加入哪家：菜单总共只有 20 项名额，改成一项「加入邻居…」弹窗列全部邻居
+    const neighbors = ctx.state.neighborhood?.list() ?? [];
+    const joinLabel =
+      neighbors.length === 0
+        ? `${MENU_BRAWL_GROUP}/加入邻居…`
+        : `${MENU_BRAWL_GROUP}/加入邻居…（${neighbors.length} 家）`;
+    actions.set(joinLabel, () => void pickNeighborToJoin());
     return actions;
   }
 
