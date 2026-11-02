@@ -373,9 +373,21 @@ export interface BattleView {
     moveUses?: MoveId[];
     /** 切磋（X26）：本场还剩几次主动技额度；只在切磋局填，其他模式不出现 */
     skillUsesLeft?: number;
+    /** 这场空手 / 法宝出手了几次（X20 攻略：控制之间要隔一手平A） */
+    swings?: number;
   };
-  /** `bubbles` / `mirror`（X21）：对方还剩几层泡泡护体、几重魂影，吃苦吃亏拿这个挑吃法 */
-  foe: { weapons: WeaponId[]; skills: SkillId[]; moves?: MoveId[]; bubbles?: number; mirror?: number };
+  /**
+   * `bubbles` / `mirror`（X21）：对方还剩几层泡泡护体、几重魂影，吃苦吃亏拿这个挑吃法。
+   * `controlled`（X20 攻略）：对方正被控着还没出手，这期间控制必被抗。
+   */
+  foe: {
+    weapons: WeaponId[];
+    skills: SkillId[];
+    moves?: MoveId[];
+    bubbles?: number;
+    mirror?: number;
+    controlled?: boolean;
+  };
 }
 
 export interface Controller {
@@ -642,6 +654,8 @@ export interface Side {
   guardLeft: number;
   /** 降龙十八掌的后劲还挂着（X16）：下一次法宝 / 空手出手的第一下打中时加伤，打空就作废 */
   surge: boolean;
+  /** 切磋（X26）：本场还剩几次主动技额度；非切磋局不扣也不用 */
+  skillUses: number;
   /** 逆流护身印：接下来还有几次挨到的伤害按比例弹回攻击方（X21） */
   reversal: number;
   /** 下一次出手不能用法宝 / 主动招式（X21 万我大手印封法宝；X22 鬼手封招式） */
@@ -658,8 +672,8 @@ export interface Side {
   field: number;
   /** 瞬影（X25）：挨普通攻击全闪，自己下一次攻击必中 */
   blink: boolean;
-  /** 切磋（X26）：本场还剩几次主动技额度；非切磋局不扣也不用 */
-  skillUses: number;
+  /** 这场空手 / 法宝出手了几次（X20 攻略：控制之间要隔一手平A） */
+  swings: number;
 }
 
 export function makeSide(f: Fighter, initialDelay: number): Side {
@@ -678,6 +692,7 @@ export function makeSide(f: Fighter, initialDelay: number): Side {
     moveUses: new Map(),
     guardLeft: f.guard ? f.guard.times : 0,
     surge: false,
+    skillUses: SPAR_ACTIVE_LIMIT,
     reversal: 0,
     sealed: null,
     sealedPassive: null,
@@ -686,7 +701,7 @@ export function makeSide(f: Fighter, initialDelay: number): Side {
     charge: 0,
     field: 0,
     blink: false,
-    skillUses: SPAR_ACTIVE_LIMIT,
+    swings: 0,
   };
   // 泡泡 / 灵兽的初始次数也走 hasSkill（X22）：以后开局就被封的情况不用另写一份判定
   side.bubbles = hasSkill(side, 'bubble') ? 2 : 0;
@@ -1168,6 +1183,7 @@ export function runFight(
         weapons: me.f.weapons,
         skills: me.f.skills,
         used: [...me.used],
+        swings: me.swings,
         ...(me.sealed ? { sealed: me.sealed } : {}),
         ...(me.f.moves ? { moves: me.f.moves } : {}),
         ...(me.moveUses.size > 0
@@ -1183,6 +1199,7 @@ export function runFight(
         skills: foe.f.skills,
         bubbles: foe.bubbles,
         mirror: foe.mirror,
+        controlled: foe.controlled,
         ...(foe.f.moves ? { moves: foe.f.moves } : {}),
       },
     };
@@ -1889,6 +1906,8 @@ export function runFight(
         events.push({ actor: self, kind: 'skill', skill: 'shadow-step', hp: hpPair(sides[0], sides[1]) });
       }
     } else {
+      // 空手 / 法宝出手：记一次平A（X20 攻略用它判断控制之间是否隔了一手）
+      me.swings += 1;
       attack(self, action, blinded);
     }
     return action;
@@ -2036,19 +2055,108 @@ export function statCap(stage: number): { hp: number; power: number; agility: nu
 }
 
 /**
- * 攻略出招（满属性互打模拟出来的固定打法，对自动挑法约九成五胜率）：
- * 自己气血过半前先生花、对方剩不到 35% 用五指拳心剑收尾；
- * 否则魂牵梦绕 → 送友风 → 狮子吼 → 蓝鲸现世依次放，放完一直丢烟花。没有的招 / 法宝就跳过。
+ * 攻略的控制链：按基础控制几率从高到低（鲸歌 75% → 送友风 65% → 狮子吼 60% → 魂牵梦绕 55%）。
+ * 只是排序，实际放不放还要看 `foe.controlled`（对方被控着时再控必被抗）。
+ */
+const GUIDE_CONTROLS: readonly SkillId[] = ['whale-song', 'farewell-wind', 'lion-roar', 'dream-chant'];
+
+/**
+ * 攻略的补位招（控制没到期 / 控制放完时那一手），按模拟里的价值排：
+ * 万我（三层魂影各挡一下）最值，再上蓝鲸现世这类必中爆发，最后才是零碎伤害。
+ * 墨汁（三手五成半打空）实测不如换成一手伤害；鲸吞 / 鲸派气功两拍换一拍，也不要。
+ * 没有的招直接跳过。
+ */
+const GUIDE_FILLERS: readonly SkillId[] = [
+  'myriad-self',
+  'blue-whale',
+  'shadow-step',
+  'ghost-hand',
+  'myriad-palm',
+  'reverse-seal',
+  'abyss-field',
+  'dragon-palm',
+  'whale-gulp',
+  'ghost-blood',
+];
+
+/**
+ * 攻略的法宝优先级（实测排序）。三件事按这个顺序比：
+ *   1. 烟花必中——切磋里对方身法闪避封顶 35%，只有它一枪不落；
+ *   2. 银托盘第二段从背后回旋、必中；
+ *   3. 鸡毛掸子每一下都把对方下次出手往后推 0.35 个间隔——等于每挥一次多赚三分之一手，
+ *      实测比「高伤但会吃闪避」的鲸尾 / 三球都强得多。
+ * 陀螺 / 雪球的定身会先把对方标成「被控着、那拍还没消化」，反而顶掉自己的下一次控制，排后面。
+ */
+const GUIDE_WEAPONS: readonly WeaponId[] = [
+  'firework',
+  'tray',
+  'duster',
+  'top',
+  'slingshot',
+  'poker',
+  'shuttlecock',
+  'snowball',
+  'water-gun',
+  'juggle',
+  'whale-tail',
+];
+
+/** 攻略：自己气血掉到八成先回血（生花回 18% 还白送一手，等于拿 1 次额度换 2 手） */
+const GUIDE_BLOOM_AT = 8;
+/** 攻略：对方掉到四成换五指拳心剑收头（必中、穿护体） */
+const GUIDE_FINISH_AT = 4;
+
+/**
+ * 攻略出招（X26 主动技额度制下的实测最优）。
+ *
+ * 本地模拟（切磋规则：伤害 ×0.65、单次 ≤30% 气血、每方 3 次主动技），每种场景 3 万场：
+ *   - 本机配装对随机对手：旧攻略 0.65 → 新 0.75；
+ *   - 满配装对「自动挑法」：旧攻略 0.66 → 新 0.81；
+ *   - 同一份配装头对头：新攻略 0.66–0.70（旧攻略 0.30–0.34）；
+ *   - 随机配装：旧 0.56 → 新 0.68。
+ *
+ * 打法是「用额度换手数」：
+ *   1. 气血不到八成先生花：回 18% 还白送一手，一手当两手用；
+ *   2. 对方不到四成换拳心剑收头：必中穿护体，不给假死 / 泡泡拖时间；
+ *   3. 该控就控：鲸歌 → 送友风 → 狮子吼 → 魂牵梦绕（按控住几率），
+ *      但对方「被控着、跳过的那拍还没消化」时再控必被抗（引擎直接判负），这一手必须换补位；
+ *   4. 补位按价值：万我这类能挡下对方几手的先上，再上必中爆发；
+ *   5. 额度用完（切磋每场 3 次）就一直丢法宝：烟花必中第一，鸡毛掸子每下把对方推后 0.35 个间隔。
+ *
+ * 不碰的招：鲸派气功（蓄力 + 自动释放两拍换一拍）、前有古人（先挂一手、下一手才补）、
+ * 墨汁 / 鬼敲门 / 鬼画这类没有即时收益的，以及所有不认识的主动招——额度只有 3 次，
+ * 宁可丢法宝也不把额度花在算不清的招上。
+ *
+ * 旧客户端没有 `foe.controlled` 时退回按平A次数隔手；连出手计数都没有就按顺序直接放。
  */
 export function guideAction(view: BattleView): Action {
   const legal = legalActions(view);
-  const has = (skill: SkillId) => legal.some((a) => a.kind === 'skill' && a.skill === skill);
+  const has = (skill: SkillId): boolean => legal.some((a) => a.kind === 'skill' && a.skill === skill);
   const self = view.self;
   const foe = self === 0 ? 1 : 0;
-  if (has('bloom') && view.hp[self] * 2 < view.maxHp[self]) return { kind: 'skill', skill: 'bloom' };
-  if (has('finger-sword') && view.hp[foe] * 100 < view.maxHp[foe] * 35) return { kind: 'skill', skill: 'finger-sword' };
-  for (const skill of ['dream-chant', 'farewell-wind', 'lion-roar', 'blue-whale'] as const)
+  // 八成、四成都用整数比较（分子 ×10 比百分数），免得浮点边界抖动
+  if (has('bloom') && view.hp[self] * 10 <= view.maxHp[self] * GUIDE_BLOOM_AT) return { kind: 'skill', skill: 'bloom' };
+  if (has('finger-sword') && view.hp[foe] * 10 <= view.maxHp[foe] * GUIDE_FINISH_AT)
+    return { kind: 'skill', skill: 'finger-sword' };
+
+  // 对方正被控着（跳过的那拍还没消化）就绝不丢控制——controlLands 会直接判负；
+  // 视野没带这个状态（旧客户端）就退一步按平A次数隔手；再旧就按顺序直接放
+  const controlDue =
+    view.foe.controlled === undefined
+      ? view.you.swings === undefined ||
+        view.you.swings >= view.you.used.filter((s) => GUIDE_CONTROLS.includes(s)).length
+      : !view.foe.controlled;
+  if (controlDue) for (const skill of GUIDE_CONTROLS) if (has(skill)) return { kind: 'skill', skill };
+
+  for (const skill of GUIDE_FILLERS) {
     if (has(skill)) return { kind: 'skill', skill };
-  if (view.you.weapons.includes('firework')) return { kind: 'weapon', weapon: 'firework' };
-  return fallbackAction(view, 'guide', view.you.used.length);
+  }
+
+  // 武器只从合法清单里挑：被封法宝 / 已经空了都会自然落到空手
+  const weapons = legal.filter((a): a is Extract<Action, { kind: 'weapon' }> => a.kind === 'weapon');
+  for (const id of GUIDE_WEAPONS) {
+    const pick = weapons.find((a) => a.weapon === id);
+    if (pick) return pick;
+  }
+  return weapons[0] ?? { kind: 'unarmed' };
 }

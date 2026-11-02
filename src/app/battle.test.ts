@@ -1439,26 +1439,92 @@ test('statsBrief / fighterSheet：切磋时把对方的属性、法宝、招式�
   );
 });
 
-test('guideAction：先放四门控场 / 爆发，放完丢烟花；残血生花、对方残血拳心剑', () => {
-  const view = (over: Partial<BattleView> = {}, used: SkillId[] = []): BattleView => ({
+test('guideAction：生花 / 收头 / 控制链 / 补位 / 烟花（X26 额度制新攻略）', () => {
+  const view = (over: Partial<BattleView> = {}, you: Partial<BattleView['you']> = {}): BattleView => ({
     self: 0,
     hp: [354, 354],
     maxHp: [354, 354],
-    you: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], used },
-    foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS] },
+    you: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], used: [], ...you },
+    foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: false },
     ...over,
   });
-  assert.deepEqual(guideAction(view()), { kind: 'skill', skill: 'dream-chant' });
-  assert.deepEqual(guideAction(view({}, ['dream-chant'])), { kind: 'skill', skill: 'farewell-wind' });
-  const opened: SkillId[] = ['dream-chant', 'farewell-wind', 'lion-roar', 'blue-whale'];
-  assert.deepEqual(guideAction(view({}, opened)), { kind: 'weapon', weapon: 'firework' });
-  assert.deepEqual(guideAction(view({ hp: [170, 354] }, opened)), { kind: 'skill', skill: 'bloom' });
-  assert.deepEqual(guideAction(view({ hp: [354, 100] }, opened)), { kind: 'skill', skill: 'finger-sword' });
+  // 开局：控制链几率最高的鲸歌先出
+  assert.deepEqual(guideAction(view()), { kind: 'skill', skill: 'whale-song' });
+  // 气血掉到八成（354 × 0.8 = 283）就先生花：回血还白送一手
+  assert.deepEqual(guideAction(view({ hp: [283, 354] })), { kind: 'skill', skill: 'bloom' });
+  assert.deepEqual(guideAction(view({ hp: [284, 354] })), { kind: 'skill', skill: 'whale-song' });
+  // 对方掉到四成（354 × 0.4 = 141.6）换拳心剑收头
+  assert.deepEqual(guideAction(view({ hp: [354, 141] })), { kind: 'skill', skill: 'finger-sword' });
+  assert.deepEqual(guideAction(view({ hp: [354, 142] })), { kind: 'skill', skill: 'whale-song' });
   // 自己是 1 号：血量按自己那一格看
-  assert.deepEqual(guideAction(view({ self: 1, hp: [354, 170] }, opened)), { kind: 'skill', skill: 'bloom' });
-  // 没有烟花也没剩招：退回自动挑法，挑出来的一定合法
-  const bare = view({ you: { weapons: ['poker'], skills: [], used: [] } });
-  assert.ok(legalActions(bare).some((a) => JSON.stringify(a) === JSON.stringify(guideAction(bare))));
+  assert.deepEqual(guideAction(view({ self: 1, hp: [354, 283] })), { kind: 'skill', skill: 'bloom' });
+  // 对方被控着（跳过的那拍还没消化）：这一手绝不丢控制，先上万我挡三下
+  assert.deepEqual(guideAction(view({ foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: true } })), {
+    kind: 'skill',
+    skill: 'myriad-self',
+  });
+  // 万我 / 墨汁都没了，补位换成必中爆发
+  assert.deepEqual(
+    guideAction(
+      view(
+        { foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: true } },
+        { skills: ['whale-song', 'blue-whale'], used: [] },
+      ),
+    ),
+    { kind: 'skill', skill: 'blue-whale' },
+  );
+  // 墨汁不在补位清单里：宁可丢一手烟花，也不花额度换三手"可能打空"
+  assert.deepEqual(
+    guideAction(
+      view(
+        { foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: true } },
+        { skills: ['ink'], used: [] },
+      ),
+    ),
+    { kind: 'weapon', weapon: 'firework' },
+  );
+  // 控制按几率排：没有鲸歌先出送友风（65%），不是魂牵梦绕（55%）
+  assert.deepEqual(guideAction(view({}, { skills: ['dream-chant', 'farewell-wind'], used: [] })), {
+    kind: 'skill',
+    skill: 'farewell-wind',
+  });
+  // 招都用完了：一直丢烟花（切磋里唯一必中的法宝）
+  assert.deepEqual(guideAction(view({}, { used: [...SKILL_IDS] })), { kind: 'weapon', weapon: 'firework' });
+  // 法宝被封 / 没有法宝：落到空手，不硬塞一个用不了的
+  assert.deepEqual(guideAction(view({}, { used: [...SKILL_IDS], sealed: 'weapon' })), { kind: 'unarmed' });
+  // 旧客户端没有 foe.controlled：按平A次数隔手（刚控过、还没垫手就先补位）
+  const legacy = (swings?: number): BattleView => ({
+    self: 0,
+    hp: [354, 354],
+    maxHp: [354, 354],
+    you: {
+      weapons: [...WEAPON_IDS],
+      skills: [...SKILL_IDS],
+      used: ['whale-song'],
+      ...(swings === undefined ? {} : { swings }),
+    },
+    foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS] },
+  });
+  assert.deepEqual(guideAction(legacy(0)), { kind: 'skill', skill: 'myriad-self' });
+  assert.deepEqual(guideAction(legacy(1)), { kind: 'skill', skill: 'farewell-wind' });
+  // 更旧的客户端连出手计数也没有：不做穿插，按顺序直接放
+  assert.deepEqual(guideAction(legacy()), { kind: 'skill', skill: 'farewell-wind' });
+  // 挑出来的一定合法（额度 0 / 被封 / 没招没刀的各种边角）
+  const cases: BattleView[] = [
+    view(),
+    view({}, { skillUsesLeft: 0 }),
+    view({}, { sealed: 'skill' }),
+    view({}, { weapons: ['poker'], skills: [], used: [] }),
+    view({ hp: [1, 354] }, { used: [...SKILL_IDS] }),
+    view({ self: 1, hp: [354, 1] }, { weapons: [], skills: [] }),
+  ];
+  for (const v of cases) {
+    const pick = guideAction(v);
+    assert.ok(
+      legalActions(v).some((a) => JSON.stringify(a) === JSON.stringify(pick)),
+      `攻略挑出的一定合法：${JSON.stringify(pick)}`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
