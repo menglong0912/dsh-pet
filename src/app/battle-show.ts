@@ -175,6 +175,21 @@ export type FxAssetName =
   // X16：降龙十八掌的金龙、送友风的清风
   | '金龙'
   | '清风'
+  // X21：万我大手印的巨掌、前有古人的古人虚影、逆流护身印的白袍（X24 起白袍单独铺在出手方身上）
+  | '巨掌'
+  | '古人虚影'
+  | '逆流袍'
+  // X22：鬼手、无头鬼影、鬼敲门的门、鬼画的符、鬼血的血珠
+  | '鬼手'
+  | '无头鬼影'
+  | '门'
+  | '符画'
+  | '血珠'
+  // X25：鲸派气功的储气球、水浪，深渊领域的符阵与黑雾
+  | '鲸息'
+  | '鲸波'
+  | '深渊符阵'
+  | '深渊黑雾'
   // X8
   | '雪球'
   | '羽毛'
@@ -334,8 +349,43 @@ export const ATTACK_SHOW: Record<string, AttackShow> = {
     action: '出手-送友风',
     fly: { kind: '清风', track: 'float', hitFx: '命中-旋风', react: FLOAT_ANIM },
   },
+  // 万我大手印（X21）：双掌前推，巨掌从天上压下来，对方被压得蹲身
+  'myriad-palm': {
+    action: '出手-大手印',
+    fly: { kind: '巨掌', track: 'slam', hitFx: '命中-巨浪', react: '受击-碾压' },
+  },
+  // 逆流护身印（X21）：双掌对空虚抓，白袍披身；没有飞行物，反弹由 `reverse` 事件演
+  'reverse-seal': { action: '出手-护身印' },
+  // 前有古人（X21）：合掌，背后光阴长河；古人虚影在 `ancient` 事件时自己冲出去
+  ancients: { action: '出手-古人' },
+  // 吃苦吃亏（X21）：张口一吸；咬一口时对方播 `受击-被吃`
+  'eat-hardship': { action: '出手-吃苦' },
+  // 鬼手（X22）：一条手臂向左伸出、五指张开抓过去，掐住对方
+  'ghost-hand': {
+    action: '出手-鬼手',
+    fly: { kind: '鬼手', track: 'thrust', hitFx: '命中-斩', react: '受击-掐住' },
+  },
+  // 无头鬼影（X22）：背后浮起没有头的黑影，冲过去取首级；这一下打死的不画假死
+  'headless-shadow': {
+    action: '出手-鬼影',
+    fly: { kind: '无头鬼影', track: 'line', hitFx: '命中-魂碎', react: '受击-断头' },
+  },
+  // 鬼敲门（X22）：抬手在看不见的门上敲两下；伤害在对方下一次出手时由 `knock` 事件结算
+  'ghost-knock': { action: '出手-敲门' },
+  // 鬼画（X22）：指尖在胸前画符；符纹在 `paint` 事件时飞过去贴在对方身上
+  'ghost-painting': { action: '出手-鬼画' },
+  // 鬼血（X22）：指尖一抹，几颗血珠浮起打向对方
+  'ghost-blood': {
+    action: '出手-鬼血',
+    fly: { kind: '血珠', track: 'line', hitFx: '命中-墨汁', count: 3, gapMs: 90 },
+  },
   // 回血：作用在自己身上，照旧播整段素材，没有飞行物
   bloom: { action: '招式-凭空生花' },
+  // X25：聚气是双掌收在胸前凝出水球、领域是单掌按到地上、瞬影是留一个残影在原地；
+  // 鲸派气功的释放由时间线按 release 单独排「出手-鲸派」+ 鲸波
+  'tide-cannon': { action: '出手-聚气' },
+  'abyss-field': { action: '出手-领域' },
+  'shadow-step': { action: '出手-瞬影' },
   // 三种追加出手
   'spirit-beast': { action: '出手-召唤灵兽', fly: { kind: '灵兽', track: 'float', hitFx: '命中-泡泡' } },
   'sixth-sense': { action: '出手-第六感', fly: { kind: '手刀', track: 'line', hitFx: '命中-斩' } },
@@ -403,6 +453,15 @@ export const FX_ASSETS: FxAssetName[] = Array.from(
     // 魂屑（X9）：万我的 `mirror` 事件和魂牵梦绕的命中都用它，不在出手表的飞行物里
     '命中-魂碎',
     '乌云',
+    // 静止贴图（X24）：白袍、门只在时间线里铺，不在出手表里，开窗时一并预取
+    '逆流袍',
+    '门',
+    // X25：聚气收势后的水球、领域的符阵与黑雾也只在时间线里铺
+    '鲸息',
+    '深渊符阵',
+    '深渊黑雾',
+    // 鲸派气功的水浪只在释放那一支里用，不在出手表里
+    '鲸波',
     // 定仙游的碧芒（Y2 素材清单）：不在出手表里，开窗时一并预取
     '碧光',
   ]),
@@ -467,6 +526,22 @@ export const RELEASE: Record<string, { ms: number; hand: [number, number]; catch
   '出手-降龙': { ms: 2_250, hand: [190, 219] },
   // 送友风：挥手后往外一送那一刻，清风从这里飘出去（X16）
   '出手-送友风': { ms: 2_750, hand: [228, 222] },
+  // X21：四门的出手时刻与手位（量法同上面：大手印双掌向左侧推到位 / 护身印胸前合掌 / 古人双手伸到最远 / 吃苦张口一吸）
+  '出手-大手印': { ms: 1_250, hand: [222, 222] },
+  '出手-护身印': { ms: 1_500, hand: [282, 232] },
+  '出手-古人': { ms: 2_250, hand: [195, 205] },
+  '出手-吃苦': { ms: 1_250, hand: [255, 152] },
+  // X22：鬼手掐到最远的那一帧 / 鬼影指向定住 / 敲门抬手叩下 / 鬼画符成、双手向两侧推出 / 鬼血掌心三颗血珠成形
+  '出手-鬼手': { ms: 917, hand: [188, 229] },
+  '出手-鬼影': { ms: 2_000, hand: [230, 200] },
+  // X24 重做的三段素材重新量的时刻：敲门叩第一下、鬼画符纹画完推出去、鬼血血珠离手
+  // （鬼血：血珠 1.46 秒就在指尖，一直停到 2.38 秒；2.42 秒才明显飞出去，取 2.4 秒）
+  '出手-敲门': { ms: 1_400, hand: [280, 200] },
+  '出手-鬼画': { ms: 2_700, hand: [235, 236] },
+  '出手-鬼血': { ms: 2_400, hand: [266, 228] },
+  // X25：鲸派双掌推到最远（1.83 秒，最左到 x=200）；领域单掌按到地上那一刻（2.17 秒，掌心在 x=192、y=268）
+  '出手-鲸派': { ms: 1_830, hand: [200, 199] },
+  '出手-领域': { ms: 2_170, hand: [192, 268] },
   // 对手动作（Y2）：离手时刻与手的位置按 YA 素材「量出来的时刻」填；熔岩鳄、他派蛊师复用狮獒 / 韩不留，
   // 调用方把它们的动画前缀传成被复用的那只
   '对手-野狗-出手': { ms: 1_833, hand: [0, 250] },
@@ -571,6 +646,20 @@ export interface Shot {
   surge?: true;
   /** 银托盘的回旋（X8）：第二段绕到背后磕的时刻、飞回手里的时刻，以及第二段的结果 */
   boomerang?: { secondMs: number; totalMs: number; second: 'hit' | 'blocked' | 'decoy' | 'miss' | 'none' };
+  /**
+   * 静止贴图（X24）：不飞，铺在 `anchor` 那一边 ms 毫秒（默认自己）。
+   * 逆流护身印的白袍、鬼敲门的门、贴在身上的符纹用它；`shake` 左右抖、`spin` 慢慢转，
+   * `dy` 往下挪多少（占舞台高的比例，白袍要露出头，所以往下压一点）
+   */
+  hold?: {
+    ms: number;
+    anchor?: 'self' | 'foe' | 'mid';
+    shake?: number;
+    spin?: number;
+    dy?: number;
+    /** 竖向压扁（X25 的俯视符阵铺在地上用）：1 = 不压，0.4 左右像贴地 */
+    squash?: number;
+  };
 }
 
 /**
@@ -908,6 +997,22 @@ export function timeline(
     return at + shot.flightMs + (fly.reverse ? (shot.count - 1) * shot.gapMs : 0);
   };
 
+  /** 铺一张静止贴图（X24）：白袍、门、贴住的符纹；不飞，到点自己淡出 */
+  const pushHold = (
+    at: number,
+    who: 0 | 1,
+    kind: FxAssetName,
+    hp: [number, number],
+    hold: NonNullable<Shot['hold']>,
+  ): void => {
+    steps.push({
+      at,
+      who,
+      shot: { kind, track: 'line', flightMs: hold.ms, count: 1, gapMs: 0, hitFx: kind, hand: [0, 0], hold },
+      hp,
+    });
+  };
+
   /**
    * 放这一格里下一段的飞行物，返回放出 / 命中时刻与这一段要不要让对方起反应。
    * 银托盘（回旋）只在第一段放一发，带上第二段的结果（往后找）；第二段不另放，命中 = 放出 + BOOMERANG_SECOND_MS
@@ -982,6 +1087,13 @@ export function timeline(
 
     if (event.kind === 'decide') {
       closeSlot();
+      // 鲸派气功（X25）：蓄力后的自动释放不播这一手动作，释放由紧随其后的 skill 事件自己排，
+      // 不然聚气的护身印动作会闪一下又被降龙顶掉
+      if (event.autoRelease) {
+        overrideActor = null;
+        before = event.hp;
+        continue;
+      }
       const override = options?.decideLines?.get(i);
       overrideActor = override === undefined ? null : event.actor;
       const show = showOf(event.action, event.actor, foePrefix);
@@ -1254,6 +1366,27 @@ export function timeline(
       continue;
     }
 
+    // 鲸派气功聚气（X25）：动作收势后把水球留在掌间——聚气动作压进一格 2.4 秒，素材里球到末帧就散了，
+    // 接一张鲸息标出「已聚气」，等下一次出手放出去
+    if (event.kind === 'skill' && event.skill === 'tide-cannon' && event.charging) {
+      pushHold(cursor + SLOT_MS, event.actor, '鲸息', event.hp, { ms: 1_200, anchor: 'self', dy: 0.12 });
+      if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
+      continue;
+    }
+
+    // 鲸派气功释放（X25）：自动释放那一手没有 decide 动作，这里补「出手-鲸派」+ 鲸波，命中才掉血出台词
+    if (event.kind === 'skill' && event.skill === 'tide-cannon' && event.release) {
+      const anim = '出手-鲸派';
+      const fly: Fly = { kind: '鲸波', track: 'line', hitFx: '命中-水花' };
+      pushAnim({ at, who: event.actor, anim, rate: actionRate(anim), hp: hpBefore });
+      const impact = pushShot(at + releaseOffset(anim), event.actor, anim, fly, hpBefore);
+      const victim = (event.actor ^ 1) as 0 | 1;
+      if (!playDeadAfter(events, i)) pushReaction(impact, victim, HIT_ANIM, hpBefore);
+      steps.push({ at: impact, who: event.actor, ...(line === undefined ? {} : { line }), hp: event.hp });
+      lastImpact = impact;
+      continue;
+    }
+
     // 没有伤害、但有飞行物的主动招式（鲸歌、墨汁）也走下面这一支：放一发、对方按招式反应
     const castOnFoe =
       event.kind === 'skill' &&
@@ -1332,6 +1465,88 @@ export function timeline(
       if (shot.reacts) pushReaction(shot.fly.reverse ? shot.launch : shot.impact, victim, reactAnim, hpBefore);
       // 掉血与结算台词都在命中那一刻（鲸吞的伤害和回血一起，在灵光飞回嘴边时结算）
       steps.push({ at: shot.impact, who: shooter, ...(line === undefined ? {} : { line }), hp: event.hp });
+      continue;
+    }
+
+    // 深渊领域（X25）：单掌按地那一刻，符阵从脚下铺开、黑雾漫上擂台；之后领域持续期间压在两只之间。
+    // 领域要撑到自己三次攻击打完（三个来回约 17 秒），贴图按这个时长留；战斗结束会随特效窗一起关掉
+    if (event.kind === 'skill' && event.skill === 'abyss-field') {
+      const spread = cursor + releaseOffset('出手-领域');
+      // 符阵是俯视图：竖向压扁到 0.36 铺在地上，别立成一堵圆墙
+      pushHold(spread, event.actor, '深渊符阵', event.hp, {
+        ms: 18_000,
+        anchor: 'mid',
+        dy: 0.27,
+        spin: 8,
+        squash: 0.36,
+      });
+      pushHold(spread, event.actor, '深渊黑雾', event.hp, { ms: 18_000, anchor: 'mid', dy: 0.3 });
+      if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
+      continue;
+    }
+
+    // 深渊领域的暗流（X25）：对方每次出手前被黑雾扯一下。引擎把暗流排在对方 decide 之前，
+    // 那时上一格还没关，按拍的 `at` 会落进上一段动作里——压到上一格演完（SLOT_MS）再压
+    if (event.kind === 'field') {
+      const tick = Math.max(at, cursor + SLOT_MS);
+      pushHold(tick, event.actor, '深渊黑雾', event.hp, { ms: 900, anchor: 'foe', dy: 0.12, shake: 3 });
+      steps.push({ at: tick, who: event.actor, ...(line === undefined ? {} : { line }), hp: event.hp });
+      continue;
+    }
+
+    // 逆流护身印（X21）：白袍铺在出手方身上（X24 返修：原来只有一句台词，画面上什么都没有）
+    if (event.kind === 'skill' && event.skill === 'reverse-seal') {
+      pushHold(at, event.actor, '逆流袍', event.hp, { ms: 2_600, anchor: 'self', dy: 0.12 });
+      if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
+      continue;
+    }
+
+    // 鬼敲门（X22）：门立在两只中间、随着敲门声轻颤（X24 返修：原来只有一句台词）
+    if (event.kind === 'skill' && event.skill === 'ghost-knock') {
+      pushHold(at, event.actor, '门', event.hp, { ms: 2_200, anchor: 'mid', shake: 3 });
+      if (line !== undefined) steps.push({ at, who: event.actor, line, hp: event.hp });
+      continue;
+    }
+
+    // 逆流护身印（X21）：白袍把这一下弹回去——只刷台词与血条。攻击方刚出完手、下一手就在眼前，
+    // 排整段受击会把它的出手从中间切断；这一步靠台词「原样打回」和血条变化交代
+    if (event.kind === 'reverse') {
+      steps.push({ at, who: event.actor, ...(line === undefined ? {} : { line }), hp: event.hp });
+      continue;
+    }
+
+    // 前有古人（X21）：古人虚影从出手方冲出去补一击，命中那一刻对方受击
+    if (event.kind === 'ancient') {
+      const fly: Fly = { kind: '古人虚影', track: 'line', hitFx: '命中-斩' };
+      const impact = pushShot(at, event.actor, '出手-古人', fly, hpBefore);
+      pushReaction(impact, (event.actor ^ 1) as 0 | 1, HIT_ANIM, event.hp);
+      steps.push({ at: impact, who: event.actor, ...(line === undefined ? {} : { line }), hp: event.hp });
+      continue;
+    }
+
+    // 吃苦吃亏（X21）：咬一口时对方播 `受击-被吃`；吃泡泡 / 魂影只刷血条与台词
+    if (event.kind === 'devour') {
+      if (event.what === 'bite') pushReaction(at, (event.actor ^ 1) as 0 | 1, '受击-被吃', event.hp);
+      steps.push({ at, who: event.actor, ...(line === undefined ? {} : { line }), hp: event.hp });
+      continue;
+    }
+
+    // 鬼敲门（X22）：门后的人浑身一震——只刷台词与血条。敲门声在它自己出手的那一瞬结算，
+    // 排整段受击会把它紧接着的出手切断；门在那一瞬再抖一下（X24）
+    if (event.kind === 'knock') {
+      pushHold(at, event.actor, '门', event.hp, { ms: 600, anchor: 'self', shake: 4 });
+      steps.push({ at, who: event.actor, ...(line === undefined ? {} : { line }), hp: event.hp });
+      continue;
+    }
+
+    // 鬼画（X22）：符纹从指尖飞过去贴在对方身上（封被动；没被动可封时这一下带伤害，走下面的正常分支）
+    if (event.kind === 'skill' && event.paint) {
+      const fly: Fly = { kind: '符画', track: 'line', hitFx: '命中-魂碎' };
+      // X24：符纹要等手指画完才离手——素材 2.7 秒处才把符推出去（RELEASE），按那一手起播的时刻加离手偏移
+      const impact = pushShot(cursor + releaseOffset('出手-鬼画'), event.actor, '出手-鬼画', fly, hpBefore);
+      // X24：符纹贴上以后在对方身上停一会儿（慢慢转），不是闪一下就没了；往下挪一点，别糊在脸上
+      pushHold(impact, event.actor, '符画', event.hp, { ms: 700, anchor: 'foe', spin: 30, dy: 0.1 });
+      steps.push({ at: impact, who: event.actor, ...(line === undefined ? {} : { line }), hp: event.hp });
       continue;
     }
 

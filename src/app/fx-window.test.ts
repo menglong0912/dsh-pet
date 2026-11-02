@@ -12,8 +12,10 @@ import {
   feetPoint,
   foeStage,
   fxBounds,
+  fxBoundsAll,
   fxPage,
   fxSpec,
+  fxSpecBetween,
   handPoint,
   homeStage,
   openFxWindow,
@@ -68,6 +70,62 @@ test('fxBounds：两只舞台的并集，上方让出 3/4 个舞台高、左右�
   assert.ok(tight && tight.x >= 0 && tight.y >= 25, `夹进工作区：${JSON.stringify(tight)}`);
   assert.deepEqual(fxBounds(self, null, everywhere), { x: 76, y: 30, width: 688, height: 654 }, '渡劫只有自家');
   assert.equal(fxBounds(null, null, everywhere), null, '谁都不知道在哪：这一场不放特效');
+});
+
+test('fxBoundsAll：N 只舞台的并集覆盖整圈', () => {
+  const third: Stage = { x: 1500, y: 600, width: 320, height: 180, facing: 'right' };
+  const all = fxBoundsAll([self, foe, third], everywhere);
+  assert.ok(all);
+  assert.equal(all.x, self.x - 24);
+  assert.equal(all.x + all.width, 1500 + 320 + 24);
+  assert.equal(all.y + all.height, 600 + 180 + 24);
+  assert.equal(fxBoundsAll([null, null], everywhere), null);
+});
+
+test('fxSpecBetween：任意两只，谁打谁由 from/to 决定', () => {
+  const forward = fxSpecBetween(shot(), self, foe, everywhere) as FxSpec;
+  const backward = fxSpecBetween(shot(), foe, self, everywhere) as FxSpec;
+  assert.equal(forward.mirror, true, '往右打要镜像');
+  assert.equal(backward.mirror, false, '往左打不用镜像');
+  assert.notDeepEqual(forward.from, backward.from);
+  assert.deepEqual(fxSpec(shot(), 0, stages, everywhere), forward, '1v1 的 0 号入口等价于 from=self');
+});
+
+test('fxSpec 静止贴图（X24）：白袍铺在自己身上、门立在两只中间、符纹贴在对方身上', () => {
+  const robe = fxSpec(shot({ kind: '逆流袍', hold: { ms: 2_600, anchor: 'self' } }), 0, stages, everywhere) as FxSpec;
+  assert.deepEqual(robe.from, robe.to, '不飞：起点就是终点');
+  assert.deepEqual(robe.from, [421, 497], '自家身体中心（朝右时 x 镜像）');
+  assert.equal(robe.size, Math.round(0.72 * 360));
+  assert.deepEqual(robe.hold, { ms: 2_600, shake: 0, spin: 0, squash: 1 });
+  assert.equal(robe.hitSize, 0, '静止贴图不画命中特效');
+
+  // X25：俯视符阵要竖向压扁、往下挪到地上，才不会立成一堵圆墙
+  const field = fxSpec(
+    shot({ kind: '深渊符阵', hold: { ms: 5_000, anchor: 'mid', dy: 0.3, squash: 0.36 } }),
+    0,
+    stages,
+    everywhere,
+  ) as FxSpec;
+  assert.equal(field.hold?.squash, 0.36);
+  assert.equal(field.from[1], 497 + Math.round(0.3 * 360), 'dy 按舞台高往下挪');
+
+  const door = fxSpec(
+    shot({ kind: '门', hold: { ms: 2_200, anchor: 'mid', shake: 3 } }),
+    0,
+    stages,
+    everywhere,
+  ) as FxSpec;
+  assert.deepEqual(door.from, [770, 497], '门立在两只身体中心的中点');
+  assert.equal(door.hold?.shake, 3, '跟着敲门声抖');
+
+  const talisman = fxSpec(
+    shot({ kind: '符画', hold: { ms: 700, anchor: 'foe', spin: 30 } }),
+    0,
+    stages,
+    everywhere,
+  ) as FxSpec;
+  assert.deepEqual(talisman.from, [1119, 497], '符纹贴在对方身上');
+  assert.equal(talisman.hold?.spin, 30);
 });
 
 test('fxSpec 直飞：从出手方那只手飞到对方身体中心，往右飞就镜像，大小按目标舞台高', () => {

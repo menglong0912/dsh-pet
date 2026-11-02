@@ -1487,6 +1487,39 @@ test('X16 串门里送走（end.reason = farewell）：不演胜利 / 倒地，�
   );
 });
 
+test('X26 认输（end.reason = forfeit）：照常演胜利 / 倒地，收场台词点明认输', () => {
+  const events: BattleEvent[] = [
+    start(0),
+    decide(0, { kind: 'unarmed' }),
+    hit(0, 20, [100, 80]),
+    { actor: 1, kind: 'end', winner: 0, reason: 'forfeit', hp: [100, 80] },
+  ];
+  const steps = timeline(events, NAMES, seq());
+  assert.equal(animsOf(steps, '战斗-胜利').length, 1, '认输也是正常收场：赢家播胜利');
+  assert.equal(animsOf(steps, '战斗-倒地').length, 1, '认输方播倒地');
+  const closing = steps.filter((step) => step.closing && step.line);
+  assert.ok(
+    closing.some((step) => /认输/.test(step.line ?? '')),
+    '收场台词说认输，不是普通获胜',
+  );
+});
+
+test('X26 切磋主动技被闪避：出手动作与飞行物照播，对方播闪避，不补 0 伤害的 skill', () => {
+  const action: Action = { kind: 'skill', skill: 'lion-roar' };
+  const events: BattleEvent[] = [start(0), decide(0, action), { actor: 1, kind: 'dodge', hp: [100, 100] }];
+  const steps = timeline(events, NAMES, seq());
+  assert.equal(animsOf(steps, '战斗-吼').length, 1, '出手方照播招式动作');
+  assert.equal(animsOf(steps, '受击-震耳').length, 0, '被闪避就不播命中反应');
+  const dodges = animsOf(steps, '战斗-闪避');
+  assert.ok(dodges.length >= 1 && dodges.every((step) => step.who === 1), '对方播闪避');
+  assert.deepEqual(
+    steps.filter((step) => step.shot).map((step) => step.shot?.kind),
+    ['声波'],
+    '飞行物照放，只是掠过去',
+  );
+  assert.equal(steps.filter((step) => step.shot?.miss).length, 1, '这一发按打空演');
+});
+
 test('执行器 X16：dash 步到点交给冲刺的手；自然演完 / 快进都收一下冲刺（快进立刻复位）', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
   const calls: Array<[0 | 1, string, number]> = [];
@@ -1515,4 +1548,304 @@ test('执行器 X16：dash 步到点交给冲刺的手；自然演完 / 快进�
   skipped.skip();
   await pending;
   assert.deepEqual(ends, [false, true], '快进：立刻复位');
+});
+
+test('X21 万我大手印：巨掌从天上压下来，对方播受击-碾压', () => {
+  const landed: BattleEvent = {
+    actor: 0,
+    kind: 'skill',
+    skill: 'myriad-palm',
+    damage: 28,
+    sealed: 'weapon',
+    hp: [100, 62],
+  };
+  const steps = timeline([start(0), decide(0, { kind: 'skill', skill: 'myriad-palm' }), landed], NAMES, seq());
+  const [shot] = shotsOf(steps);
+  assert.deepEqual(
+    [shot.shot.kind, shot.shot.track, shot.shot.hitFx, shot.shot.flightMs],
+    ['巨掌', 'slam', '命中-巨浪', 700],
+  );
+  assert.ok(
+    steps.some((step) => step.who === 1 && step.anim === '受击-碾压'),
+    '对方播受击-碾压',
+  );
+});
+
+test('X21 前有古人：古人虚影从出手方冲出去补一击，命中那一刻对方受击', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'ancients' }),
+      { actor: 0, kind: 'skill', skill: 'ancients', hp: [100, 100] },
+      decide(0, { kind: 'unarmed' }),
+      { actor: 0, kind: 'ancient', damage: 80, hp: [100, 20] },
+    ],
+    NAMES,
+    seq(),
+  );
+  const [shot] = shotsOf(steps);
+  assert.deepEqual([shot.shot.kind, shot.shot.track, shot.shot.hitFx], ['古人虚影', 'line', '命中-斩']);
+  assert.ok(
+    steps.some((step) => step.who === 1 && step.anim === '受击-正面'),
+    '补的那一击对方要起反应',
+  );
+});
+
+test('X21 吃苦吃亏：咬一口时对方播受击-被吃，吃泡泡不播受击', () => {
+  const base = [start(0), decide(0, { kind: 'skill', skill: 'eat-hardship' })];
+  const cast: BattleEvent = { actor: 0, kind: 'skill', skill: 'eat-hardship', hp: [100, 100] };
+  const bite = timeline(
+    [...base, cast, { actor: 0, kind: 'devour', what: 'bite', damage: 44, heal: 22, hp: [100, 56] }],
+    NAMES,
+    seq(),
+  );
+  assert.ok(
+    bite.some((step) => step.who === 1 && step.anim === '受击-被吃'),
+    '咬一口对方有反应',
+  );
+  const bubble = timeline(
+    [...base, cast, { actor: 0, kind: 'devour', what: 'bubble', heal: 15, hp: [100, 100] }],
+    NAMES,
+    seq(),
+  );
+  assert.ok(
+    !bubble.some((step) => step.who === 1 && step.anim === '受击-被吃'),
+    '吃泡泡只刷血条与台词，对方不播被吃的受击',
+  );
+});
+
+test('X21 逆流护身印：白袍铺在出手方身上，反弹那一刻只刷台词与血条，不切断攻击方刚出的手', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(1, { kind: 'skill', skill: 'reverse-seal' }),
+      { actor: 1, kind: 'skill', skill: 'reverse-seal', hp: [100, 100] },
+      { actor: 1, kind: 'reverse', damage: 14, hp: [86, 100] },
+    ],
+    NAMES,
+    seq(),
+  );
+  const [robe] = shotsOf(steps);
+  assert.deepEqual([robe.shot.kind, robe.shot.hold?.anchor, robe.who], ['逆流袍', 'self', 1]);
+  assert.ok(robe.shot.hold && robe.shot.hold.ms >= 2_000, '白袍要铺满一整个回合，不是闪一下');
+  assert.ok(
+    steps.some((step) => step.line && step.who === 1),
+    '反弹这一刻出「原样打回」的台词',
+  );
+  assert.ok(
+    steps.some((step) => step.hp[0] === 86 && step.hp[1] === 100),
+    '血条在反弹那一刻刷新',
+  );
+  assert.ok(!steps.some((step) => step.anim === '受击-正面'), '不另起一段受击（攻击方的出手还在播）');
+});
+
+test('X22 鬼手：鬼手贴图掐过去，对方播受击-掐住', () => {
+  const landed: BattleEvent = {
+    actor: 0,
+    kind: 'skill',
+    skill: 'ghost-hand',
+    damage: 30,
+    sealed: 'skill',
+    hp: [100, 70],
+  };
+  const steps = timeline([start(0), decide(0, { kind: 'skill', skill: 'ghost-hand' }), landed], NAMES, seq());
+  const [shot] = shotsOf(steps);
+  assert.deepEqual([shot.shot.kind, shot.shot.track, shot.shot.hitFx], ['鬼手', 'thrust', '命中-斩']);
+  assert.ok(
+    steps.some((step) => step.who === 1 && step.anim === '受击-掐住'),
+    '对方播受击-掐住',
+  );
+});
+
+test('X22 无头鬼影：黑影冲出去取首级，对方播受击-断头', () => {
+  const landed: BattleEvent = {
+    actor: 0,
+    kind: 'skill',
+    skill: 'headless-shadow',
+    damage: 40,
+    behead: true,
+    hp: [100, 0],
+  };
+  const steps = timeline([start(0), decide(0, { kind: 'skill', skill: 'headless-shadow' }), landed], NAMES, seq());
+  const [shot] = shotsOf(steps);
+  assert.deepEqual([shot.shot.kind, shot.shot.hitFx], ['无头鬼影', '命中-魂碎']);
+  assert.ok(
+    steps.some((step) => step.who === 1 && step.anim === '受击-断头'),
+    '对方播受击-断头',
+  );
+});
+
+test('X22 鬼敲门：门立在两只中间，敲门声只刷台词与血条，不排受击切断它自己的出手', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'ghost-knock' }),
+      { actor: 0, kind: 'skill', skill: 'ghost-knock', hp: [100, 100] },
+      { actor: 1, kind: 'knock', damage: 26, hp: [100, 74] },
+      decide(1, { kind: 'unarmed' }),
+    ],
+    NAMES,
+    seq(),
+  );
+  const [door] = shotsOf(steps);
+  assert.deepEqual([door.shot.kind, door.shot.hold?.anchor], ['门', 'mid']);
+  assert.ok((door.shot.hold?.shake ?? 0) > 0, '门要跟着敲门声轻颤');
+  assert.ok(
+    shotsOf(steps).some((step) => step.shot.hold?.anchor === 'self' && step.shot.kind === '门'),
+    '敲门声真的响那一刻，门在挨门的人面前再抖一下',
+  );
+  assert.ok(
+    steps.some((step) => step.line && step.who === 1),
+    '敲门的台词',
+  );
+  assert.ok(
+    steps.some((step) => step.hp[1] === 74),
+    '血条在敲门那一刻刷新',
+  );
+  assert.ok(!steps.some((step) => step.anim === '受击-门响'), '不排整段受击');
+});
+
+test('X22 鬼画：符纹从指尖飞过去贴在对方身上', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'ghost-painting' }),
+      { actor: 0, kind: 'skill', skill: 'ghost-painting', paint: 'bubble', hp: [100, 100] },
+    ],
+    NAMES,
+    seq(),
+  );
+  const shots = shotsOf(steps);
+  assert.deepEqual([shots[0].shot.kind, shots[0].shot.track], ['符画', 'line']);
+  // X24：符纹等手指画完才离手（素材 2.7 秒处），不能一出招就飞过去
+  const cast = steps.find((step) => step.anim === '出手-鬼画');
+  assert.ok(cast, '要先播画符的出手动作');
+  assert.equal(shots[0].at, cast.at + releaseOffset('出手-鬼画'), '符纹在离手时刻起飞');
+  const stick = shots.find((step) => step.shot.hold);
+  assert.ok(stick, '符纹贴上以后要停在对方身上一会儿');
+  assert.deepEqual([stick!.shot.kind, stick!.shot.hold?.anchor], ['符画', 'foe']);
+  assert.equal(stick!.at, shots[0].at + shots[0].shot.flightMs, '贴在对方身上的时刻就是命中时刻');
+  assert.equal(stick!.shot.hold?.dy, 0.1, '往下挪一点，别糊在脸上');
+});
+
+test('X22 鬼血：三颗血珠一起飞过去', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'ghost-blood' }),
+      { actor: 0, kind: 'skill', skill: 'ghost-blood', damage: 30, hp: [100, 70] },
+    ],
+    NAMES,
+    seq(),
+  );
+  const [shot] = shotsOf(steps);
+  assert.deepEqual([shot.shot.kind, shot.shot.count], ['血珠', 3]);
+  // 血珠得等素材里真正离手才发（早了会「血先飞出去、手还停在原地」）
+  const [cast] = animsOf(steps, '出手-鬼血');
+  assert.equal(shot.at, cast.at + releaseOffset('出手-鬼血'));
+});
+
+test('X25 鲸派气功：聚气播出手-聚气，收势后留一颗鲸息，不排飞行物', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'tide-cannon' }),
+      { actor: 0, kind: 'skill', skill: 'tide-cannon', charging: true, hp },
+    ],
+    NAMES,
+    seq(),
+  );
+  const [cast] = animsOf(steps, '出手-聚气');
+  assert.ok(cast, '聚气用自己那段动作');
+  const holds = shotsOf(steps).filter((step) => step.shot.hold);
+  assert.equal(holds.length, 1, '聚气不排飞行物，只留一颗储气球');
+  assert.deepEqual([holds[0].shot.kind, holds[0].shot.hold?.anchor], ['鲸息', 'self']);
+  assert.equal(holds[0].at, cast.at + SLOT_MS, '动作收势（压进一格）之后球才留出来');
+  const said = steps.find((step) => step.line && step.who === 0);
+  assert.ok(said && /气|潮/.test(said.line ?? ''), `聚气台词：${said?.line}`);
+  assert.ok(
+    steps.some((step) => step.line && step.hp[0] === hp[0] && step.hp[1] === hp[1]),
+    '只刷台词与血条',
+  );
+});
+
+test('X25 鲸派气功释放：自动释放不播动作，自排出手-鲸派 + 鲸波，命中受击与台词', () => {
+  const steps = timeline(
+    [
+      start(0),
+      { actor: 0, kind: 'decide', action: { kind: 'skill', skill: 'tide-cannon' }, autoRelease: true, hp },
+      { actor: 0, kind: 'skill', skill: 'tide-cannon', release: true, damage: 86, hp: [100, 14] },
+    ],
+    NAMES,
+    seq(),
+  );
+  assert.equal(animsOf(steps, '出手-聚气').length, 0, '自动释放的 decide 不播动作');
+  const cast = steps.find((step) => step.anim === '出手-鲸派');
+  assert.ok(cast, '释放那一手自己排出手-鲸派');
+  const [shot] = shotsOf(steps);
+  assert.ok(shot, '该放出鲸波');
+  assert.deepEqual([shot.shot.kind, shot.shot.track, shot.shot.hitFx], ['鲸波', 'line', '命中-水花']);
+  assert.equal(shot.at, cast!.at + releaseOffset('出手-鲸派'), '鲸波在鲸派素材的离手时刻放出');
+  const impact = impactOf(shot);
+  assert.ok(
+    steps.some((step) => step.anim === HIT && step.who === 1),
+    '命中那一刻对方受击',
+  );
+  const landed = steps.find((step) => step.at === impact && step.line);
+  assert.ok(landed && /气功|水浪/.test(landed.line ?? ''), `释放台词：${landed?.line}`);
+  assert.deepEqual(landed!.hp, [100, 14], '掉血在命中那一刻');
+});
+
+test('X25 瞬影：播出手-瞬影，起手只刷台词与血条，不排飞行物', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'shadow-step' }),
+      { actor: 0, kind: 'skill', skill: 'shadow-step', hp },
+    ],
+    NAMES,
+    seq(),
+  );
+  assert.equal(shotsOf(steps).length, 0, '瞬影没有飞行物');
+  assert.equal(animsOf(steps, '出手-瞬影').length, 1, '瞬影用自己的动作（残影在素材里）');
+  assert.ok(
+    steps.some((step) => step.line && step.who === 0),
+    '瞬影有台词',
+  );
+});
+
+test('X25 深渊领域：单掌按地时铺符阵与黑雾，每次暗流再压一下对方', () => {
+  const steps = timeline(
+    [
+      start(0),
+      decide(0, { kind: 'skill', skill: 'abyss-field' }),
+      { actor: 0, kind: 'skill', skill: 'abyss-field', hp },
+      { actor: 0, kind: 'field', damage: 15, hp: [100, 85] },
+    ],
+    NAMES,
+    seq(),
+  );
+  const [cast] = animsOf(steps, '出手-领域');
+  assert.ok(cast, '领域用自己那段动作');
+  const spread = cast.at + releaseOffset('出手-领域');
+  const holds = shotsOf(steps).filter((step) => step.shot.hold);
+  const domain = holds.filter((step) => step.at === spread);
+  assert.deepEqual(
+    domain.map((step) => [step.shot.kind, step.shot.hold?.anchor]),
+    [
+      ['深渊符阵', 'mid'],
+      ['深渊黑雾', 'mid'],
+    ],
+    '按地那一刻符阵铺开、黑雾漫上擂台',
+  );
+  assert.equal(domain[0].shot.hold?.squash, 0.36, '符阵是俯视图，压扁了铺在地上');
+  // 暗流事件（field）：对方挨一下黑雾
+  const tick = holds.find((step) => step.shot.hold?.anchor === 'foe');
+  assert.ok(tick, '暗流压对方一下');
+  assert.equal(tick!.shot.kind, '深渊黑雾');
+  assert.ok(tick!.at >= spread, '暗流在领域铺开之后才压');
+  assert.ok(
+    steps.some((step) => step.line && step.hp[0] === 100 && step.hp[1] === 85),
+    '暗流只刷台词与血条',
+  );
 });

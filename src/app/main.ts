@@ -66,6 +66,7 @@ interface WebContentsLike {
 }
 interface ElectronApp {
   getPath(name: 'appData' | 'logs'): string;
+  setPath(name: 'userData', path: string): void;
   requestSingleInstanceLock(): boolean;
   exit(code?: number): void;
   relaunch(): void;
@@ -83,6 +84,9 @@ const packageRoot = resolve(here, '..');
 const helperMain = join(packageRoot, 'runtime', 'electron-helper', 'main.js');
 
 const log = (message: string): void => console.log(`[dsh-pet-app] ${message}`);
+
+/** 用户显式指定的数据目录（没设时 boot 里补默认值：普通启动行为不变） */
+const explicitHome = process.env.DSH_HOME;
 
 /**
  * DPI 探测子进程（`runtime/electron-helper/main.js` 的 probePrimaryScale）。
@@ -104,6 +108,19 @@ if (process.env.DSH_PET_DPI_PROBE === '1') {
     setTimeout(() => app.exit(0), 0);
   });
 } else {
+  /**
+   * 显式设了 DSH_HOME（同机开两个实例自测 / 一份数据一个实例）：连同 Chromium 的 userData 一起分开。
+   * 单实例锁是按 userData 区分的——不分开的话第二个实例直接被这把锁挡掉。
+   * 没设 DSH_HOME 的普通启动照旧：只有一个实例，行为不变。
+   */
+  if (explicitHome) {
+    try {
+      app.setPath('userData', join(explicitHome, 'electron-user-data'));
+    } catch (error) {
+      log(`userData 换到 DSH_HOME 失败：${String(error)}`);
+    }
+  }
+
   /** 单实例：第二次双击直接退出（共用 userData 的 Chromium profile 会互踢） */
   const locked = app.requestSingleInstanceLock();
   if (!locked) {
@@ -195,6 +212,8 @@ async function boot(): Promise<void> {
     });
   });
   createRequire(import.meta.url)(helperMain);
+  // helper 加载时把 userData 定到 appData/dsh-pet；显式 DSH_HOME 的多实例自测要沿用上面分开的那份
+  if (explicitHome) app.setPath('userData', join(explicitHome, 'electron-user-data'));
 
   void app.whenReady().then(() => {
     const home = dshHomeDir();

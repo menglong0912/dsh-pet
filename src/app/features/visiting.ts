@@ -69,6 +69,8 @@ export function createVisiting(ctx: FeatureContext): Visiting {
     say,
     skipTrial,
     speak,
+    brawlLobby,
+    brawlMsg,
     talk,
   } = lazyFns(ctx);
   const { deps, log, electron, tracker, diary, neighbors, homePet } = ctx;
@@ -248,6 +250,13 @@ export function createVisiting(ctx: FeatureContext): Visiting {
       diary.note(Date.now(), 'visit', `${visitor.owner} 托 ${visitor.pet} 带来一句话`);
       return true;
     },
+    // 群架（X27 B4）：星型中继的报文邮箱，收不收由 brawl-live 按有没有开桌答
+    brawlMsg(msg, address) {
+      return brawlMsg(msg, address);
+    },
+    brawlLobby() {
+      return brawlLobby();
+    },
     // 切磋（X5）：协议层已验过模式、版本与名帖；关不关、忙不忙、认不认得客人在这边答。
     // 逐手局（X19）多一个 live：这边要在自己的出招面板里选自家方式
     spar(visitor, card, commit, live) {
@@ -256,8 +265,8 @@ export function createVisiting(ctx: FeatureContext): Visiting {
     reveal(visitor, nonce, line) {
       return hostReveal(visitor, nonce, line);
     },
-    sparTurn(visitor, index, action) {
-      return sparTurn(visitor, index, action);
+    sparTurn(visitor, index, action, forfeit) {
+      return sparTurn(visitor, index, action, forfeit);
     },
     // 隔空切磋（X15）：协议层已验过签名、模式、版本与名帖；关不关、忙不忙、主人答不答应在这边
     duel(visitor, card, commit, live) {
@@ -266,8 +275,8 @@ export function createVisiting(ctx: FeatureContext): Visiting {
     duelReveal(visitor, nonce, line) {
       hostDuelReveal(visitor, nonce, line);
     },
-    duelTurn(visitor, index, action) {
-      return duelTurn(visitor, index, action);
+    duelTurn(visitor, index, action, forfeit) {
+      return duelTurn(visitor, index, action, forfeit);
     },
     duelConceded(visitor, reason) {
       hostDuelConceded(visitor, reason);

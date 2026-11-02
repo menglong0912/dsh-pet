@@ -44,7 +44,17 @@ import { isIPv4 } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { z } from 'zod';
-import { BATTLE_VERSION, MOVE_IDS, SKILL_IDS, WEAPON_IDS, fight, rngFrom, statCap } from './battle';
+import {
+  BATTLE_VERSION,
+  MOVE_IDS,
+  SKILL_IDS,
+  SPAR_DAMAGE_SCALE,
+  SPAR_MAX_HIT_SHARE,
+  WEAPON_IDS,
+  fight,
+  rngFrom,
+  statCap,
+} from './battle';
 import type { FightOptions } from './battle';
 import type { Action, BattleEvent, Fighter, MoveId, SkillId, WeaponId } from './battle';
 import { MAX_STAGE } from './cultivation';
@@ -53,6 +63,15 @@ import type { VisitIdentity } from './visit-identity';
 
 /** 信标端口（7340 是插件路由前缀里的那个数） */
 export const BEACON_PORT = 47340;
+
+/**
+ * 信标端口：默认 `BEACON_PORT`；同一台机子开两个实例做联机自测时，
+ * 用环境变量 `DSH_PET_BEACON_PORT` 各走一个（不然两个实例抢同一个 UDP 端口，互相看不见）。
+ */
+export function beaconPort(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.DSH_PET_BEACON_PORT);
+  return Number.isInteger(raw) && raw > 0 && raw <= 65535 ? raw : BEACON_PORT;
+}
 const BEACON_MS = 5_000;
 const NEIGHBOR_TTL_MS = 20_000;
 /** 回发名单最多记几个：满了丢最久没收到的那位 */
@@ -244,7 +263,11 @@ export function sparFight(
   hostNonce: string,
   options?: FightOptions,
 ): BattleEvent[] {
-  return fight(host, guest, `${guestNonce}:${hostNonce}`, undefined, options);
+  return fight(host, guest, `${guestNonce}:${hostNonce}`, undefined, {
+    damageScale: SPAR_DAMAGE_SCALE,
+    maxHitShare: SPAR_MAX_HIT_SHARE,
+    ...options,
+  });
 }
 
 /**
@@ -350,6 +373,12 @@ export function isLanAddress(raw: string | undefined): boolean {
   );
 }
 
+/** 本机自己拨回来的连接：只有这些能取走群架邮箱里的报文 */
+export function isLoopback(raw: string | undefined): boolean {
+  const address = (raw ?? '').replace(/^::ffff:/, '');
+  return address === '::1' || /^127\./.test(address);
+}
+
 /** 设置页手动填的邻居：点分 IPv4（每段 0–255，不带前导零），而且是局域网地址；不合格整份配置拒收 */
 export function isPeerAddress(value: string): boolean {
   return isIPv4(value) && isLanAddress(value);
@@ -419,7 +448,7 @@ export class Neighborhood {
     const socket = createSocket({ type: 'udp4', reuseAddr: true });
     await new Promise<void>((resolve, reject) => {
       socket.once('error', reject);
-      socket.bind(this.options.port ?? BEACON_PORT, () => {
+      socket.bind(this.options.port ?? beaconPort(), () => {
         socket.off('error', reject);
         resolve();
       });
@@ -475,7 +504,8 @@ export class Neighborhood {
     this.pruneReplies(now);
     const payload = encodeBeacon({ id: this.options.id, ...self });
     const targets = uniqueTargets([
-      ...(this.options.targets?.() ?? broadcastAddresses().map((address) => ({ address, port: BEACON_PORT }))),
+      ...(this.options.targets?.() ??
+        broadcastAddresses().map((address) => ({ address, port: this.options.port ?? beaconPort() }))),
       ...(this.options.peers?.() ?? []),
       ...[...this.replies.values()].map(({ address, port }) => ({ address, port })),
     ]);
@@ -568,6 +598,11 @@ export type HostEvent =
 /** 一次最多捎几件事（攒多了丢最早的） */
 const EVENTS_MAX = 8;
 
+/** 群架的报文邮箱最多攒几封（一手一封，正常远达不到；攒满了丢最早的） */
+const BRAWL_INBOX_MAX = 64;
+/** `/v1/brawl/poll` 最多挂这么久（比一手的等时 35 秒短，让调用方自己续） */
+const BRAWL_POLL_MAX_MS = 30_000;
+
 /** /v1/spar 的应答：答应了带这边的名帖与随机数；拒绝带原因（unsupported-mode / version / bad-card 在协议层，off / busy / no-id 在 features.ts） */
 export type SparReply =
   | { ok: true; card: SparCard; nonce: string }
@@ -616,11 +651,12 @@ export type DuelReply = { ok: true; card: SparCard; nonce: string; token: string
 export type DuelRevealReply = { ok: true } | { ok: false; reason: 'mismatch' | 'late' | 'not-visiting' | 'old-host' };
 
 /**
- * 逐手局一手（X19）的应答：轮到对面出手时带回它的 action；`illegal` = 收到的出手过不了
- * `legalActions`（按掉线处理），`late` = 序号对不上 / 这一场已经收了，`not-visiting` = 没有这一场。
+ * 逐手局一手（X19）的应答：轮到对面出手时带回它的 action；`forfeit: true` 是认输通知（X26，
+ * 双方按同一场 forfeit 收场）；`illegal` = 收到的出手过不了 `legalActions`（按掉线处理），
+ * `late` = 序号对不上 / 这一场已经收了，`not-visiting` = 没有这一场。
  */
 export type SparTurnReply =
-  | { ok: true; action?: Action }
+  | { ok: true; action?: Action; forfeit?: true }
   | { ok: false; reason: 'illegal' | 'late' | 'busy' | 'bad-request' | 'not-visiting' | 'sent-home' };
 
 export interface HostHandlers {
@@ -641,8 +677,8 @@ export interface HostHandlers {
   spar(visitor: Visitor, card: SparCard, commit: string, live?: boolean): Promise<SparReply>;
   /** 客人亮随机数（X5 第 4 步，line 是它带来的赛后感言）：核对承诺后开打，对不上或超时按客人认输 */
   reveal(visitor: Visitor, nonce: string, line: string): Promise<SparRevealReply>;
-  /** 逐手局的一手（X19）：收到（或等）对方这一手；不合法 / 序号不对 / 没有这一场在这里回 */
-  sparTurn?(visitor: Visitor, index: number, action?: Action): Promise<SparTurnReply>;
+  /** 逐手局的一手（X19）：收到（或等）对方这一手；`forfeit` 是对面认输（X26）；不合法 / 序号不对 / 没有这一场在这里回 */
+  sparTurn?(visitor: Visitor, index: number, action?: Action, forfeit?: boolean): Promise<SparTurnReply>;
   /**
    * 隔空切磋（X15）的挑战：等主人答复；off / busy / declined / timeout 在这里答，
    * 答应时回这边自己的名帖与随机数（令牌与应答签名在协议层出）
@@ -651,11 +687,18 @@ export interface HostHandlers {
   /** 挑战方亮对了随机数：名帖与随机数都齐了，开演（features.ts 记账 + 演出） */
   duelReveal(visitor: Visitor, nonce: string, line: string): void;
   /** 逐手局的一手（X19，隔空切磋） */
-  duelTurn?(visitor: Visitor, index: number, action?: Action): Promise<SparTurnReply>;
+  duelTurn?(visitor: Visitor, index: number, action?: Action, forfeit?: boolean): Promise<SparTurnReply>;
   /** 挑战方没亮随机数（对不上 / 超时，协议层已判）：按它认输记一场 */
   duelConceded(visitor: Visitor, reason: 'mismatch' | 'late'): void;
   /** 客人走了：leave = 告辞（text 是告别的话，可空）；lost = 太久没动静 */
   left(visitor: Visitor, reason: 'leave' | 'lost', text: string): void;
+  /**
+   * 群架（X27）的报文：房主或别的参战方发来的一封。协议层只看信封（brawl-net 的 to/from），
+   * 这里只答「收不收」——没开桌、这场已经收了就回 false。收了由 `/v1/brawl/poll` 取走。
+   */
+  brawlMsg?(msg: unknown, address: string): boolean;
+  /** 群架的桌：没开桌返回 null；开着就报现有参战方（客人据此算自己的编号） */
+  brawlLobby?(): { players: Array<{ id: number; name: string }> } | null;
 }
 
 interface Session {
@@ -723,6 +766,10 @@ export class VisitHost {
   private readonly duelAt = new Map<string, number>();
   /** 见过的 (客人 id, ts)：防有人把抄来的敲门请求原样再发一遍 */
   private readonly knocksSeen = new Map<string, number>();
+  /** 群架报文的邮箱：等各家来取（一条一手，量很小） */
+  private brawlInbox: unknown[] = [];
+  /** 挂着的 `/v1/brawl/poll`（新报文到了就叫醒） */
+  private readonly brawlWaiters = new Set<() => void>();
   /** 接待监听的端口（验签名、给应答签名都要拼进内容） */
   private listenPort = 0;
   private readonly handlers: HostHandlers;
@@ -772,6 +819,8 @@ export class VisitHost {
     if (this.duelSession?.timer) clearTimeout(this.duelSession.timer);
     this.duelSession = null;
     this.lastDuel = null;
+    for (const wake of [...this.brawlWaiters]) wake();
+    this.brawlWaiters.clear();
     const server = this.server;
     this.server = null;
     if (!server) return;
@@ -835,6 +884,14 @@ export class VisitHost {
     }
     if (path === '/v1/duel/reveal') return this.duelReveal(address, body, res);
     if (path === '/v1/duel/turn') return this.duelTurn(address, body, res);
+    // 群架（X27）：星型中继。收发报文和隔空切磋一样不用先串门；
+    // 报文只由本机自己取走（回环），局域网里的别人取不了别人家的信
+    if (path === '/v1/brawl/lobby') return this.brawlLobby(body, res);
+    if (path === '/v1/brawl/msg') return this.brawlMsg(address, body, res);
+    if (path === '/v1/brawl/poll') {
+      if (!isLoopback(address)) return send(res, 403, { ok: false, reason: 'forbidden' });
+      return this.brawlPoll(address, body, res);
+    }
 
     const session = this.session;
     if (!session || body.token !== session.token || address !== session.visitor.address) {
@@ -878,9 +935,9 @@ export class VisitHost {
         return send(res, 200, await this.handlers.spar(session.visitor, card, commit, live));
       }
       case '/v1/spar/turn': {
-        const reply = await this.turnBody(body, (index, action) =>
+        const reply = await this.turnBody(body, (index, action, forfeit) =>
           this.handlers.sparTurn
-            ? this.handlers.sparTurn(session.visitor, index, action)
+            ? this.handlers.sparTurn(session.visitor, index, action, forfeit)
             : Promise.resolve({ ok: false, reason: 'not-visiting' as const }),
         );
         return send(res, 200, reply);
@@ -1128,6 +1185,50 @@ export class VisitHost {
     if (session.timer !== null) clearTimeout(session.timer);
   }
 
+  /** 群架的桌：开了就报现有参战方（客人按名单算自己该拿几号，再报名） */
+  private async brawlLobby(_body: Record<string, unknown>, res: ServerResponse): Promise<void> {
+    const table = this.handlers.brawlLobby?.();
+    if (!table) return send(res, 200, { ok: false, reason: 'no-table' });
+    return send(res, 200, { ok: true, players: table.players });
+  }
+
+  /** 群架报文：收不收由接线方答（没开桌就回 no-table），收了等本机来 poll 取走 */
+  private async brawlMsg(address: string, body: Record<string, unknown>, res: ServerResponse): Promise<void> {
+    const msg = body.msg;
+    if (msg === undefined || msg === null || typeof msg !== 'object') {
+      return send(res, 400, { ok: false, reason: 'bad-request' });
+    }
+    if (!this.handlers.brawlMsg || !this.handlers.brawlMsg(msg, address)) {
+      return send(res, 200, { ok: false, reason: 'no-table' });
+    }
+    this.brawlInbox.push(msg);
+    if (this.brawlInbox.length > BRAWL_INBOX_MAX) this.brawlInbox.shift();
+    for (const wake of [...this.brawlWaiters]) wake();
+    this.brawlWaiters.clear();
+    return send(res, 200, { ok: true });
+  }
+
+  /** 群架报文：挂到有新报文或等满 waitMs 为止，取走并清空 */
+  private async brawlPoll(_address: string, body: Record<string, unknown>, res: ServerResponse): Promise<void> {
+    const raw = Number(body.waitMs ?? 0);
+    const waitMs = Number.isFinite(raw) && raw > 0 ? Math.min(raw, BRAWL_POLL_MAX_MS) : 0;
+    if (this.brawlInbox.length === 0 && waitMs > 0) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.brawlWaiters.delete(finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, waitMs);
+        this.brawlWaiters.add(finish);
+      });
+    }
+    return send(res, 200, { ok: true, msgs: this.brawlInbox.splice(0) });
+  }
+
   /** 逐手局的隔空切磋一手（X19）：令牌与来源地址对上才交给 features；结构不对当 bad-request */
   private async duelTurn(address: string, body: Record<string, unknown>, res: ServerResponse): Promise<void> {
     const token = typeof body.token === 'string' ? body.token : '';
@@ -1135,21 +1236,24 @@ export class VisitHost {
     if (!session || session.token !== token || session.visitor.address !== address) {
       return send(res, 200, { ok: false, reason: 'not-visiting' });
     }
-    const reply = await this.turnBody(body, (index, action) =>
+    const reply = await this.turnBody(body, (index, action, forfeit) =>
       this.handlers.duelTurn
-        ? this.handlers.duelTurn(session.visitor, index, action)
+        ? this.handlers.duelTurn(session.visitor, index, action, forfeit)
         : Promise.resolve({ ok: false, reason: 'not-visiting' as const }),
     );
     return send(res, 200, reply);
   }
 
-  /** 逐手局请求体的结构校验（序号、出手形状）：过了才交给 features 判 `legalActions` */
+  /** 逐手局请求体的结构校验（序号、出手形状、认输标记）：过了才交给 features 判 `legalActions` */
   private async turnBody(
     body: Record<string, unknown>,
-    ask: (index: number, action: Action | undefined) => Promise<SparTurnReply>,
+    ask: (index: number, action: Action | undefined, forfeit: boolean) => Promise<SparTurnReply>,
   ): Promise<SparTurnReply> {
     const index = parseTurnIndex(body.index);
     if (index === null) return { ok: false, reason: 'bad-request' };
+    if (body.forfeit !== undefined && body.forfeit !== true && body.forfeit !== false)
+      return { ok: false, reason: 'bad-request' };
+    const forfeit = body.forfeit === true;
     let action: Action | undefined;
     if (body.action !== undefined && body.action !== null) {
       const parsed = parseSparAction(body.action);
@@ -1157,7 +1261,9 @@ export class VisitHost {
       if (!parsed) return { ok: false, reason: 'bad-request' };
       action = parsed;
     }
-    return ask(index, action);
+    // 认输不带出手；两样一起发说明对端实现有问题，不猜它的意思
+    if (forfeit && action) return { ok: false, reason: 'bad-request' };
+    return ask(index, action, forfeit);
   }
 
   /** 超时没亮随机数：主人家按挑战方认输记一场，槽位腾出来；迟到的 reveal 还能认出来回 late */
@@ -1369,6 +1475,81 @@ export async function sendNote(host: HostAddress, body: { token: string; text: s
   return { ok: false, reason: result.reason === 'not-found' ? 'old-host' : 'not-visiting' };
 }
 
+/** 群架报文发出去的结果：no-table = 对面没开桌（或这场已经收了）；old-host = 对面版本太旧 */
+export type BrawlMailReply = { ok: true } | { ok: false; reason: 'no-table' | 'bad-request' };
+
+export type BrawlLobbyReply =
+  { ok: true; players: Array<{ id: number; name: string }> } | { ok: false; reason: 'no-table' | 'unreachable' };
+
+/**
+ * 问一声「你家开群架桌了吗」：开着就报现有参战方，客人按名单算自己的编号。
+ * 连不上返回 unreachable（不抛错：菜单里挑一家不在线的邻居是常事）。
+ */
+export async function brawlLobbyOf(host: HostAddress, timeoutMs = 3_000): Promise<BrawlLobbyReply> {
+  try {
+    const result = await post(host, '/v1/brawl/lobby', {}, timeoutMs);
+    if (result.ok !== true || !Array.isArray(result.players)) return { ok: false, reason: 'no-table' };
+    const players = result.players
+      .map((item) => item as Record<string, unknown>)
+      .map((item) => ({ id: Number(item.id), name: String(item.name ?? '') }))
+      .filter((item) => Number.isInteger(item.id) && item.id >= 0);
+    return { ok: true, players };
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
+}
+
+/**
+ * 发一封群架报文（X27）给某个参战方；连不上时抛错，由接线方按掉线处理。
+ * 信封本身（`to` / `from`）由 brawl-net 填，这里只负责递过去。
+ */
+export async function postBrawlMsg(host: HostAddress, msg: unknown, timeoutMs = 5_000): Promise<BrawlMailReply> {
+  const result = await post(host, '/v1/brawl/msg', { msg }, timeoutMs);
+  if (result.ok === true) return { ok: true };
+  const reason = typeof result.reason === 'string' ? result.reason : '';
+  // 旧版本没有这条路径：404 落成 not-found，和「没开桌」不是一回事，这里都归成收不到
+  return { ok: false, reason: reason === 'no-table' ? 'no-table' : 'bad-request' };
+}
+
+/**
+ * 同一收件地址的发送排成一列（X27 联机）：每封报文都是一次独立 POST，
+ * 并发发出去时接收端处理的先后并不保证；brawl-net 只收 index 连续的一手，
+ * 乱序到达的那一手会被当成跳号丢掉，整桌就此卡住。
+ */
+export interface SendChain {
+  /** 把这次发送接到该地址上一次发送之后；返回这一次的 promise（失败照常交给调用方，队列不断） */
+  push(key: string, send: () => Promise<unknown>): Promise<unknown>;
+}
+
+export function createSendChain(): SendChain {
+  const tails = new Map<string, Promise<unknown>>();
+  return {
+    push(key, send) {
+      const tail = tails.get(key) ?? Promise.resolve();
+      const run = tail.then(send);
+      // 队列尾巴吞掉成败：这一次失败不能卡住后面同地址的报文
+      tails.set(
+        key,
+        run.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+      return run;
+    },
+  };
+}
+
+/**
+ * 取走这家的群架报文（没有就挂到 `waitMs`）。连不上抛错。
+ * 返回的报文是线上原样（`BrawlNetMsg`），由 brawl-net 的 `receive` 判要不要。
+ */
+export async function pollBrawlMsgs(host: HostAddress, waitMs: number, signal?: AbortSignal): Promise<unknown[]> {
+  const result = await post(host, '/v1/brawl/poll', { waitMs }, waitMs + 5_000, signal);
+  const msgs = result.msgs;
+  return Array.isArray(msgs) ? msgs : [];
+}
+
 /** /v1/spar 拒绝时客人那边要能说人话的全部原因（mismatch / late 只出现在 reveal 的应答里） */
 export type SparFailure = Exclude<SparReply, { ok: true }>['reason'];
 
@@ -1411,11 +1592,12 @@ export async function sendSpar(
 
 /**
  * 逐手局的一手（X19，串门切磋）：轮到自家出手时带 action，轮到对面时不带、挂着等它回 action。
+ * 认输（X26）带 `forfeit: true`，成功应答会带 `forfeit: true` 通知。
  * 等的一方 35 秒还没收到就当掉线（`TURN_WAIT_MS`），连不上 / 超时都抛错，由调用方按掉线收。
  */
 export async function sendSparTurn(
   host: HostAddress,
-  body: { token: string; index: number; action?: Action },
+  body: { token: string; index: number; action?: Action; forfeit?: boolean },
   signal?: AbortSignal,
 ): Promise<SparTurnReply> {
   return sendTurn(host, '/v1/spar/turn', body, signal);
@@ -1424,11 +1606,12 @@ export async function sendSparTurn(
 async function sendTurn(
   host: HostAddress,
   path: '/v1/spar/turn' | '/v1/duel/turn',
-  body: { token: string; index: number; action?: Action },
+  body: { token: string; index: number; action?: Action; forfeit?: boolean },
   signal?: AbortSignal,
 ): Promise<SparTurnReply> {
   const result = await post(host, path, body, TURN_WAIT_MS, signal);
   if (result.ok === true) {
+    if (result.forfeit === true) return { ok: true, forfeit: true };
     if (result.action === undefined || result.action === null) return { ok: true };
     const action = parseSparAction(result.action);
     return action ? { ok: true, action } : { ok: false, reason: 'illegal' };
@@ -1548,7 +1731,7 @@ export async function sendDuel(
 /** 逐手局的一手（X19，隔空切磋）：同 `sendSparTurn`，只是走 /v1/duel/turn 的令牌 */
 export async function sendDuelTurn(
   host: HostAddress,
-  body: { token: string; index: number; action?: Action },
+  body: { token: string; index: number; action?: Action; forfeit?: boolean },
   signal?: AbortSignal,
 ): Promise<SparTurnReply> {
   return sendTurn(host, '/v1/duel/turn', body, signal);

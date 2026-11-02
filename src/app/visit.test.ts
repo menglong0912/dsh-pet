@@ -6,9 +6,13 @@ import { createServer, request } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { NetworkInterfaceInfo } from 'node:os';
 import {
+  beaconPort,
+  brawlLobbyOf,
+  BEACON_PORT,
   broadcastAddresses,
   cardFighter,
   cleanText,
+  createSendChain,
   encodeBeacon,
   encodeProbe,
   isLanAddress,
@@ -23,6 +27,8 @@ import {
   parseSparCard,
   parseTurnIndex,
   PING_MS,
+  pollBrawlMsgs,
+  postBrawlMsg,
   randomSparNonce,
   sendDuel,
   sendDuelReveal,
@@ -1914,6 +1920,83 @@ test('逐手局：对面出的招不合法、等超时，都按掉线', async ()
   assert.deepEqual(illegal, { ok: false, reason: 'illegal' });
 });
 
+test('逐手局协议：forfeit 经 /v1/spar/turn 结构校验后递给 sparTurn，应答带回认输通知', async () => {
+  const seen: Array<{ index: number; action: unknown; forfeit: boolean | undefined }> = [];
+  await withHost(
+    {
+      spar: async () => ({ ok: true, card: sparCardOf(aFighter, 4), nonce: 'b'.repeat(64) }),
+      reveal: async () => ({ ok: true }),
+      sparTurn: async (_visitor, index, action, forfeit) => {
+        seen.push({ index, action, forfeit });
+        return { ok: true, forfeit: true };
+      },
+    },
+    async (host, port) => {
+      const target = { address: '127.0.0.1', port };
+      const [answer] = await knockAndAnswer(host, port, true);
+      const token = answer.ok ? answer.token : '';
+      await sendSpar(target, { token, mode: SPAR_LIVE_MODE, card: aCard, commit: sparCommit('c'.repeat(64)) });
+      await sendReveal(target, { token, nonce: 'c'.repeat(64), line: '' });
+
+      assert.deepEqual(await sendSparTurn(target, { token, index: 2, forfeit: true }), {
+        ok: true,
+        forfeit: true,
+      });
+      assert.deepEqual(seen, [{ index: 2, action: undefined, forfeit: true }]);
+
+      // 认输不能夹带出手；forfeit 只认布尔值。结构不对的不会递进这一场
+      assert.deepEqual(await sendSparTurn(target, { token, index: 2, forfeit: true, action: { kind: 'unarmed' } }), {
+        ok: false,
+        reason: 'bad-request',
+      });
+      assert.deepEqual(await sendSparTurn(target, { token, index: 2, forfeit: 'yes' as never }), {
+        ok: false,
+        reason: 'bad-request',
+      });
+      assert.equal(seen.length, 1);
+    },
+  );
+});
+
+test('隔空切磋逐手局协议：forfeit 标记同样过 turnBody 校验并带回认输通知', async () => {
+  const hostIdentity = generateVisitIdentity();
+  const challenger = generateVisitIdentity();
+  const hostNonce = 'b'.repeat(64);
+  const seen: Array<{ index: number; action: unknown; forfeit: boolean | undefined }> = [];
+  await withHost(
+    {
+      identity: hostIdentity,
+      duel: async () => ({ ok: true, card: sparCardOf(aFighter, 4), nonce: hostNonce }),
+      duelReveal: () => undefined,
+      duelTurn: async (_visitor, index, action, forfeit) => {
+        seen.push({ index, action, forfeit });
+        return { ok: true, forfeit: true };
+      },
+    },
+    async (_host, port) => {
+      const target = { address: '127.0.0.1', port };
+      const reply = await sendDuel(target, hostIdentity.id, me, challenger, {
+        mode: SPAR_LIVE_MODE,
+        card: aCard,
+        commit: sparCommit('c'.repeat(64)),
+      });
+      assert.ok(reply.ok, `逐手挑战没应：${JSON.stringify(reply)}`);
+      const token = reply.ok ? reply.token : '';
+      assert.deepEqual(await sendDuelReveal(target, { token, nonce: 'c'.repeat(64), line: '' }), { ok: true });
+      assert.deepEqual(await sendDuelTurn(target, { token, index: 0, forfeit: true }), {
+        ok: true,
+        forfeit: true,
+      });
+      assert.deepEqual(seen, [{ index: 0, action: undefined, forfeit: true }]);
+      assert.deepEqual(await sendDuelTurn(target, { token, index: 0, forfeit: true, action: { kind: 'unarmed' } }), {
+        ok: false,
+        reason: 'bad-request',
+      });
+      assert.equal(seen.length, 1);
+    },
+  );
+});
+
 test('隔空切磋逐手局：/v1/duel/turn 用应战后留着的令牌；自动局 reveal 后会话收掉', async () => {
   const hostIdentity = generateVisitIdentity();
   const challenger = generateVisitIdentity();
@@ -1977,4 +2060,137 @@ test('隔空切磋逐手局：/v1/duel/turn 用应战后留着的令牌；自动
       });
     },
   );
+});
+
+test('群架的桌：没开桌回 no-table，开着报参战方；连不上的地址返回 unreachable', async () => {
+  let table: { players: Array<{ id: number; name: string }> } | null = null;
+  await withHost(
+    {
+      brawlMsg: () => !!table,
+      brawlLobby: () => table,
+    },
+    async (_host, port) => {
+      const box = { address: '127.0.0.1', port };
+      assert.deepEqual(await brawlLobbyOf(box), { ok: false, reason: 'no-table' });
+      table = {
+        players: [
+          { id: 0, name: '阿黄' },
+          { id: 1, name: '小白' },
+        ],
+      };
+      assert.deepEqual(await brawlLobbyOf(box), {
+        ok: true,
+        players: [
+          { id: 0, name: '阿黄' },
+          { id: 1, name: '小白' },
+        ],
+      });
+      // 没人听的端口：不抛错，直接 unreachable
+      assert.deepEqual(await brawlLobbyOf({ address: '127.0.0.1', port: 1 }, 500), {
+        ok: false,
+        reason: 'unreachable',
+      });
+    },
+  );
+});
+
+test('群架报文邮箱：没开桌回 no-table；开桌后发两封能一次取走，取空了再挂就返回空', async () => {
+  let open = false;
+  const got: unknown[] = [];
+  await withHost(
+    {
+      brawlMsg: (msg) => {
+        if (!open) return false;
+        got.push(msg);
+        return true;
+      },
+    },
+    async (_host, port) => {
+      const box = { address: '127.0.0.1', port };
+      const before = await postBrawlMsg(box, { kind: 'join', from: 1, to: 0 });
+      assert.deepEqual(before, { ok: false, reason: 'no-table' });
+      open = true;
+      assert.deepEqual(await postBrawlMsg(box, { kind: 'join', from: 1, to: 0 }), { ok: true });
+      assert.deepEqual(await postBrawlMsg(box, { kind: 'move', from: 1, to: 0, index: 0 }), { ok: true });
+      assert.equal(got.length, 2, '接线方收到了两封');
+      const first = await pollBrawlMsgs(box, 0);
+      assert.deepEqual(first, [
+        { kind: 'join', from: 1, to: 0 },
+        { kind: 'move', from: 1, to: 0, index: 0 },
+      ]);
+      // 取空了：挂 100ms 没新报文就返回空
+      const started = Date.now();
+      const second = await pollBrawlMsgs(box, 100);
+      assert.deepEqual(second, []);
+      assert.ok(Date.now() - started >= 80, '确实挂了一会儿');
+    },
+  );
+});
+
+test('信标端口：默认 47340，环境变量给了合用的端口就用它（同机两实例自测）', () => {
+  assert.equal(beaconPort({}), BEACON_PORT);
+  assert.equal(beaconPort({ DSH_PET_BEACON_PORT: '47341' }), 47341);
+  // 乱填的当没填
+  for (const bad of ['0', '-1', '70000', 'abc', ''])
+    assert.equal(beaconPort({ DSH_PET_BEACON_PORT: bad }), BEACON_PORT);
+});
+
+test('群架发送链：同一地址的报文按发出顺序到达，先发的慢也不会被后发的超车', async () => {
+  const chain = createSendChain();
+  const started: number[] = [];
+  const done: number[] = [];
+  const make =
+    (n: number): (() => Promise<void>) =>
+    () => {
+      started.push(n);
+      // 第一封故意慢：没有串行时后面的会先完成
+      return new Promise((resolve) =>
+        setTimeout(
+          () => {
+            done.push(n);
+            resolve();
+          },
+          n === 0 ? 30 : 0,
+        ),
+      );
+    };
+  chain.push('10.0.0.2:7340', make(0));
+  chain.push('10.0.0.2:7340', make(1));
+  chain.push('10.0.0.2:7340', make(2));
+  await chain.push('10.0.0.2:7340', make(3));
+  assert.deepEqual(started, [0, 1, 2, 3]);
+  assert.deepEqual(done, [0, 1, 2, 3]);
+});
+
+test('群架发送链：一封失败了，后面同地址的照发不误', async () => {
+  const chain = createSendChain();
+  const done: string[] = [];
+  const failed = chain.push('10.0.0.2:7340', () => Promise.reject(new Error('连不上')));
+  await assert.rejects(failed, /连不上/);
+  await chain.push('10.0.0.2:7340', () => {
+    done.push('after');
+    return Promise.resolve();
+  });
+  assert.deepEqual(done, ['after']);
+});
+
+test('群架发送链：不同地址各走各的，不会被别家卡住', async () => {
+  const chain = createSendChain();
+  const order: string[] = [];
+  let release = (): void => undefined;
+  const slow = chain.push('10.0.0.2:7340', () =>
+    new Promise<void>((resolve) => {
+      release = resolve;
+    }).then(() => {
+      order.push('slow');
+    }),
+  );
+  await chain.push('10.0.0.3:7340', () => {
+    order.push('fast');
+    return Promise.resolve();
+  });
+  assert.deepEqual(order, ['fast']);
+  release();
+  await slow;
+  assert.deepEqual(order, ['fast', 'slow']);
 });

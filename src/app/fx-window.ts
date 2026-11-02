@@ -127,6 +127,11 @@ export interface FxSpec {
     behind: [number, number];
     second: 'hit' | 'blocked' | 'decoy' | 'miss' | 'none';
   };
+  /**
+   * 静止贴图（X24）：不飞，就铺在 `from`（= `to`）那里 ms 毫秒，淡入淡出；`shake` 是左右抖动的像素，
+   * `spin` 是慢慢转的速度（度 / 秒）。白袍、门、贴在身上的符纹用它
+   */
+  hold?: { ms: number; shake: number; spin: number; squash: number };
 }
 
 /**
@@ -181,6 +186,23 @@ const FX_SIZE: Record<FxAssetName, { size: number; spin?: number; grow?: number 
   金龙: { size: 0.9, grow: 0.55 },
   清风: { size: 0.5 },
   '命中-龙吟': { size: 0.56 },
+  // X21：万我大手印的巨掌罩住对方（X24 从 0.62 放到 0.8，原来像在头边挥手）；古人虚影要看得清是谁
+  // （X24 从 0.42 放到 0.62）；逆流护身印的白袍铺在出手方身上，约一身高
+  巨掌: { size: 0.8, grow: 0.45 },
+  古人虚影: { size: 0.62 },
+  逆流袍: { size: 0.72 },
+  // X22：鬼手、无头鬼影都比宠物大一点（掐住 / 罩住对方），门立得比人高、符画按巴掌大、血珠按道具大小
+  鬼手: { size: 0.4 },
+  无头鬼影: { size: 0.52 },
+  门: { size: 0.78 },
+  符画: { size: 0.5 },
+  血珠: { size: 0.12 },
+  // X25：鲸息是掌间那颗水球（约身体高的一半），鲸波是横向水浪；
+  // 深渊符阵铺在两只脚下、深渊黑雾横着盖过擂台（静止贴图，大小按长边算）
+  鲸息: { size: 0.36 },
+  鲸波: { size: 0.9 },
+  深渊符阵: { size: 1.5 },
+  深渊黑雾: { size: 1.5 },
   // 历练（Y2）：一转蛊和对手招式的飞行物
   犬影: { size: 0.28 },
   纸鹤: { size: 0.18 },
@@ -222,14 +244,22 @@ function clamp(value: number, size: number, start: number, extent: number): numb
  * 只有一边（渡劫没有对手、对手窗口还没开）就按那一只排；谁都不知道在哪时回 null（这一场不放特效）。
  */
 export function fxBounds(self: Stage | null, foe: Stage | null, workArea: Rect): Rect | null {
-  const stages = [self, foe].filter((stage): stage is Stage => !!stage && stage.width > 0 && stage.height > 0);
-  if (stages.length === 0) return null;
-  const left = Math.min(...stages.map((stage) => stage.x));
-  const right = Math.max(...stages.map((stage) => stage.x + stage.width));
-  const top = Math.min(...stages.map((stage) => stage.y));
-  const bottom = Math.max(...stages.map((stage) => stage.y + stage.height));
+  return fxBoundsAll([self, foe], workArea);
+}
+
+/**
+ * 任意多只舞台的并集（群架用）：给出 N 只的联合矩形，特效窗口盖住整圈。
+ * 只认宽高都大于 0 的舞台；一只都没有时回 null。
+ */
+export function fxBoundsAll(stages: readonly (Stage | null)[], workArea: Rect): Rect | null {
+  const real = stages.filter((stage): stage is Stage => !!stage && stage.width > 0 && stage.height > 0);
+  if (real.length === 0) return null;
+  const left = Math.min(...real.map((stage) => stage.x));
+  const right = Math.max(...real.map((stage) => stage.x + stage.width));
+  const top = Math.min(...real.map((stage) => stage.y));
+  const bottom = Math.max(...real.map((stage) => stage.y + stage.height));
   // 上方余量按高一些的那只的画布高算（够 arc 的顶点，slam 的高抛和乌云也放得下）
-  const room = Math.round(Math.max(...stages.map((stage) => stage.height)) * TOP_ROOM);
+  const room = Math.round(Math.max(...real.map((stage) => stage.height)) * TOP_ROOM);
   const width = Math.round(right - left + 2 * SIDE_ROOM);
   const height = Math.round(bottom - top + room + SIDE_ROOM);
   return {
@@ -262,6 +292,60 @@ export function feetPoint(stage: Stage): number {
 }
 
 /**
+ * 静止贴图（X24）：铺在出手方（白袍）/ 对方（贴住的符纹）/ 两只中间（门），按那一边的身高算大小。
+ * 不飞、不画命中特效，到 `ms` 自己淡出。
+ */
+function holdSpec(
+  shot: Shot,
+  from: Stage | null,
+  to: Stage | null,
+  bounds: Rect,
+  shadow: boolean,
+): FxSpec | null {
+  const hold = shot.hold;
+  if (!hold) return null;
+  const anchor = hold.anchor ?? 'self';
+  const self = from;
+  const foe = to;
+  if ((anchor !== 'foe' && !self) || (anchor !== 'self' && !foe)) return null;
+  let center: [number, number];
+  let basis: number;
+  if (anchor === 'mid' && self && foe) {
+    const a = bodyPoint(self);
+    const b = bodyPoint(foe);
+    center = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    basis = Math.max(self.height, foe.height);
+  } else {
+    const stage = (anchor === 'self' ? self : foe) as Stage;
+    center = bodyPoint(stage);
+    basis = stage.height;
+  }
+  const size = Math.max(8, Math.round(FX_SIZE[shot.kind].size * basis));
+  // `dy` 按舞台高往下挪：白袍铺在身体上而不是连头一起盖住
+  const drop = Math.round((hold.dy ?? 0) * basis);
+  const at: [number, number] = [Math.round(center[0] - bounds.x), Math.round(center[1] + drop - bounds.y)];
+  return {
+    kind: shot.kind,
+    hitFx: shot.kind,
+    track: shot.track,
+    flightMs: hold.ms,
+    mirror: false,
+    from: at,
+    to: at,
+    size,
+    hitSize: 0,
+    hitAt: at,
+    spin: 0,
+    lift: 0,
+    grow: 1,
+    miss: false,
+    pieces: [{ delay: 0, hue: 0 }],
+    ...(shadow ? { shadow: true } : {}),
+    hold: { ms: hold.ms, shake: Math.round(hold.shake ?? 0), spin: hold.spin ?? 0, squash: hold.squash ?? 1 },
+  };
+}
+
+/**
  * 一发飞行物的几何（纯函数，可测）：两只的舞台 → 窗口内坐标的 `FxSpec`。
  * @param shot 时间线那一步带的飞行物
  * @param who 出手方（0 = 自家宠物，1 = 对手）；天雷（`sky`）是渡劫者自己
@@ -275,13 +359,28 @@ export function fxSpec(
   bounds: Rect,
   shadow = false,
 ): FxSpec | null {
+  return fxSpecBetween(shot, stages[who], stages[(who ^ 1) as 0 | 1], bounds, shadow);
+}
+
+/**
+ * 任意两只之间的飞行物几何（群架用）：从 `from` 打到 `to`，不假设谁在左谁在右。
+ * `fxSpec` 只是它的 0/1 查表包装，1v1 行为不变。
+ */
+export function fxSpecBetween(
+  shot: Shot,
+  fromStage: Stage | null,
+  toStage: Stage | null,
+  bounds: Rect,
+  shadow = false,
+): FxSpec | null {
+  if (shot.hold) return holdSpec(shot, fromStage, toStage, bounds, shadow);
   let start: [number, number];
   let end: [number, number];
   let target: Stage;
   let behind: [number, number] | null = null;
   if (shot.sky) {
     // 天雷：落在渡劫者头顶，乌云悬在正上方
-    const self = stages[who];
+    const self = fromStage;
     if (!self) return null;
     target = self;
     // 被泡泡挡下就劈在泡泡顶上；被躲开就劈在身后的地上
@@ -289,8 +388,8 @@ export function fxSpec(
     end = shot.miss ? toScreen(self, BODY.x1 + 30, FEET_Y) : head;
     start = [head[0], self.y - self.height * CLOUD_ABOVE];
   } else {
-    const from = stages[who];
-    const to = stages[(who ^ 1) as 0 | 1];
+    const from = fromStage;
+    const to = toStage;
     if (!from || !to) return null;
     target = to;
     const hand = handPoint(from, shot.hand);
@@ -334,7 +433,7 @@ export function fxSpec(
   }
   const art = FX_SIZE[shot.kind];
   // 金龙比宠物大：按两只里大一点的那只算（切磋时客人小一号，不能把龙画得比出手方还小）
-  const basis = shot.track === 'surge' ? Math.max(target.height, stages[who]?.height ?? 0) : target.height;
+  const basis = shot.track === 'surge' ? Math.max(target.height, fromStage?.height ?? 0) : target.height;
   const px = (ratio: number): number => Math.max(8, Math.round(ratio * basis));
   const size = px(art.size);
   // 分身 / 魂影挨的那一下：水母碎成泡泡、魂影碎成魂屑（不画法宝自己的命中特效）
@@ -406,6 +505,8 @@ export interface FxElectron {
 export interface FxWindow {
   /** 放一发（时间线到点交给这里）；窗口没开成、拿不到舞台时什么都不做 */
   fire(shot: Shot, who: 0 | 1): void;
+  /** 按编号从第 from 只打到第 to 只（群架用）：任意两只，不假设 0/1 */
+  fireAt(shot: Shot, from: number, to: number): void;
   /** 重摆位置（宠物走位了、对手窗口挪了）：正在飞的跟着挪同样的位移，才不会在屏幕上跳一下 */
   place(): void;
   /** 过一会儿关掉（先让最后那一下的命中特效放完） */
@@ -419,7 +520,7 @@ export interface FxWindow {
  * @param electron 只用到 BrowserWindow
  * @param pageUrl 本机服务的 `GET /app/fx`
  * @param assets 贴图前缀与清单（页面加载完先预加载）
- * @param stages 取两只现在的舞台（`[自家, 对手]`；没有对手时那一项是 null）
+ * @param stages 取现在的舞台（`[自家, 对手]` 是 1v1 的传法；群架传 N 只，顺序按编号）
  * @param workArea 取夹进去的工作区（按自家宠物所在的那块屏）
  * @param warn 窗口没开成 / 页面没加载好：只打第一次的一行日志
  * @param options.foeShadow 对手是心魔：它放出来的（`who` = 1）用心魔的配色画
@@ -428,16 +529,22 @@ export function openFxWindow(
   electron: FxElectron,
   pageUrl: string,
   assets: FxAssets,
-  stages: () => [Stage | null, Stage | null],
+  stages: () => readonly (Stage | null)[],
   workArea: () => Rect,
   warn: (message: string) => void,
   options: { foeShadow?: boolean } = {},
 ): FxWindow {
-  const first = fxBounds(stages()[0], stages()[1], workArea());
+  const first = fxBoundsAll(stages(), workArea());
   if (!first) {
     // 连窗口都摆不了（还没收到自家宠物的位置）：这一场没有特效层，其余照常
     warn('特效：还不知道宠物在哪，这一场不放特效');
-    return { fire: () => undefined, place: () => undefined, close: () => undefined, pin: () => undefined };
+    return {
+      fire: () => undefined,
+      fireAt: () => undefined,
+      place: () => undefined,
+      close: () => undefined,
+      pin: () => undefined,
+    };
   }
   let bounds = first;
   const win = new electron.BrowserWindow({
@@ -510,17 +617,34 @@ export function openFxWindow(
     });
   return {
     fire(shot, who) {
+      const all = stages();
       if (!pinned) {
-        const next = fxBounds(stages()[0], stages()[1], workArea());
+        const next = fxBoundsAll(all, workArea());
         if (next) move(next);
       }
-      const spec = fxSpec(shot, who, stages(), bounds, options.foeShadow === true && who === 1);
+      const spec = fxSpecBetween(
+        shot,
+        all[who] ?? null,
+        all[(who ^ 1) as 0 | 1] ?? null,
+        bounds,
+        options.foeShadow === true && who === 1,
+      );
+      if (!spec) return;
+      run(`fx.fire(${JSON.stringify(spec)})`);
+    },
+    fireAt(shot, from, to) {
+      const all = stages();
+      if (!pinned) {
+        const next = fxBoundsAll(all, workArea());
+        if (next) move(next);
+      }
+      const spec = fxSpecBetween(shot, all[from] ?? null, all[to] ?? null, bounds);
       if (!spec) return;
       run(`fx.fire(${JSON.stringify(spec)})`);
     },
     place() {
       if (pinned) return;
-      const next = fxBounds(stages()[0], stages()[1], workArea());
+      const next = fxBoundsAll(stages(), workArea());
       if (next) move(next);
     },
     pin(on) {
@@ -577,12 +701,13 @@ function piece(src, size, hue, shadow) {
   return node;
 }
 
-/** 写一帧：平移到中心点、镜像、转角、缩放（顺序见文件头的朝向说明） */
-function place(node, size, mirror, x, y, angle, scale, alpha) {
+/** 写一帧：平移到中心点、镜像、竖向压扁（俯视贴图铺地用）、转角、缩放（顺序见文件头的朝向说明） */
+function place(node, size, mirror, x, y, angle, scale, alpha, squash) {
   var half = size / 2;
   node.style.transform =
     'translate(' + (x - half).toFixed(1) + 'px,' + (y - half).toFixed(1) + 'px)' +
     ' scale(' + (mirror ? -1 : 1) + ',1)' +
+    (squash && squash !== 1 ? ' scale(1,' + squash.toFixed(3) + ')' : '') +
     ' rotate(' + angle.toFixed(4) + 'rad)' +
     ' scale(' + scale.toFixed(3) + ')';
   node.style.opacity = alpha.toFixed(3);
@@ -702,6 +827,19 @@ function loop(now) {
     item.left += dt;
     var used = item.left - item.delay;
     if (used < 0) continue; // 还没起飞（齐发时逐发错开）
+    if (s.hold) {
+      // 静止贴图（X24）：原地淡入、抖 / 慢慢转，到点淡出；不飞、不画命中特效
+      var fadeIn = Math.min(1, used / 200);
+      var fadeOut = s.hold.ms - used < 220 ? Math.max(0, (s.hold.ms - used) / 220) : 1;
+      var wobble = s.hold.shake ? Math.sin(used / 45) * s.hold.shake : 0;
+      var held = s.hold.spin ? ((s.hold.spin * used) / 1000) * Math.PI / 180 : 0;
+      place(item.node, s.size, false, s.from[0] + wobble, s.from[1], held, 1, Math.min(fadeIn, fadeOut), s.hold.squash);
+      if (used >= s.hold.ms) {
+        item.node.remove();
+        FX.items.splice(i, 1);
+      }
+      continue;
+    }
     if (s.boomerang) {
       if (!boomerang(item, used)) {
         item.node.remove();
@@ -797,6 +935,14 @@ window.fx = {
               totalMs: Number(spec.boomerang.totalMs),
               behind: [spec.boomerang.behind[0], spec.boomerang.behind[1]],
               second: String(spec.boomerang.second),
+            }
+          : null,
+        hold: spec.hold
+          ? {
+              ms: Number(spec.hold.ms) || 0,
+              shake: Number(spec.hold.shake) || 0,
+              spin: Number(spec.hold.spin) || 0,
+              squash: Number(spec.hold.squash) || 1,
             }
           : null,
         from: [spec.from[0], spec.from[1]],
