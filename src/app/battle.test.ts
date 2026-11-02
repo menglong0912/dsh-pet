@@ -1458,11 +1458,21 @@ test('guideAction：生花 / 收头 / 控制链 / 补位 / 烟花（X26 额度�
   assert.deepEqual(guideAction(view({ hp: [354, 142] })), { kind: 'skill', skill: 'whale-song' });
   // 自己是 1 号：血量按自己那一格看
   assert.deepEqual(guideAction(view({ self: 1, hp: [354, 283] })), { kind: 'skill', skill: 'bloom' });
-  // 对方被控着（跳过的那拍还没消化）：这一手绝不丢控制，先上万我挡三下
+  // 对方被控着（跳过的那拍还没消化）：这一手绝不丢控制，先上鬼画封它一门被动
   assert.deepEqual(guideAction(view({ foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: true } })), {
     kind: 'skill',
-    skill: 'myriad-self',
+    skill: 'ghost-painting',
   });
+  // 鬼画不在手上，换吃苦吃亏（吃泡泡 / 魂影回血，没得吃就咬一口）
+  assert.deepEqual(
+    guideAction(
+      view(
+        { foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: true } },
+        { skills: ['whale-song', 'eat-hardship'], used: [] },
+      ),
+    ),
+    { kind: 'skill', skill: 'eat-hardship' },
+  );
   // 万我 / 墨汁都没了，补位换成必中爆发
   assert.deepEqual(
     guideAction(
@@ -1505,7 +1515,7 @@ test('guideAction：生花 / 收头 / 控制链 / 补位 / 烟花（X26 额度�
     },
     foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS] },
   });
-  assert.deepEqual(guideAction(legacy(0)), { kind: 'skill', skill: 'myriad-self' });
+  assert.deepEqual(guideAction(legacy(0)), { kind: 'skill', skill: 'ghost-painting' });
   assert.deepEqual(guideAction(legacy(1)), { kind: 'skill', skill: 'farewell-wind' });
   // 更旧的客户端连出手计数也没有：不做穿插，按顺序直接放
   assert.deepEqual(guideAction(legacy()), { kind: 'skill', skill: 'farewell-wind' });
