@@ -616,7 +616,7 @@ export function createBrawlLiveFeature(ctx: FeatureContext): BrawlLiveFeature {
       return actions;
     }
     actions.set(`${MENU_BRAWL_GROUP}/联机开桌`, () => void openTable());
-    // 加入哪家：菜单总共只有 20 项名额，改成一项「加入邻居…」弹窗列全部邻居
+    // 加入哪家：菜单总共只有 24 项名额，改成一项「加入邻居…」弹窗列全部邻居
     const neighbors = ctx.state.neighborhood?.list() ?? [];
     const joinLabel =
       neighbors.length === 0
