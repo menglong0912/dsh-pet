@@ -1439,7 +1439,7 @@ test('statsBrief / fighterSheet：切磋时把对方的属性、法宝、招式�
   );
 });
 
-test('guideAction：生花 / 收头 / 控制链 / 补位 / 烟花（X26 额度制新攻略）', () => {
+test('guideAction：生花 / 收头 / 万我 / 蓝鲸 / 法宝平推（X26 额度制新攻略）', () => {
   const view = (over: Partial<BattleView> = {}, you: Partial<BattleView['you']> = {}): BattleView => ({
     self: 0,
     hp: [354, 354],
@@ -1448,37 +1448,106 @@ test('guideAction：生花 / 收头 / 控制链 / 补位 / 烟花（X26 额度�
     foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: false },
     ...over,
   });
-  // 开局：控制链几率最高的鲸歌先出
-  assert.deepEqual(guideAction(view()), { kind: 'skill', skill: 'whale-song' });
+  // 对手没鬼眼：开局先铺万我（三层魂影白挡三下），不是先控
+  const foeNoEye = { weapons: [...WEAPON_IDS], skills: SKILL_IDS.filter((s) => s !== 'ghost-eye'), controlled: false };
+  assert.deepEqual(guideAction(view({ foe: foeNoEye })), { kind: 'skill', skill: 'myriad-self' });
+  // 对手带鬼眼（X22）：魂影一次都替不了，万我等于白扔一手 → 直接丢法宝
+  assert.deepEqual(guideAction(view()), { kind: 'weapon', weapon: 'firework' });
   // 气血掉到八成（354 × 0.8 = 283）就先生花：回血还白送一手
   assert.deepEqual(guideAction(view({ hp: [283, 354] })), { kind: 'skill', skill: 'bloom' });
-  assert.deepEqual(guideAction(view({ hp: [284, 354] })), { kind: 'skill', skill: 'whale-song' });
-  // 对方掉到四成（354 × 0.4 = 141.6）换拳心剑收头
+  assert.deepEqual(guideAction(view({ hp: [284, 354], foe: foeNoEye })), { kind: 'skill', skill: 'myriad-self' });
+  // 对方掉到四成（354 × 0.4 = 141.6）就用拳心剑：一场只一次，残血那几手比碎层值钱
   assert.deepEqual(guideAction(view({ hp: [354, 141] })), { kind: 'skill', skill: 'finger-sword' });
-  assert.deepEqual(guideAction(view({ hp: [354, 142] })), { kind: 'skill', skill: 'whale-song' });
-  // 自己是 1 号：血量按自己那一格看
-  assert.deepEqual(guideAction(view({ self: 1, hp: [354, 283] })), { kind: 'skill', skill: 'bloom' });
-  // 对方被控着（跳过的那拍还没消化）：这一手绝不丢控制，先上万我挡三下
-  assert.deepEqual(guideAction(view({ foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: true } })), {
+  assert.deepEqual(guideAction(view({ hp: [354, 142], foe: foeNoEye })), { kind: 'skill', skill: 'myriad-self' });
+  // 魂影（万我，X23）：每层只碎「一下」，必中的烟花 / 拳心剑也照挡 → 先用多段法宝碎层
+  const mirrored = { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: false, mirror: 3 };
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { used: [] })), { kind: 'weapon', weapon: 'juggle' });
+  // 三球不在手上就看银托盘（末段必中不吃闪避，碎的层比扑克多），再退到扑克（2 段）
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['poker', 'firework'], skills: [], used: [] })), {
+    kind: 'weapon',
+    weapon: 'poker',
+  });
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['tray', 'firework'], skills: [], used: [] })), {
+    kind: 'weapon',
+    weapon: 'tray',
+  });
+  // 两件都在手：银托盘（1.5 层）排在扑克（1.2 层）前面
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['poker', 'tray'], skills: [], used: [] })), {
+    kind: 'weapon',
+    weapon: 'tray',
+  });
+  // 手上全是单发法宝：碎不动，照旧丢烟花（必中还是比吃身法闪避强）
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['water-gun', 'firework'], skills: [], used: [] })), {
+    kind: 'weapon',
+    weapon: 'firework',
+  });
+  // 收头排在碎魂影前面：对面已经残血，先打一发必中的拳心剑，别拿多段法宝换一层魂影
+  assert.deepEqual(guideAction(view({ hp: [354, 100], foe: mirrored }, { used: [] })), {
+    kind: 'skill',
+    skill: 'finger-sword',
+  });
+  // 魂影碎完（0 层）立刻回烟花；法宝被封时也不会挑用不了的多段法宝
+  assert.deepEqual(guideAction(view({ foe: { ...mirrored, mirror: 0 } }, { used: [] })), {
+    kind: 'weapon',
+    weapon: 'firework',
+  });
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { used: [...SKILL_IDS], sealed: 'weapon' })), {
+    kind: 'unarmed',
+  });
+  // 糊着眼（墨汁，X8）：法宝 / 空手 55% 打空 → 先花额度放必中直伤（招式不判打空）
+  assert.deepEqual(guideAction(view({}, { used: [], blind: 3 })), { kind: 'skill', skill: 'blue-whale' });
+  // 蓝鲸用过了换五指拳心剑（也是切磋必中），两样都空了才回到法宝
+  assert.deepEqual(guideAction(view({}, { used: ['blue-whale'], blind: 1 })), {
+    kind: 'skill',
+    skill: 'finger-sword',
+  });
+  assert.deepEqual(guideAction(view({}, { used: ['blue-whale', 'finger-sword'], blind: 1 })), {
+    kind: 'weapon',
+    weapon: 'firework',
+  });
+  // 没糊着就不花这个额度，照旧丢法宝
+  assert.deepEqual(guideAction(view({}, { used: [] })), { kind: 'weapon', weapon: 'firework' });
+  // 糊眼排在回血 / 魂影之后：该生花先生花、对面挂着魂影先碎层
+  assert.deepEqual(guideAction(view({ hp: [283, 354] }, { used: [], blind: 2 })), { kind: 'skill', skill: 'bloom' });
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { used: [], blind: 2 })), { kind: 'weapon', weapon: 'juggle' });
+  // 万我也在糊眼之前：糊着眼的这一手先铺魂影，不急着花蓝鲸
+  assert.deepEqual(guideAction(view({ foe: foeNoEye }, { used: [], blind: 2 })), {
     kind: 'skill',
     skill: 'myriad-self',
   });
-  // 万我不在手上，才轮到鬼画（封一门被动）；鬼画也没有就吃苦吃亏
+  // 自己是 1 号：血量按自己那一格看
+  assert.deepEqual(guideAction(view({ self: 1, hp: [354, 283] })), { kind: 'skill', skill: 'bloom' });
+  // 对方被控着（跳过的那拍还没消化）：这一手绝不丢控制，先上万我挡三下
+  assert.deepEqual(guideAction(view({ foe: { ...foeNoEye, controlled: true } })), {
+    kind: 'skill',
+    skill: 'myriad-self',
+  });
+  // 带鬼眼的对手被控着：万我跳过，直接丢法宝
+  assert.deepEqual(guideAction(view({ foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: true } })), {
+    kind: 'weapon',
+    weapon: 'firework',
+  });
+  // 万我不在手上、法宝也全用不了，才回头用额度：鬼画（封一门被动）→ 吃苦吃亏
   assert.deepEqual(
     guideAction(
       view(
         { foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: true } },
-        { skills: ['whale-song', 'eat-hardship'], used: [] },
+        { weapons: [], skills: ['whale-song', 'eat-hardship'], used: [] },
       ),
     ),
     { kind: 'skill', skill: 'eat-hardship' },
   );
-  // 万我 / 墨汁都没了，补位换成必中爆发
+  // 有一发烟花可丢时，宁可平A也不把额度花在控制 / 大伤害上（镜像实测：加控制链会掉到 72.4%）
+  assert.deepEqual(guideAction(view({}, { skills: ['whale-song', 'dragon-palm'], used: [] })), {
+    kind: 'weapon',
+    weapon: 'firework',
+  });
+  // 万我没在手上、法宝也用不了，才轮到必中直伤
   assert.deepEqual(
     guideAction(
       view(
         { foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: true } },
-        { skills: ['whale-song', 'blue-whale'], used: [] },
+        { weapons: [], skills: ['whale-song', 'blue-whale'], used: [] },
       ),
     ),
     { kind: 'skill', skill: 'blue-whale' },
@@ -1493,29 +1562,46 @@ test('guideAction：生花 / 收头 / 控制链 / 补位 / 烟花（X26 额度�
     ),
     { kind: 'weapon', weapon: 'firework' },
   );
-  // 控制按几率排：没有鲸歌先出送友风（65%），不是魂牵梦绕（55%）
-  assert.deepEqual(guideAction(view({}, { skills: ['dream-chant', 'farewell-wind'], used: [] })), {
+  // 控制按几率排（法宝用不了时才轮到）：没有鲸歌先出送友风（65%），不是魂牵梦绕（55%）
+  assert.deepEqual(guideAction(view({}, { weapons: [], skills: ['dream-chant', 'farewell-wind'], used: [] })), {
     kind: 'skill',
     skill: 'farewell-wind',
+  });
+  // 额度只买万我：对手有鬼眼就跳过，其余时候直接丢法宝（蓝鲸 / 控制都在备用清单里）
+  assert.deepEqual(
+    guideAction(view({ foe: foeNoEye }, { skills: ['whale-song', 'blue-whale', 'myriad-self'], used: [] })),
+    { kind: 'skill', skill: 'myriad-self' },
+  );
+  assert.deepEqual(guideAction(view({}, { skills: ['whale-song', 'blue-whale', 'myriad-self'], used: [] })), {
+    kind: 'weapon',
+    weapon: 'firework',
+  });
+  assert.deepEqual(guideAction(view({}, { skills: ['whale-song', 'blue-whale'], used: [] })), {
+    kind: 'weapon',
+    weapon: 'firework',
+  });
+  assert.deepEqual(guideAction(view({}, { skills: ['whale-song', 'dragon-palm'], used: [] })), {
+    kind: 'weapon',
+    weapon: 'firework',
   });
   // 招都用完了：一直丢烟花（切磋里唯一必中的法宝）
   assert.deepEqual(guideAction(view({}, { used: [...SKILL_IDS] })), { kind: 'weapon', weapon: 'firework' });
   // 法宝被封 / 没有法宝：落到空手，不硬塞一个用不了的
   assert.deepEqual(guideAction(view({}, { used: [...SKILL_IDS], sealed: 'weapon' })), { kind: 'unarmed' });
-  // 旧客户端没有 foe.controlled：按平A次数隔手（刚控过、还没垫手就先补位）
+  // 旧客户端没有 foe.controlled：按平A次数隔手（刚控过、还没垫手就先别连控）
   const legacy = (swings?: number): BattleView => ({
     self: 0,
     hp: [354, 354],
     maxHp: [354, 354],
     you: {
-      weapons: [...WEAPON_IDS],
-      skills: [...SKILL_IDS],
+      weapons: [],
+      skills: ['whale-song', 'farewell-wind'],
       used: ['whale-song'],
       ...(swings === undefined ? {} : { swings }),
     },
     foe: { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS] },
   });
-  assert.deepEqual(guideAction(legacy(0)), { kind: 'skill', skill: 'myriad-self' });
+  assert.deepEqual(guideAction(legacy(0)), { kind: 'unarmed' });
   assert.deepEqual(guideAction(legacy(1)), { kind: 'skill', skill: 'farewell-wind' });
   // 更旧的客户端连出手计数也没有：不做穿插，按顺序直接放
   assert.deepEqual(guideAction(legacy()), { kind: 'skill', skill: 'farewell-wind' });

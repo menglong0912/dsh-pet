@@ -69,6 +69,12 @@ const fakeFighter: Fighter = {
 const fakeCard = sparCardOf(fakeFighter, 1);
 const HOST_NONCE = 'b'.repeat(64);
 
+/** 今天日记里每一行的文字（断了那一场也写一条，带断在第几手 / 什么原因） */
+function diaryTexts(home: string): string[] {
+  const day = JSON.parse(readFileSync(join(home, 'diary', `${diaryDate(Date.now())}.json`), 'utf8')) as DiaryDay;
+  return day.events.map((event) => event.text);
+}
+
 /** 假对面（串门切磋）：按后备挑法应战，逐手局的每一手经 sparTurn 递进来 */
 async function fakeLiveSparHost(): Promise<{
   host: VisitHost;
@@ -337,6 +343,9 @@ test('X19 串门切磋逐手局：对面不再回手，按掉线收，不记账�
         clicks.push('修炼/快进');
         await until(() => said.some((text) => text.includes('切磋断了')), '掉线说了一句', 1_000);
         assert.equal(fightCount(home), 0, '掉线不记账');
+        const broken = diaryTexts(home).filter((text) => text.includes('串门切磋断了'));
+        assert.equal(broken.length, 1, '断了也在日记里留一行');
+        assert.match(broken[0]!, /第 \d+ 手/, '日记带上断在第几手、什么原因');
         await until(
           () =>
             (windowOn('/app/guest')?.destroyed ?? true) &&
@@ -565,6 +574,13 @@ test('X19 隔空切磋逐手局（应战方）：对面一直不传下一手，�
         // 之后一手都不发：应战方等 200ms 就按掉线
         await until(() => said.some((text) => text.includes('切磋断了')), '掉线说了一句', 1_000);
         assert.equal(fightCount(home), 0, '掉线不记账');
+        const broken = diaryTexts(home).filter((text) => text.includes('隔空切磋断了'));
+        assert.equal(broken.length, 1, '应战方这边断了也留一行日记');
+        assert.match(
+          broken[0]!,
+          /和 小李 家的 阿花 隔空切磋断了（第 \d+ 手等对面出手超时）/,
+          '日记写清对手、第几手与原因',
+        );
         await until(
           () =>
             (windowOn('/app/guest')?.destroyed ?? false) &&

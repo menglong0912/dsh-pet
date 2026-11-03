@@ -436,6 +436,14 @@ export function createSpar(ctx: FeatureContext): Spar {
       // 逐手一场事先不知道多久：占住宠物（holdPet 会夹到 /lock 的上限），第一段演出由 ready 挡在锁后面
       await held;
       events = await live.done;
+      // 掉线（`done` 回 null）：两边都不记账，但日记里留一行原因，事后能对上是哪一步断的
+      if (!events && !ctx.state.disposed) {
+        const why = live.failure() ?? '原因不明';
+        const kind = show.live.farewell === true ? '串门切磋' : '隔空切磋';
+        const text = `和 ${show.foeLabel} ${kind}断了（${why}），这场两边都不记账`;
+        log(`切磋断了：${text}`);
+        diary.note(Date.now(), 'cultivate', text);
+      }
       if (ctx.state.liveBattle === live) ctx.state.liveBattle = null;
       if (ctx.state.forfeitNow === forfeitHook) ctx.state.forfeitNow = null;
       if (show.live.role === 'server' && ctx.state.liveTurn === turn) ctx.state.liveTurn = null;

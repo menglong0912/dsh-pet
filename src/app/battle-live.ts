@@ -580,6 +580,8 @@ export interface LiveServerOptions extends LiveVersusOptions {
 /** 一场逐手对传：`done` 在演完 / 掉线 / 收摊时结算（掉线、收摊回 null） */
 export interface LiveVersus {
   done: Promise<BattleEvent[] | null>;
+  /** 这一场为什么断了（`done` 回 null 时的原因，给 features 写日记 / 日志用）；正常收场为 null */
+  failure(): string | null;
   /** 快进：本地剩下的手全按后备挑法、不再等 AI / 手动；仍按协议把出手传完 */
   skip(): void;
   /**
@@ -637,6 +639,7 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
   let disposed = false;
   let settled = false;
   let forfeited = false;
+  let breakReason: string | null = null;
   let forfeitSent = false;
   let forfeitConfirmed = false;
   let confirmForfeit: (() => void) | null = null;
@@ -660,6 +663,12 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
     confirmForfeit?.();
     confirmForfeit = null;
     resolveDone(events);
+  };
+
+  /** 掉线 / 收摊：先记下原因再收场（`failure()` 给 features 写日记、对日志用） */
+  const fail = (reason: string): void => {
+    breakReason ??= reason;
+    finish(null);
   };
 
   /** 本地认输：本方负；对面认输：对方负（本地胜） */
@@ -734,17 +743,18 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
       let result = compute();
       latestEvents = result.events;
       while (true) {
-        if (disposed) return finish(null);
+        if (disposed) return fail('本机收摊');
         if (forfeited) {
           await forfeitConfirmedWait;
           if (settled) return;
           if (forfeitConfirmed) return settleForfeit(options.local);
-          return finish(null);
+          return fail('认输没确认');
         }
         if (!result.need) {
           await play(live.push(result.events));
           if (forfeited) continue;
-          return finish(disposed ? null : result.events);
+          if (disposed) return fail('本机收摊');
+          return finish(result.events);
         }
         const need = result.need;
         const index = actions[0].length + actions[1].length;
@@ -770,7 +780,7 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
         })();
         // 一边问下一手一边把上一段演完（§X17 边演边想）
         await play(live.push(result.events));
-        if (disposed) return finish(null);
+        if (disposed) return fail('本机收摊');
         if (!decided && !fastForward) options.think();
         let picked: { action?: Action; line?: string; peerForfeit?: true } | null;
         try {
@@ -798,12 +808,12 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
             await forfeitConfirmedWait;
             if (settled) return;
             if (forfeitConfirmed) return settleForfeit(options.local);
-            return finish(null);
+            return fail('认输没确认');
           }
           options.log(`逐手对传：这一手断了（${error instanceof Error ? error.message : String(error)}），按掉线`);
-          return finish(null);
+          return fail(`第 ${index + 1} 手：${error instanceof Error ? error.message : String(error)}`);
         }
-        if (disposed) return finish(null);
+        if (disposed) return fail('本机收摊');
         if (picked?.peerForfeit) {
           // 对面认输；如果本地也在认输，按本地认输记负
           return settleForfeit(forfeited ? options.local : opponent);
@@ -818,9 +828,9 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
           await forfeitConfirmedWait;
           if (settled) return;
           if (forfeitConfirmed) return settleForfeit(options.local);
-          return finish(null);
+          return fail('认输没确认');
         }
-        if (!picked?.action) return finish(null);
+        if (!picked?.action) return fail('对面没给这一手');
         if (picked.line) decideLines.set(result.events.length, picked.line);
         // 自家这一手也发给对面（对面要过 legalActions，收下这一场才往下走）
         if (local) {
@@ -828,7 +838,7 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
             options.log(`逐手对传：这一手没送到（${error instanceof Error ? error.message : String(error)}），按掉线`);
             return null;
           });
-          if (disposed) return finish(null);
+          if (disposed) return fail('本机收摊');
           if (forfeited) {
             // 对面收下了这一手才会先记它；本地补上这一手再按认输结算
             if (reply?.ok && !reply.forfeit) {
@@ -839,11 +849,11 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
             await forfeitConfirmedWait;
             if (settled) return;
             if (forfeitConfirmed) return settleForfeit(options.local);
-            return finish(null);
+            return fail('认输没确认');
           }
-          if (!reply) return finish(null);
+          if (!reply) return fail(`第 ${index + 1} 手没送到`);
           if (reply.ok && reply.forfeit) return settleForfeit(opponent);
-          if (!reply.ok) return finish(null);
+          if (!reply.ok) return fail(`第 ${index + 1} 手对面没收（${reply.reason}）`);
         }
         actions[need.side].push(picked.action);
         result = compute();
@@ -852,12 +862,13 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
     } catch (error) {
       if (forfeited) return;
       options.log(`逐手对传：这一场中断了（${error instanceof Error ? error.message : String(error)}）`);
-      finish(null);
+      fail(`对传异常（${error instanceof Error ? error.message : String(error)}）`);
     }
   })();
 
   return {
     done,
+    failure: () => breakReason,
     skip() {
       if (fastForward || disposed || settled) return;
       fastForward = true;
@@ -884,14 +895,14 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
             return;
           }
           options.log(`逐手对传：认输没确认（${reply.ok ? '对面没有回认输' : reply.reason}），按掉线`);
-          finish(null);
+          fail('认输没确认');
         },
         (error: unknown) => {
           if (settled) return;
           options.log(`逐手对传：认输没送到（${error instanceof Error ? error.message : String(error)}），按掉线`);
           confirmForfeit?.();
           confirmForfeit = null;
-          finish(null);
+          fail('认输没送到');
         },
       );
     },
@@ -903,7 +914,7 @@ export function startLiveClient(options: LiveClientOptions): LiveVersus {
       networkAbort.abort();
       current?.dispose();
       kickForfeit();
-      finish(null);
+      fail('本机收摊（关窗口 / 退出串门）');
     },
     turn: () => Promise.resolve({ ok: false, reason: 'not-visiting' as const }),
   };
@@ -933,6 +944,7 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
   let disposed = false;
   let settled = false;
   let settledByForfeit = false;
+  let breakReason: string | null = null;
   let forfeitKicks: (() => void)[] = [];
   let resolveDone: (events: BattleEvent[] | null) => void = () => undefined;
   const done = new Promise<BattleEvent[] | null>((resolve) => (resolveDone = resolve));
@@ -949,6 +961,12 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
     settled = true;
     current = null;
     resolveDone(events);
+  };
+
+  /** 掉线 / 收摊：先记下原因再收场（`failure()` 给 features 写日记、对日志用） */
+  const fail = (reason: string): void => {
+    breakReason ??= reason;
+    finish(null);
   };
 
   const opponent: 0 | 1 = options.local === 0 ? 1 : 0;
@@ -1047,12 +1065,12 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
       let result = compute();
       latestEvents = result.events;
       while (true) {
-        if (disposed) return finish(null);
+        if (disposed) return fail('本机收摊');
         if (settled) return;
         if (!result.need) {
           await play(live.push(result.events));
           if (settled) return;
-          if (disposed) return finish(null);
+          if (disposed) return fail('本机收摊');
           return finish(result.events);
         }
         const need = result.need;
@@ -1063,7 +1081,7 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
           nextInbound().then((request) => ({ request })),
           forfeitWait.then(() => ({ kicked: true as const })),
         ]);
-        if (disposed) return finish(null);
+        if (disposed) return fail('本机收摊');
         if (settled) return;
         let request: LiveInbound | null;
         if ('kicked' in arrival) {
@@ -1083,7 +1101,7 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
         }
         if (!request) {
           options.log('逐手对传：等对面出手超时，按掉线');
-          return finish(null);
+          return fail(`第 ${index + 1} 手等对面出手超时`);
         }
         if (request.forfeit) {
           if (request.index === index || request.index === index - 1) {
@@ -1098,13 +1116,13 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
         if (request.index !== index) {
           request.reply({ ok: false, reason: 'late' });
           options.log(`逐手对传：对面这一手的序号 ${request.index} 对不上 ${index}，按掉线`);
-          return finish(null);
+          return fail(`第 ${index + 1} 手对面序号对不上（来了 ${request.index + 1}）`);
         }
         if (need.side === options.local) {
           if (request.action) {
             request.reply({ ok: false, reason: 'illegal' });
             options.log('逐手对传：还没轮到对面，它却带了一手，按掉线');
-            return finish(null);
+            return fail('还没轮到对面，它却带了一手');
           }
           pendingRequest = request;
           // 一边演上一段一边想这一手（§X17 边演边想）
@@ -1117,7 +1135,7 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
           if (disposed) {
             pendingRequest = null;
             request.reply({ ok: false, reason: 'not-visiting' });
-            return finish(null);
+            return fail('本机收摊');
           }
           if (settled) return;
           if (!decided && !fastForward) options.think();
@@ -1133,7 +1151,7 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
             if (disposed) {
               pendingRequest = null;
               request.reply({ ok: false, reason: 'not-visiting' });
-              return finish(null);
+              return fail('本机收摊');
             }
             if (settled) return;
             if (picked.line) decideLines.set(result.events.length, picked.line);
@@ -1151,12 +1169,12 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
           if (!request.action || !isLegal(need.view, request.action)) {
             request.reply({ ok: false, reason: 'illegal' });
             options.log('逐手对传：对面这一手不合法，按掉线');
-            return finish(null);
+            return fail('对面这一手不合法');
           }
           actions[need.side].push(request.action);
           request.reply({ ok: true });
           await Promise.race([playing, forfeitWait]);
-          if (disposed) return finish(null);
+          if (disposed) return fail('本机收摊');
           if (settled) return;
           if (settleQueuedForfeit(index)) return;
         }
@@ -1166,12 +1184,13 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
     } catch (error) {
       if (settled) return;
       options.log(`逐手对传：这一场中断了（${error instanceof Error ? error.message : String(error)}）`);
-      finish(null);
+      fail(`对传异常（${error instanceof Error ? error.message : String(error)}）`);
     }
   })();
 
   return {
     done,
+    failure: () => breakReason,
     skip() {
       if (fastForward || disposed || settled) return;
       fastForward = true;
@@ -1193,7 +1212,7 @@ export function startLiveServer(options: LiveServerOptions): LiveVersus {
       kickForfeit();
       wake?.();
       for (const request of inbound.splice(0)) request.reply({ ok: false, reason: 'not-visiting' });
-      finish(null);
+      fail('本机收摊（关窗口 / 退出串门）');
     },
     turn(index, action, forfeit) {
       if (disposed) return Promise.resolve({ ok: false, reason: 'not-visiting' as const });

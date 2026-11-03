@@ -371,6 +371,8 @@ export interface BattleView {
     moves?: MoveId[];
     /** 这场用掉的带次数限制的招，每次使用追加一个编号（Y0） */
     moveUses?: MoveId[];
+    /** 糊着眼（墨汁，X8）：法宝 / 空手还要过几次 55% 打空；缺省 / 0 是没有 */
+    blind?: number;
     /** 切磋（X26）：本场还剩几次主动技额度；只在切磋局填，其他模式不出现 */
     skillUsesLeft?: number;
     /** 这场空手 / 法宝出手了几次（X20 攻略：控制之间要隔一手平A） */
@@ -1193,6 +1195,8 @@ export function runFight(
           : {}),
         // 切磋（X26）才给额度；其他模式的 view 与以前逐字段一致
         ...(sparRules ? { skillUsesLeft: me.skillUses } : {}),
+        // 糊着眼（墨汁，X8）这一手法宝 / 空手有 55% 打空：攻略据此改用招式
+        ...(me.blind > 0 ? { blind: me.blind } : {}),
       },
       foe: {
         weapons: foe.f.weapons,
@@ -2061,28 +2065,32 @@ export function statCap(stage: number): { hp: number; power: number; agility: nu
 const GUIDE_CONTROLS: readonly SkillId[] = ['whale-song', 'farewell-wind', 'lion-roar', 'dream-chant'];
 
 /**
- * 攻略的补位招（控制没到期 / 控制放完时那一手），按模拟里的价值排。
+ * 攻略先花额度的一门：万我（三层魂影各白挡一下）。
  *
- * 万我打头：三层魂影白挡三下，是实测最值的一手（19 招对手 4 万场：0.857）。
- * 鬼画 / 吃苦吃亏排在它后面当备选——鬼画要花一次额度封一门随机被动，封到鬼眼 / 会心就很亏；
- * 实测把鬼画提到第一，19 招对手的胜率会从 0.857 掉到 0.726，所以只在万我已经用掉时才轮到它。
- * 再往后是蓝鲸现世这类必中爆发和零碎伤害。
- *
- * 墨汁（三手五成半打空）实测不如换成一手伤害；鲸派气功 / 前有古人两拍换一拍；鬼敲门没有即时收益。
- * 没有的招直接跳过。
+ * 为什么只剩它：一次出手合计封顶 30% 之后，必中的烟花一手就有 ~106，而蓝鲸现世是 ~96、
+ * 控制链约 77——同样的额度、同样的这一手，都不如直接丢法宝。19 招配装镜像实测：
+ * 只万我 76.5%，多放一手蓝鲸 70.1%，再放控制链 46.8%。
  */
-const GUIDE_FILLERS: readonly SkillId[] = [
-  'myriad-self',
+const GUIDE_SKILLS: readonly SkillId[] = ['myriad-self'];
+
+/**
+ * 法宝全用不了（被鬼手 / 万我大手印封住，或者手上没刀）时的备用招：必中直伤 → 控制链
+ * （按控住几率排）→ 大伤害 → 收益算不清的零碎。
+ *
+ * 不碰的招：鲸派气功（蓄力 + 自动释放两拍换一拍）、前有古人（先挂一手、下一手才补）。
+ */
+const GUIDE_FALLBACK: readonly SkillId[] = [
+  'blue-whale',
+  ...GUIDE_CONTROLS,
+  'dragon-palm',
+  'whale-gulp',
   'ghost-painting',
   'eat-hardship',
-  'blue-whale',
   'shadow-step',
   'ghost-hand',
   'myriad-palm',
   'reverse-seal',
   'abyss-field',
-  'dragon-palm',
-  'whale-gulp',
   'ghost-blood',
 ];
 
@@ -2108,31 +2116,55 @@ const GUIDE_WEAPONS: readonly WeaponId[] = [
   'whale-tail',
 ];
 
+/**
+ * 破魂影（万我，X23）用的法宝：魂影一层只碎「一下」，多段法宝一发能连着碎好几层。
+ * 但「每一下」都要先过对方的 35% 身法闪避、再吃 10% 水母分身，所以一层不是稳的：
+ *   三球 3 段 ≈ 1.8 层 / 银托盘 2 段（末段必中不吃闪避）≈ 1.5 / 扑克 2 段 ≈ 1.2；单发的必中烟花、拳心剑只有 0.9。
+ * 也就是说 3 层魂影通常要两发才清干净——三球不是「破掉万我」，是把手数从 3 发换到 2 发。
+ * 真正的破解只有鬼眼（X22：魂影一次都替不了），但切磋卡按两边招式数的短边裁，对手招式少时它进不了卡。
+ */
+const GUIDE_MIRROR_BREAKERS: readonly WeaponId[] = ['juggle', 'tray', 'poker'];
+
+/**
+ * 糊着眼（墨汁，X8）时优先花的额度：法宝 / 空手每一下 55% 打空，必中也不管用，招式不判打空。
+ * 必中直伤（蓝鲸现世 / 五指拳心剑）一刀 ≈ 90，糊着眼的烟花只剩四成半 ≈ 48，怎么换都值。
+ */
+const GUIDE_BLIND_SKILLS: readonly SkillId[] = ['blue-whale', 'finger-sword'];
+
 /** 攻略：自己气血掉到八成先回血（生花回 18% 还白送一手，等于拿 1 次额度换 2 手） */
 const GUIDE_BLOOM_AT = 8;
-/** 攻略：对方掉到四成换五指拳心剑收头（必中、穿护体） */
+/**
+ * 攻略：对方掉到**四成**就用五指拳心剑（必中、穿护体），并且排在碎魂影之前。
+ * 切磋的封顶是「单次伤害 30%」（按每一下算，不是按手合计），必中的烟花本来就是稳定的大头；
+ * 拳心剑只赢在「不怕闪避、穿护体、一场只一次」，所以越早打出去越不亏，攒着反而少打一发。
+ * 镜像实测（两边同配装、每格 1000 场，对照「碎层先 + 六成收头」）：
+ *   19 招卡：头对头 52.3% / 50.1%，对只丢法宝 82.5% / 80.0%，对随机 AI 98.2% / 97.1%；
+ *   满招（带鬼眼）：53.9% / 52.4%、59.4% / 54.7%、94.1% / 92.0%。
+ */
 const GUIDE_FINISH_AT = 4;
 
 /**
- * 攻略出招（X26 主动技额度制下的实测最优）。
+ * 攻略出招（X26 主动技额度制；2026-11 重新标定）。
  *
- * 本地模拟（切磋规则：伤害 ×0.65、单次 ≤30% 气血、每方 3 次主动技），每种场景 3 万场：
- *   - 本机配装对随机对手：旧攻略 0.65 → 新 0.75；
- *   - 满配装对「自动挑法」：旧攻略 0.66 → 新 0.81；
- *   - 同一份配装头对头：新攻略 0.66–0.70（旧攻略 0.30–0.34）；
- *   - 随机配装：旧 0.56 → 新 0.68。
- *
- * 打法是「用额度换手数」：
+ * 打法是「铺一手万我，然后法宝平推」：
  *   1. 气血不到八成先生花：回 18% 还白送一手，一手当两手用；
- *   2. 对方不到四成换拳心剑收头：必中穿护体，不给假死 / 泡泡拖时间；
- *   3. 该控就控：鲸歌 → 送友风 → 狮子吼 → 魂牵梦绕（按控住几率），
- *      但对方「被控着、跳过的那拍还没消化」时再控必被抗（引擎直接判负），这一手必须换补位；
- *   4. 补位按价值：万我（三层魂影各挡一下）最值，鬼画 / 吃苦吃亏当备选，再上必中爆发；
- *   5. 额度用完（切磋每场 3 次）就一直丢法宝：烟花必中第一，鸡毛掸子每下把对方推后 0.35 个间隔。
+ *   2. 对方不到四成先收头（拳心剑，必中穿护体），排在碎魂影之前：残血那几手比碎一层魂影值钱；
+ *   3. 对方身上挂着魂影（刚放完万我）先用多段法宝碎层：魂影按「每一下」扣，一发三球期望碎 1.8 层，
+ *      一发烟花只碎 0.9 层——层数结清了，后面的伤害才打得进去；
+ *   4. `GUIDE_SKILLS`：万我（对手没鬼眼时）；
+ *   5. 糊着眼（墨汁）时改花额度：法宝 / 空手 55% 打空，招式和糊眼无关，先把必中直伤（蓝鲸 / 拳心剑）打出去；
+ *   6. 之后一直丢法宝：烟花必中第一，银托盘末段必中，鸡毛掸子每下把对方推后 0.35 个间隔；
+ *   7. 法宝全用不了（被封 / 没刀）才回头用 `GUIDE_FALLBACK`：蓝鲸现世 → 控制链 → 大伤害 → 零碎。
  *
- * 不碰的招：鲸派气功（蓄力 + 自动释放两拍换一拍）、前有古人（先挂一手、下一手才补）、
- * 墨汁 / 鬼敲门 / 鬼画这类没有即时收益的，以及所有不认识的主动招——额度只有 3 次，
- * 宁可丢法宝也不把额度花在算不清的招上。
+ * 魂影那几层为什么不等它自己花掉：烟花、拳心剑都是「一下」，各换 0.9 层，等于三手换零伤害；
+ * 三球一发期望 1.8 层，同样三手能清掉 5 层。
+ *
+ * 为什么其余主动招退到备用（19 招配装镜像，每格 800 场）：
+ *   只万我：对只丢法宝 82.9%、对开局喷墨 52.4%、对随机 AI 97.8%；
+ *   多放一手蓝鲸：82.3% / 47.9% / 95.9%；再放控制链：72.4% / 47.0% / 93.0%。
+ *   同样的额度、同样的这一手，不如直接丢法宝。
+ * 注意：满招 32 张、双方都带鬼眼时结论会翻——那套卡里万我被鬼眼废掉，控制链反而是好的额度去处；
+ * 那是另一套卡型，要分流再单独标定，别拿这条去套满配局。
  *
  * 旧客户端没有 `foe.controlled` 时退回按平A次数隔手；连出手计数都没有就按顺序直接放。
  */
@@ -2141,11 +2173,43 @@ export function guideAction(view: BattleView): Action {
   const has = (skill: SkillId): boolean => legal.some((a) => a.kind === 'skill' && a.skill === skill);
   const self = view.self;
   const foe = self === 0 ? 1 : 0;
-  // 八成、四成都用整数比较（分子 ×10 比百分数），免得浮点边界抖动
+  // 武器只从合法清单里挑：被封法宝 / 已经空了都会自然落到空手
+  const weapons = legal.filter((a): a is Extract<Action, { kind: 'weapon' }> => a.kind === 'weapon');
+  // 八成、六成都用整数比较（分子 ×10 比百分数），免得浮点边界抖动
   if (has('bloom') && view.hp[self] * 10 <= view.maxHp[self] * GUIDE_BLOOM_AT) return { kind: 'skill', skill: 'bloom' };
+  // 收头排在碎层之前：对面已经残血，先把一发必中打出去，别拿多段法宝换一层魂影
   if (has('finger-sword') && view.hp[foe] * 10 <= view.maxHp[foe] * GUIDE_FINISH_AT)
     return { kind: 'skill', skill: 'finger-sword' };
+  // 魂影（万我，X23）：每层挡一整下，必中的烟花、拳心剑也照挡。先用多段法宝把层数碎掉，
+  // 再回去丢法宝——一发三球期望碎 1.8 层，比单发法宝的 0.9 层划算
+  if ((view.foe.mirror ?? 0) > 0) {
+    for (const id of GUIDE_MIRROR_BREAKERS) {
+      const pick = weapons.find((a) => a.weapon === id);
+      if (pick) return pick;
+    }
+  }
 
+  for (const skill of GUIDE_SKILLS) {
+    // 鬼眼（X22）看穿幻象：对手带鬼眼时三层魂影一次都替不了，万我这一手等于白扔——
+    // 实测（32 招满配、双方同配装）跳过它能把对「只丢法宝」的胜率从 19.7% 拉到 50.9%。
+    if (skill === 'myriad-self' && view.foe.skills.includes('ghost-eye')) continue;
+    if (has(skill)) return { kind: 'skill', skill };
+  }
+
+  // 糊着眼（墨汁，X8）：法宝 / 空手 55% 打空，必中也救不回来；招式不判打空。
+  // 手上还有必中直伤的主动技就先把额度花掉，比硬丢烟花多一倍账面。
+  if ((view.you.blind ?? 0) > 0) {
+    for (const skill of GUIDE_BLIND_SKILLS) {
+      if (has(skill)) return { kind: 'skill', skill };
+    }
+  }
+
+  for (const id of GUIDE_WEAPONS) {
+    const pick = weapons.find((a) => a.weapon === id);
+    if (pick) return pick;
+  }
+
+  // 法宝全用不了，才把额度花在控制 / 大伤害上
   // 对方正被控着（跳过的那拍还没消化）就绝不丢控制——controlLands 会直接判负；
   // 视野没带这个状态（旧客户端）就退一步按平A次数隔手；再旧就按顺序直接放
   const controlDue =
@@ -2153,17 +2217,9 @@ export function guideAction(view: BattleView): Action {
       ? view.you.swings === undefined ||
         view.you.swings >= view.you.used.filter((s) => GUIDE_CONTROLS.includes(s)).length
       : !view.foe.controlled;
-  if (controlDue) for (const skill of GUIDE_CONTROLS) if (has(skill)) return { kind: 'skill', skill };
-
-  for (const skill of GUIDE_FILLERS) {
+  for (const skill of GUIDE_FALLBACK) {
+    if (!controlDue && GUIDE_CONTROLS.includes(skill)) continue;
     if (has(skill)) return { kind: 'skill', skill };
   }
-
-  // 武器只从合法清单里挑：被封法宝 / 已经空了都会自然落到空手
-  const weapons = legal.filter((a): a is Extract<Action, { kind: 'weapon' }> => a.kind === 'weapon');
-  for (const id of GUIDE_WEAPONS) {
-    const pick = weapons.find((a) => a.weapon === id);
-    if (pick) return pick;
-  }
-  return weapons[0] ?? { kind: 'unarmed' };
+  return { kind: 'unarmed' };
 }
