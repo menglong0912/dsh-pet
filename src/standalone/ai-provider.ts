@@ -247,7 +247,8 @@ export function createStandaloneAi(
       if (isRateLimitFailure(error)) {
         throw new Error('Standalone AI provider rate limit reached. Please wait.', { cause: error });
       }
-      // 视觉请求被服务端按客户端错误拒绝（400/404/415/422）：记住当前设置不支持看图，之后直接降级成纯文本
+      // 视觉请求被服务端当作「图片不受支持」拒绝：记住当前设置不支持看图，之后直接降级成纯文本
+      // （415/422 直接算；400/404 还要求错误文案确实在说图片，见 ai-transport 的 isUnsupportedImageFailure）
       if (vision && isUnsupportedImageFailure(error)) {
         visionUnsupported = true;
         logger.warn('Standalone AI model rejected image input; falling back to text.');

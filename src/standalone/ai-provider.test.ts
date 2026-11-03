@@ -505,10 +505,10 @@ test('streamVision sends the image to the configured endpoint on both protocols,
   );
 });
 
-test('vision 400 / 404 / 415 / 422 marks the model as not accepting images; other failures do not', async () => {
+test('vision 415 / 422 always mark the model as not accepting images', async () => {
   const image = 'data:image/jpeg;base64,AAAA';
   const vision = { system: 'persona', prompt: 'look', image };
-  for (const status of [400, 404, 415, 422]) {
+  for (const status of [415, 422]) {
     await fixture(
       async (ai) => {
         assert.equal(ai.canSeeScreen(), true);
@@ -519,6 +519,46 @@ test('vision 400 / 404 / 415 / 422 marks the model as not accepting images; othe
         assert.equal(ai.canSeeScreen(), true);
       },
       async () => new Response('test-secret', { status }),
+    );
+  }
+});
+
+test('vision 400 / 404 only mark the model when the provider says it is about the image', async () => {
+  const image = 'data:image/jpeg;base64,AAAA';
+  const vision = { system: 'persona', prompt: 'look', image };
+  // 服务端明确在抱怨图片（DeepSeek 这种「上传的图片不支持」就长这样）
+  for (const status of [400, 404]) {
+    await fixture(
+      async (ai) => {
+        assert.equal(ai.canSeeScreen(), true);
+        await assert.rejects(collect(ai.streamVision(vision)), /^Error: Standalone AI model does not accept images\.$/);
+        assert.equal(ai.canSeeScreen(), false);
+      },
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                'You have uploaded an unsupported image. Please make sure your image is valid and has one of the following formats: webp, png, jpeg, and gif.',
+              type: 'invalid_request_error',
+            },
+          }),
+          { status, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+  }
+  // 同一个 400 但跟图片无关（模型名写错 / 别的请求参数非法）：不能把视觉能力永久判死
+  for (const status of [400, 404]) {
+    await fixture(
+      async (ai) => {
+        await assert.rejects(collect(ai.streamVision(vision)));
+        assert.equal(ai.canSeeScreen(), true, `HTTP ${status}（非图片原因）不该被记成不支持看图`);
+      },
+      async () =>
+        new Response(JSON.stringify({ error: { message: 'Model Not Exist', type: 'invalid_request_error' } }), {
+          status,
+          headers: { 'content-type': 'application/json' },
+        }),
     );
   }
   for (const status of [401, 403, 429, 500]) {

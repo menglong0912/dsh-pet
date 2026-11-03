@@ -28,6 +28,15 @@ export type AiTransportEvent = { text?: string; refusal?: boolean };
 export const MAX_OUTPUT_TOKENS = 1024;
 /** 视觉请求被服务端按客户端错误拒绝（不是鉴权 / 限流 / 超时）：据此判断模型不支持看图 */
 const IMAGE_REJECTION_STATUSES: ReadonlySet<number> = new Set([400, 404, 415, 422]);
+/** 415/422 本身就是「媒体类型 / 内容实体不合法」，不看文案也能算视觉被拒 */
+const IMAGE_REJECTION_STATUSES_ALWAYS: ReadonlySet<number> = new Set([415, 422]);
+/**
+ * 400/404 的语义太宽：模型名写错、温度非法、图片格式或尺寸不合法、上下文超长都会是 400。
+ * 把它们一律当成「这模型不能看图」会让整个进程永久降级（`visionUnsupported` 只会被
+ * 重新保存设置或重启清掉），而真正的原因跟视觉能力无关。所以这两个状态码还必须看文案：
+ * 只有服务端确实在说图片（image / vision / 多模态 …）才算视觉被拒。
+ */
+const IMAGE_HINT = /image|vision|multimodal|media[ _-]?type|图片|图像|视觉|多模态/i;
 const quiet = { debug() {}, info() {}, warn() {}, error() {} };
 
 /** `data:image/...;base64,` → Anthropic 图片块（只认桌宠截图会用的三种格式） */
@@ -172,8 +181,34 @@ export function isAuthenticationFailure(error: unknown): boolean {
 export function isRateLimitFailure(error: unknown): boolean {
   return error instanceof OpenAI.RateLimitError || error instanceof Anthropic.RateLimitError;
 }
-/** 从 SDK 错误里取 HTTP status：视觉请求被 400/404/415/422 拒绝 = 模型不支持看图 */
+/** 取 SDK 错误里可读的文案（只用于分类，不对外透出） */
+function rejectionDetail(error: unknown): string {
+  if (!error || typeof error !== 'object') return '';
+  const parts: string[] = [];
+  const push = (value: unknown): void => {
+    if (typeof value === 'string' && value !== '') parts.push(value);
+  };
+  push((error as { message?: unknown }).message);
+  push((error as { code?: unknown }).code);
+  const body = (error as { error?: unknown }).error;
+  if (body && typeof body === 'object') {
+    push((body as { message?: unknown }).message);
+    push((body as { code?: unknown }).code);
+    push((body as { type?: unknown }).type);
+  } else {
+    push(body);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * 视觉请求被服务端拒绝 = 模型不支持看图。
+ * 415 / 422 按状态码直接判；400 / 404 还要求文案在说图片，避免把「模型名写错」
+ * 之类的普通请求错误误记成「不支持看图」（见 IMAGE_HINT 的说明）。
+ */
 export function isUnsupportedImageFailure(error: unknown): boolean {
   const status = (error as { status?: unknown } | null)?.status;
-  return typeof status === 'number' && IMAGE_REJECTION_STATUSES.has(status);
+  if (typeof status !== 'number' || !IMAGE_REJECTION_STATUSES.has(status)) return false;
+  if (IMAGE_REJECTION_STATUSES_ALWAYS.has(status)) return true;
+  return IMAGE_HINT.test(rejectionDetail(error));
 }
