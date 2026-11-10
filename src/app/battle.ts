@@ -2122,6 +2122,10 @@ const GUIDE_WEAPONS: readonly WeaponId[] = [
  *   三球 3 段 ≈ 1.8 层 / 银托盘 2 段（末段必中不吃闪避）≈ 1.5 / 扑克 2 段 ≈ 1.2；单发的必中烟花、拳心剑只有 0.9。
  * 也就是说 3 层魂影通常要两发才清干净——三球不是「破掉万我」，是把手数从 3 发换到 2 发。
  * 真正的破解只有鬼眼（X22：魂影一次都替不了），但切磋卡按两边招式数的短边裁，对手招式少时它进不了卡。
+ *
+ * 反过来说：**自己带鬼眼时一层都不用碎**——`dealDamage` 的替挡判定带 `!hasSkill(me, 'ghost-eye')`，
+ * 魂影对自己既挡不住、层数也永远扣不掉，`foe.mirror` 会一直是 3。照旧进这个分支等于整场锁死在三球上
+ * （30 伤 / 段、还吃 35% 闪避）：满配镜像实测，对「开局先铺万我」的对手 0.270 → 0.751。
  */
 const GUIDE_MIRROR_BREAKERS: readonly WeaponId[] = ['juggle', 'tray', 'poker'];
 
@@ -2182,7 +2186,9 @@ export function guideAction(view: BattleView): Action {
     return { kind: 'skill', skill: 'finger-sword' };
   // 魂影（万我，X23）：每层挡一整下，必中的烟花、拳心剑也照挡。先用多段法宝把层数碎掉，
   // 再回去丢法宝——一发三球期望碎 1.8 层，比单发法宝的 0.9 层划算
-  if ((view.foe.mirror ?? 0) > 0) {
+  // 自带鬼眼（X22）时反过来：魂影既替不了自己、层数也扣不掉，碎层只会把整场锁死在三球上，
+  // 这时候照旧丢烟花（见 GUIDE_MIRROR_BREAKERS 的说明）。
+  if ((view.foe.mirror ?? 0) > 0 && !view.you.skills.includes('ghost-eye')) {
     for (const id of GUIDE_MIRROR_BREAKERS) {
       const pick = weapons.find((a) => a.weapon === id);
       if (pick) return pick;

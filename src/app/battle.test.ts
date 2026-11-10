@@ -1461,33 +1461,43 @@ test('guideAction：生花 / 收头 / 万我 / 蓝鲸 / 法宝平推（X26 额�
   assert.deepEqual(guideAction(view({ hp: [354, 142], foe: foeNoEye })), { kind: 'skill', skill: 'myriad-self' });
   // 魂影（万我，X23）：每层只碎「一下」，必中的烟花 / 拳心剑也照挡 → 先用多段法宝碎层
   const mirrored = { weapons: [...WEAPON_IDS], skills: [...SKILL_IDS], controlled: false, mirror: 3 };
-  assert.deepEqual(guideAction(view({ foe: mirrored }, { used: [] })), { kind: 'weapon', weapon: 'juggle' });
+  // 淬一下「自己没有鬼眼」的配装：带了鬼眼就不该去碎层（见下面的用例）
+  const noEye = SKILL_IDS.filter((s) => s !== 'ghost-eye');
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { skills: noEye, used: [] })), {
+    kind: 'weapon',
+    weapon: 'juggle',
+  });
   // 三球不在手上就看银托盘（末段必中不吃闪避，碎的层比扑克多），再退到扑克（2 段）
-  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['poker', 'firework'], skills: [], used: [] })), {
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['poker', 'firework'], skills: noEye, used: [] })), {
     kind: 'weapon',
     weapon: 'poker',
   });
-  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['tray', 'firework'], skills: [], used: [] })), {
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['tray', 'firework'], skills: noEye, used: [] })), {
     kind: 'weapon',
     weapon: 'tray',
   });
   // 两件都在手：银托盘（1.5 层）排在扑克（1.2 层）前面
-  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['poker', 'tray'], skills: [], used: [] })), {
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['poker', 'tray'], skills: noEye, used: [] })), {
     kind: 'weapon',
     weapon: 'tray',
   });
   // 手上全是单发法宝：碎不动，照旧丢烟花（必中还是比吃身法闪避强）
-  assert.deepEqual(guideAction(view({ foe: mirrored }, { weapons: ['water-gun', 'firework'], skills: [], used: [] })), {
-    kind: 'weapon',
-    weapon: 'firework',
-  });
+  assert.deepEqual(
+    guideAction(view({ foe: mirrored }, { weapons: ['water-gun', 'firework'], skills: noEye, used: [] })),
+    {
+      kind: 'weapon',
+      weapon: 'firework',
+    },
+  );
   // 收头排在碎魂影前面：对面已经残血，先打一发必中的拳心剑，别拿多段法宝换一层魂影
-  assert.deepEqual(guideAction(view({ hp: [354, 100], foe: mirrored }, { used: [] })), {
+  assert.deepEqual(guideAction(view({ hp: [354, 100], foe: mirrored }, { skills: noEye, used: [] })), {
     kind: 'skill',
     skill: 'finger-sword',
   });
+  // 自带鬼眼（X22）：魂影一层都替不了自己、层数也永远扣不掉，照旧丢烟花，别把整场锁死在三球上
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { used: [] })), { kind: 'weapon', weapon: 'firework' });
   // 魂影碎完（0 层）立刻回烟花；法宝被封时也不会挑用不了的多段法宝
-  assert.deepEqual(guideAction(view({ foe: { ...mirrored, mirror: 0 } }, { used: [] })), {
+  assert.deepEqual(guideAction(view({ foe: { ...mirrored, mirror: 0 } }, { skills: noEye, used: [] })), {
     kind: 'weapon',
     weapon: 'firework',
   });
@@ -1507,9 +1517,17 @@ test('guideAction：生花 / 收头 / 万我 / 蓝鲸 / 法宝平推（X26 额�
   });
   // 没糊着就不花这个额度，照旧丢法宝
   assert.deepEqual(guideAction(view({}, { used: [] })), { kind: 'weapon', weapon: 'firework' });
-  // 糊眼排在回血 / 魂影之后：该生花先生花、对面挂着魂影先碎层
+  // 糊眼排在回血 / 魂影之后：该生花先生花、对面挂着魂影先碎层（自己没鬼眼才碎）
   assert.deepEqual(guideAction(view({ hp: [283, 354] }, { used: [], blind: 2 })), { kind: 'skill', skill: 'bloom' });
-  assert.deepEqual(guideAction(view({ foe: mirrored }, { used: [], blind: 2 })), { kind: 'weapon', weapon: 'juggle' });
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { skills: noEye, used: [], blind: 2 })), {
+    kind: 'weapon',
+    weapon: 'juggle',
+  });
+  // 自带鬼眼时魂影不用碎，糊着眼就按糊眼处理：先花额度打必中直伤
+  assert.deepEqual(guideAction(view({ foe: mirrored }, { used: [], blind: 2 })), {
+    kind: 'skill',
+    skill: 'blue-whale',
+  });
   // 万我也在糊眼之前：糊着眼的这一手先铺魂影，不急着花蓝鲸
   assert.deepEqual(guideAction(view({ foe: foeNoEye }, { used: [], blind: 2 })), {
     kind: 'skill',
